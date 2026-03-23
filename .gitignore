@@ -6,3 +6,4 @@ __pycache__/
 .DS_Store
 jang-runtime/.build/
 jang-runtime/.swiftpm/
+research/
