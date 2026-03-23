@@ -47,8 +47,9 @@
 - **Nemotron-Cascade-2 in 10 GB** — IMO Gold Medal reasoning model at 130 tok/s on 16 GB MacBooks
 - **MiniMax: only JANG works** — MLX scores 25% (random), JANG scores 74%
 - **Nemotron-3-Super-120B in 43 GB** — first working Nemotron-H quantization for Apple Silicon
+- **Mistral Small 4 (119B) — first on Apple Silicon** — 82 tok/s, 5x faster prefill than MLX Community 4-bit, code/math/reasoning/VLM all working
 - **bfloat16 auto-detection** — fixes float16 overflow on 512-expert models
-- **Reasoning mode** — `<think>...</think>` with configurable thinking on/off
+- **Reasoning mode** — `<think>...</think>` / `[THINK]...[/THINK]` with configurable thinking on/off
 
 ## Results (200-question MMLU)
 
@@ -73,6 +74,21 @@ MLX cannot quantize 397B below 4-bit (float16 overflow). JANG solves this with b
 | MLX 6-bit | 71.0% | 94.5% | 23.9 GB | — |
 
 JANG_4M beats MLX 4-bit (93.0% vs 92.5%) at the same size.
+
+### Mistral Small 4 (119B-A6B) — First on Apple Silicon, fastest inference
+
+| Model | Size | Gen tok/s | Prefill tok/s | RAM | Features |
+|-------|:----:|:---------:|:-------------:|:---:|----------|
+| **JANG_2L** | **30 GB** | **82** | **216** | 40 GB | Code, math, [THINK] reasoning, VLM |
+| **JANG_4M** | **57 GB** | **80** | **202** | 68 GB | Code, math, [THINK] reasoning, VLM |
+| **JANG_6M** | **84 GB** | **74** | **160** | 95 GB | Code, math, [THINK] reasoning, VLM |
+| MLX Community 4-bit | 63 GB | 84 | 43 | 68 GB | VLM |
+
+JANG prefill is **5x faster** than MLX Community (216 vs 43 tok/s). Generation speed matches at ~80 tok/s. JANG_2L fits on 48 GB Macs — half the size of MLX 4-bit at comparable speed.
+
+119B total parameters, 6B active per token. MLA attention + 128 MoE experts + Pixtral vision. First model to support MLA + MoE quantization on Apple Silicon.
+
+*MMLU benchmarks in progress.*
 
 ### Nemotron-3-Super-120B — Only JANG can go below 4-bit
 
