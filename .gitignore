@@ -7,3 +7,14 @@ __pycache__/
 jang-runtime/.build/
 jang-runtime/.swiftpm/
 research/
+.DS_Store
+*.txt
+crack_*.py
+probe_*.py
+benchmark_*.py
+run_*.py
+ram_monitor.sh
+scripts/
+mmlu_results*
+JANG-ISSUES.md
+JANG-PLAN.md
