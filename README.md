@@ -1,3 +1,5 @@
+> **Note:** Research documentation and architectural findings are no longer published in this repository. Our extensive empirical work was replicated by a competing project within days of publication, without attribution. The quantization engine and format remain fully open-source — our [commit history](https://github.com/jjang-ai/jangq/commits/main) documents the timeline of every discovery.
+
 <p align="center">
   <a href="https://mlx.studio"><img src="https://raw.githubusercontent.com/jjang-ai/jangq/main/assets/mlx-studio-light.png" alt="MLX Studio" width="500"></a>
 </p>
