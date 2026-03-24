@@ -6,7 +6,6 @@ __pycache__/
 .DS_Store
 jang-runtime/.build/
 jang-runtime/.swiftpm/
-research/
 .DS_Store
 *.txt
 crack_*.py
