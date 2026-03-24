@@ -1,5 +1,3 @@
-> **Note:** Research docs are no longer published here. Hundreds of hours of empirical work — MoE sensitivity analysis, MLP asymmetry rules, FP8 methods — were replicated by a competing project within days of publication, without attribution. We believe in building openly, not rebranding someone else's work as your own, and hope others do the same. [Commit history](https://github.com/jjang-ai/jangq/commits/main) timestamps every discovery.
-
 <p align="center">
   <a href="https://mlx.studio"><img src="https://raw.githubusercontent.com/jjang-ai/jangq/main/assets/mlx-studio-light.png" alt="MLX Studio" width="500"></a>
 </p>
