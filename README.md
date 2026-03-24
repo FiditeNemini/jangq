@@ -6,11 +6,11 @@
   <a href="https://mlx.studio"><img src="https://mlx.studio/assets/screenshots/mlx-studio-featured.png?v=1" alt="MLX Studio App" width="600"></a>
 </p>
 
-<h4 align="center"><a href="https://mlx.studio">MLX Studio</a> — the only app that natively supports JANG models with reasoning</h4>
+<h4 align="center"><a href="https://mlx.studio">MLX Studio</a> — native JANG support with reasoning, VLM, and full mixed-precision inference</h4>
 
 ---
 
-> **Early Adoption:** LM Studio, Ollama, oMLX, Inferencer do **not** support JANG yet. Use **[MLX Studio](https://mlx.studio)** or `pip install "jang[mlx]"`. Ask your favorite app's creators to add JANG support!
+> **App Support:** [MLX Studio](https://mlx.studio) has full native JANG support. [oMLX](https://github.com/jundot/omlx) has added JANG integration ([PR #364](https://github.com/jundot/omlx/pull/364)). LM Studio, Ollama, and Inferencer do not support JANG yet — ask your favorite app's creators to add support, or use `pip install "jang[mlx]"`.
 
 ---
 
