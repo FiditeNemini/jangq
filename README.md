@@ -82,11 +82,25 @@ JANG_4M beats MLX 4-bit (93.0% vs 92.5%) at the same size.
 | **JANG_6M** | **84 GB** | **74** | **160** | 95 GB | Code, math, [THINK] reasoning, VLM |
 | MLX Community 4-bit | 63 GB | 84 | 43 | 68 GB | VLM |
 
-JANG prefill is **5x faster** than MLX Community (216 vs 43 tok/s). Generation speed matches at ~80 tok/s. JANG_2L fits on 48 GB Macs — half the size of MLX 4-bit at comparable speed.
+**94.0% MMLU** at 2-bit (JANG_2L) — five subjects at 100%. 5x faster prefill than MLX Community. JANG_2L fits on 48 GB Macs at half the size.
 
 119B total parameters, 6B active per token. MLA attention + 128 MoE experts + Pixtral vision. First model to support MLA + MoE quantization on Apple Silicon.
 
-*MMLU benchmarks in progress.*
+#### JANG_2L MMLU Results (200 Questions, Reasoning Mode)
+
+| Subject | Score |
+|---------|:-----:|
+| Abstract Algebra | 13/20 (65%) |
+| Anatomy | **20/20 (100%)** |
+| Astronomy | **20/20 (100%)** |
+| College CS | **20/20 (100%)** |
+| College Physics | 19/20 (95%) |
+| HS Biology | 19/20 (95%) |
+| HS Chemistry | **20/20 (100%)** |
+| HS Mathematics | 18/20 (90%) |
+| Logical Fallacies | 19/20 (95%) |
+| World Religions | **20/20 (100%)** |
+| **Total** | **188/200 (94.0%)** |
 
 ### Nemotron-3-Super-120B — Only JANG can go below 4-bit
 
@@ -298,7 +312,7 @@ See **[INTEGRATION.md](https://github.com/jjang-ai/jangq/blob/main/INTEGRATION.m
 - **Vision-Language** (Qwen3.5-VL, Pixtral)
 - **Mamba / Hybrid SSM** (Jamba, Nemotron-H)
 - **FP8 source models** (auto-dequantization)
-- **Mistral Small 4** (119B MoE + MLA + Pixtral VL) — *coming soon*
+- **Mistral Small 4** (119B MoE + MLA + Pixtral VL) — 94% MMLU, 82 tok/s, 30-84 GB
 
 ## Changelog
 
