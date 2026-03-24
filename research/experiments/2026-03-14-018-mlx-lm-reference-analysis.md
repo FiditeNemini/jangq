@@ -1,7 +1,7 @@
 # MLX-LM Reference Implementation Analysis for Qwen2
 
 **Date:** 2026-03-14
-**Purpose:** Understand exactly how MLX-LM implements the Qwen2 forward pass, find differences with MXQ runtime that cause wrong output.
+**Purpose:** Understand exactly how MLX-LM implements the Qwen2 forward pass, find differences with JANG runtime that cause wrong output.
 
 **Source:** `/opt/homebrew/lib/python3.14/site-packages/mlx_lm/` (installed mlx-lm package)
 
@@ -44,7 +44,7 @@ TransformerBlock.__call__(x, mask, cache):
   return out
 ```
 
-**Critical detail:** The residual connection uses the ORIGINAL input `x`, not the normalized version. The norm output feeds into attention/MLP, but the residual bypasses the norm. This matches MXQ's implementation.
+**Critical detail:** The residual connection uses the ORIGINAL input `x`, not the normalized version. The norm output feeds into attention/MLP, but the residual bypasses the norm. This matches JANG's implementation.
 
 ### MLP (SwiGLU)
 
@@ -221,9 +221,9 @@ Formula: `y = x / sqrt(mean(x^2) + eps) * weight`
 - Accumulation for mean is done in float32 precision (per docstring).
 - `eps` default is `1e-5`, but Qwen2 config specifies `rms_norm_eps` (typically `1e-6`).
 - In `qwen2.py`: `nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)` -- uses model config value.
-- MXQ reads `rms_norm_eps` from `config.json` and passes it as `config.normEps`.
+- JANG reads `rms_norm_eps` from `config.json` and passes it as `config.normEps`.
 
-**MXQ's RMSNorm kernel** (`mxq_rms_norm`): Computes `sum_sq` in float32, then `rms = rsqrt(sum_sq/hidden + eps)`, then `output = x * rms * gamma`. This matches the MLX formula.
+**JANG's RMSNorm kernel** (`jang_rms_norm`): Computes `sum_sq` in float32, then `rms = rsqrt(sum_sq/hidden + eps)`, then `output = x * rms * gamma`. This matches the MLX formula.
 
 ---
 
@@ -308,7 +308,7 @@ Grows in steps of 256 to avoid frequent reallocations. Uses slice assignment for
 
 ---
 
-## 7. Buffer Management -- MLX vs MXQ
+## 7. Buffer Management -- MLX vs JANG
 
 ### MLX Approach (Functional / Lazy)
 
@@ -317,16 +317,16 @@ Grows in steps of 256 to avoid frequent reallocations. Uses slice assignment for
 - Memory is managed by MLX's allocator with reference counting. `mx.clear_cache()` releases unused buffers.
 - The computation graph enables **fusion** -- MLX can fuse multiple operations into a single GPU kernel.
 
-### MXQ Approach (Imperative / Buffer Reuse)
+### JANG Approach (Imperative / Buffer Reuse)
 
-- MXQ **pre-allocates** fixed buffers (`hiddenBuffer`, `normBuffer`, `qBuffer`, etc.) at init time.
+- JANG **pre-allocates** fixed buffers (`hiddenBuffer`, `normBuffer`, `qBuffer`, etc.) at init time.
 - Each kernel dispatches reads from input buffers and writes to output buffers within a single `MTLCommandBuffer`.
 - All kernels for one forward pass are encoded into one command buffer, submitted once.
 - Buffers are reused across layers (e.g., `normBuffer` is used for both input_layernorm output and as scratch for o_proj output).
 
-### Potential Issues with MXQ Buffer Reuse
+### Potential Issues with JANG Buffer Reuse
 
-The MXQ code reuses `normBuffer` as temporary storage for the O projection output (line 188-189 of MXQInference.swift):
+The JANG code reuses `normBuffer` as temporary storage for the O projection output (line 188-189 of JANGInference.swift):
 ```swift
 // 6. O projection
 dispatchDequantGEMV(input: attnOutBuffer, weight: layer.oProj,
@@ -345,9 +345,9 @@ This should be safe since `normBuffer` is not read after the O projection writes
 
 ### The Bug
 
-**MXQ implements TRADITIONAL RoPE (consecutive pairs), but Qwen2 uses NON-TRADITIONAL RoPE (split halves).**
+**JANG implements TRADITIONAL RoPE (consecutive pairs), but Qwen2 uses NON-TRADITIONAL RoPE (split halves).**
 
-MXQ's `mxq_rope` Metal kernel (`MXQCompute.metal`, line 61-94):
+JANG's `jang_rope` Metal kernel (`JANGCompute.metal`, line 61-94):
 ```metal
 uint idx0 = base_idx + pair * 2;       // consecutive: 0,2,4,...
 uint idx1 = base_idx + pair * 2 + 1;   // consecutive: 1,3,5,...
@@ -363,16 +363,16 @@ MLX's Qwen2 uses `rope_traditional=False`, which pairs positions `(i, i+half_dim
 
 ### Impact
 
-With `head_dim=128` and `base=1e6`, at position 5, the outputs are completely different between the two modes. Every Q and K vector in MXQ will have wrong values, which means:
+With `head_dim=128` and `base=1e6`, at position 5, the outputs are completely different between the two modes. Every Q and K vector in JANG will have wrong values, which means:
 - Every attention score will be wrong
 - KV cache stores incorrectly rotated K vectors
 - Errors compound across layers
 
-This is **the primary bug** explaining why MXQ produces wrong output despite correct individual kernels.
+This is **the primary bug** explaining why JANG produces wrong output despite correct individual kernels.
 
 ### Fix
 
-Change the `mxq_rope` kernel to use split-half indexing:
+Change the `jang_rope` kernel to use split-half indexing:
 
 ```metal
 // Non-traditional RoPE (split halves) -- correct for Qwen2
@@ -399,34 +399,34 @@ This equals `1/base^(pair/half_dim) = 1/base^(2*pair/head_dim)`, matching MLX.
 
 ### 9a. RMSNorm Epsilon Source
 
-MXQ reads `rms_norm_eps` from `config.json` and uses it. For Qwen2 models this is typically `1e-6`. MLX does the same. **No issue here** as long as the config is parsed correctly.
+JANG reads `rms_norm_eps` from `config.json` and uses it. For Qwen2 models this is typically `1e-6`. MLX does the same. **No issue here** as long as the config is parsed correctly.
 
 ### 9b. Attention Scale
 
-Both use `1/sqrt(head_dim)`. MLXQ: `1.0 / sqrt(Float(headDim))`. MLX: `head_dim ** -0.5`. **Equivalent.**
+Both use `1/sqrt(head_dim)`. JANG: `1.0 / sqrt(Float(headDim))`. MLX: `head_dim ** -0.5`. **Equivalent.**
 
 ### 9c. SwiGLU Activation
 
 MLX: `silu(gate) * up` (compiled with `mx.compile`).
-MLXQ: `silu_g = g / (1 + exp(-g)); output = silu_g * u` in Metal. **Equivalent formula.**
+JANG: `silu_g = g / (1 + exp(-g)); output = silu_g * u` in Metal. **Equivalent formula.**
 
 ### 9d. Tied Embeddings for LM Head
 
 MLX: `embed_tokens.as_linear(out)` -- uses the embedding weight matrix transposed as a linear layer.
-MLXQ: `lmHeadWeight = model.lmHead ?? model.embedTokens` -- uses the raw embedding table with `dispatchDequantGEMV`.
+JANG: `lmHeadWeight = model.lmHead ?? model.embedTokens` -- uses the raw embedding table with `dispatchDequantGEMV`.
 
-Both should compute `hidden @ embed_weight.T`. Need to verify MXQ's GEMV kernel transposes correctly for tied embeddings. The embedding table has shape `(vocab_size, hidden_size)`, and we need `output[v] = sum_d(hidden[d] * embed[v][d])`. MXQ's GEMV computes `output[n] = sum_k(input[k] * weight[n][k])` which is correct if `weight` has shape `(N, K) = (vocab_size, hidden_size)`.
+Both should compute `hidden @ embed_weight.T`. Need to verify JANG's GEMV kernel transposes correctly for tied embeddings. The embedding table has shape `(vocab_size, hidden_size)`, and we need `output[v] = sum_d(hidden[d] * embed[v][d])`. JANG's GEMV computes `output[n] = sum_k(input[k] * weight[n][k])` which is correct if `weight` has shape `(N, K) = (vocab_size, hidden_size)`.
 
-### 9e. Prefill: MXQ processes tokens one at a time
+### 9e. Prefill: JANG processes tokens one at a time
 
-MLX processes the entire prompt at once (up to 2048 tokens per chunk) with causal masking. MXQ's `forward(tokenId:)` processes one token at a time. This is functionally equivalent for autoregressive generation but much slower for prefill. However, for correctness, processing one token at a time with a growing KV cache should produce the same result as batch prefill with causal masking -- **as long as RoPE offsets are correct**.
+MLX processes the entire prompt at once (up to 2048 tokens per chunk) with causal masking. JANG's `forward(tokenId:)` processes one token at a time. This is functionally equivalent for autoregressive generation but much slower for prefill. However, for correctness, processing one token at a time with a growing KV cache should produce the same result as batch prefill with causal masking -- **as long as RoPE offsets are correct**.
 
 ### 9f. KV Cache Layout
 
 MLX: `(B, n_kv_heads, seq, head_dim)` -- heads before sequence.
-MLXQ: `(seq, n_kv_heads, head_dim)` -- sequence before heads (no batch dim).
+JANG: `(seq, n_kv_heads, head_dim)` -- sequence before heads (no batch dim).
 
-Both layouts are valid; the attention kernel just needs to index correctly. MXQ's attention kernel indexes as:
+Both layouts are valid; the attention kernel just needs to index correctly. JANG's attention kernel indexes as:
 ```metal
 K_cache + pos * n_kv_heads * head_dim + kv_head * head_dim
 ```
@@ -435,17 +435,17 @@ This correctly accesses `K_cache[pos][kv_head][:]`, matching the `(seq, kv_heads
 ### 9g. Precision
 
 MLX operates in float16 for weights, float32 for accumulation in SDPA softmax (`precise=True` in `base.py` line 97).
-MXQ's attention kernel uses `float` (32-bit) for score computation, softmax, and weighted sum, then casts back to `half` for output. **Equivalent.**
+JANG's attention kernel uses `float` (32-bit) for score computation, softmax, and weighted sum, then casts back to `half` for output. **Equivalent.**
 
 ### 9h. Mask Handling for Single Token
 
-During decode (single token), MLX returns `mask=None` from `create_attention_mask` (line 51 of base.py: `if N == 1: return None`). `mx.fast.scaled_dot_product_attention` with `mask=None` means no masking -- the single query can attend to all keys. MXQ's attention kernel has no masking for decode (all `seq_len` positions are attended to). **Equivalent.**
+During decode (single token), MLX returns `mask=None` from `create_attention_mask` (line 51 of base.py: `if N == 1: return None`). `mx.fast.scaled_dot_product_attention` with `mask=None` means no masking -- the single query can attend to all keys. JANG's attention kernel has no masking for decode (all `seq_len` positions are attended to). **Equivalent.**
 
 ---
 
 ## 10. Summary of Findings
 
-| Aspect | MLX-LM (Reference) | MXQ (Our Runtime) | Match? |
+| Aspect | MLX-LM (Reference) | JANG (Our Runtime) | Match? |
 |--------|--------------------|--------------------|--------|
 | Layer order | norm -> attn -> residual -> norm -> MLP -> residual | Same | YES |
 | RMSNorm formula | `x / sqrt(mean(x^2) + eps) * weight` | Same | YES |
@@ -464,10 +464,10 @@ During decode (single token), MLX returns `mask=None` from `create_attention_mas
 
 ### Root Cause of Wrong Output
 
-**The RoPE dimension pairing is wrong.** MXQ uses traditional/consecutive-pair rotation `(0,1), (2,3), ...` but Qwen2 requires non-traditional/split-half rotation `(0,64), (1,65), ...`. This produces completely different Q and K vectors at every position, corrupting all attention scores and propagating errors through every layer.
+**The RoPE dimension pairing is wrong.** JANG uses traditional/consecutive-pair rotation `(0,1), (2,3), ...` but Qwen2 requires non-traditional/split-half rotation `(0,64), (1,65), ...`. This produces completely different Q and K vectors at every position, corrupting all attention scores and propagating errors through every layer.
 
 ### Recommended Fix
 
-1. Change `mxq_rope` kernel to use split-half indexing (see Section 8).
+1. Change `jang_rope` kernel to use split-half indexing (see Section 8).
 2. Consider adding a `traditional` flag to the kernel for future model support.
 3. After fixing RoPE, if output is still wrong, verify the tied-embedding GEMV produces correct logits.

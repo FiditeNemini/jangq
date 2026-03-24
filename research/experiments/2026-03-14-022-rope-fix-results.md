@@ -6,7 +6,7 @@
 
 ## The Bug
 
-MXQ's RoPE kernel used **traditional** dimension pairing:
+JANG's RoPE kernel used **traditional** dimension pairing:
 - Pairs: (0,1), (2,3), (4,5), ... (consecutive)
 - Used by: LLaMA, Mistral
 
@@ -19,7 +19,7 @@ model source and identified `rope_traditional=False` as the default.
 
 ## The Fix
 
-Metal kernel (`MXQCompute.metal`):
+Metal kernel (`JANGCompute.metal`):
 ```metal
 // Old (traditional): idx0 = base + pair*2, idx1 = base + pair*2+1
 // New (non-traditional): idx0 = base + pair, idx1 = base + pair + half_dim
@@ -32,7 +32,7 @@ Added `traditional` flag (buffer index 6) to support both modes.
 ### 8-bit logits comparison (after fix)
 
 ```
-MXQ 8-bit:  [2.875, 2.236, 4.598, 8.414, 3.900, 1.825, 1.855, 6.078]
+JANG 8-bit:  [2.875, 2.236, 4.598, 8.414, 3.900, 1.825, 1.855, 6.078]
 Reference:  [2.844, 2.438, 4.562, 8.625, 3.984, 1.922, 1.773, 6.031]
 ```
 
@@ -61,13 +61,13 @@ Ref:    "2+2=4" (logit 14.31)
    to 14.39 (reference is 14.31). The output now correctly produces "2+2=4".
 
 2. **Lower bits still fail on 0.5B**: The model is too small for aggressive
-   quantization. This is expected — MXQ is designed for larger models.
+   quantization. This is expected — JANG is designed for larger models.
 
-3. **The L0 norm now matches reference almost exactly**: 3.64 (MXQ) vs
+3. **The L0 norm now matches reference almost exactly**: 3.64 (JANG) vs
    3.67 (ref) = 0.8% difference. Before RoPE fix it was 3.89 (6% off).
 
 ## Significance
 
 The RoPE bug was the LAST correctness issue in the forward pass. With this
-fix, the MXQ runtime produces logits that match the reference to ~0.2
+fix, the JANG runtime produces logits that match the reference to ~0.2
 precision at 8-bit. The entire pipeline is now functionally correct.

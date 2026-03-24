@@ -6,7 +6,7 @@
 
 ## Purpose
 
-Test MXQ across diverse model architectures to validate:
+Test JANG across diverse model architectures to validate:
 1. Architecture detection correctness
 2. Quantization pipeline handles different tensor layouts
 3. Inference engine produces correct output for each architecture
@@ -27,14 +27,14 @@ Test MXQ across diverse model architectures to validate:
 
 | Feature | Qwen2 | Llama/SmolLM | TinyLlama | Phi-2 | StableLM2 |
 |---------|-------|-------------|-----------|-------|-----------|
-| Quantizable by MXQ | ✓ | ✓ | ✓ | ✗ needs work | ✗ needs work |
+| Quantizable by JANG | ✓ | ✓ | ✓ | ✗ needs work | ✗ needs work |
 | RoPE mode | Non-trad | Traditional | Traditional | Partial | Partial |
 | Attention biases | Q/K/V | None | None | All | All + norm |
 | MLP structure | SwiGLU | SwiGLU | SwiGLU | Dense (fc1/fc2) | SwiGLU |
 | Norm type | RMSNorm | RMSNorm | RMSNorm | LayerNorm | LayerNorm(+bias) |
 | Tied embeddings | Yes | Yes | No | No | No |
 
-### MXQ Adaptation Needed Per Architecture
+### JANG Adaptation Needed Per Architecture
 
 **Ready now (standard transformer with SwiGLU):**
 - Qwen2 family — tested, works at 8-bit

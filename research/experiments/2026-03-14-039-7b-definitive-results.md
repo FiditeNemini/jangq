@@ -1,4 +1,4 @@
-# Experiment 039: Qwen2.5-7B Definitive MLXQ vs Uniform Results
+# Experiment 039: Qwen2.5-7B Definitive JANG vs Uniform Results
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
@@ -27,7 +27,7 @@ MQ4L gives attention 8-bit precision for maximum coherence.
 Output: "Assistant Assistant Assistant Assistant..." (repetition loop)
 But answers tomato and haiku correctly — partial failure.
 
-### MQ2S (2.5 bits) vs Uniform 2-bit (2.5 bits) — BOTH FAIL, MLXQ LESS BROKEN
+### MQ2S (2.5 bits) vs Uniform 2-bit (2.5 bits) — BOTH FAIL, JANG LESS BROKEN
 
 | Prompt | MQ2S (2.5 bits) | Uniform 2-bit (2.5 bits) |
 |--------|-----------------|-------------------------|
@@ -58,6 +58,6 @@ reduction with zero quality loss.**
 The 3-bit variants fail on 7B with MLX's quantizer. This matches the
 3B results — 3-bit MLP needs GPTQ or larger models (14B+).
 
-At 2-bit, MLXQ (MQ2S) produces recognizable English fragments while
+At 2-bit, JANG (MQ2S) produces recognizable English fragments while
 uniform 2-bit produces complete garbage — demonstrating that smart
 allocation preserves more information even at extreme compression.

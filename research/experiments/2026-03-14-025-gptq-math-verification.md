@@ -7,7 +7,7 @@
 ## Purpose
 
 Verify the GPTQ algorithm produces lower output error than RTN,
-establishing the mathematical foundation for MXQ's quality improvement.
+establishing the mathematical foundation for JANG's quality improvement.
 
 ## GPTQ Algorithm
 
@@ -70,7 +70,7 @@ At 2-bit: quantization error δ is large → compensation is a large adjustment
 
 ### Combined with variable bit allocation
 
-MXQ + GPTQ: for each block at its allocated bit width (2, 3, 4, ...),
+JANG + GPTQ: for each block at its allocated bit width (2, 3, 4, ...),
 apply GPTQ error compensation WITHIN the block. This gives:
 
 1. Smart bit allocation (importance-based) — allocates bits where they matter
@@ -82,6 +82,6 @@ The combination should produce strictly better quality than either alone.
 ## Next Steps
 
 1. Implement full GPTQ with act-order and Cholesky
-2. Integrate GPTQ into MXQ's per-block quantization
-3. Re-run the comparison: MXQ-4bit-GPTQ vs MLX-uniform-4bit
-4. Test MXQ-2.5bit-GPTQ vs MLX-uniform-4bit (the headline claim)
+2. Integrate GPTQ into JANG's per-block quantization
+3. Re-run the comparison: JANG-4bit-GPTQ vs MLX-uniform-4bit
+4. Test JANG-2.5bit-GPTQ vs MLX-uniform-4bit (the headline claim)

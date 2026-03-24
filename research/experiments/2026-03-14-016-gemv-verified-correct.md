@@ -24,13 +24,13 @@ application (debugForwardOneLayer was written before bias support was added).
 ## Verified Correct
 
 All core kernels are now verified:
-1. mxq_embedding_dequant — bit-identical to CPU ✓
-2. mxq_rms_norm — matches CPU to 4 sig figs ✓
-3. mxq_dequant_gemv — matches CPU without bias ✓ (bias applied separately)
-4. mxq_add (bias) — applied in real forward(), not in debug path
-5. mxq_rope — identity at pos=0, formula verified ✓
-6. mxq_silu_mul — output looks reasonable ✓
-7. mxq_attention_decode — produces V values for single token ✓
+1. jang_embedding_dequant — bit-identical to CPU ✓
+2. jang_rms_norm — matches CPU to 4 sig figs ✓
+3. jang_dequant_gemv — matches CPU without bias ✓ (bias applied separately)
+4. jang_add (bias) — applied in real forward(), not in debug path
+5. jang_rope — identity at pos=0, formula verified ✓
+6. jang_silu_mul — output looks reasonable ✓
+7. jang_attention_decode — produces V values for single token ✓
 
 ## Remaining Issue
 

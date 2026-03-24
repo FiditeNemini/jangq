@@ -1,6 +1,6 @@
 # Pruning + Quantization: Combined Model Compression
 
-> MXQ Research Document 06 -- Complete technical reference for implementing joint pruning and quantization in the MXQ format for Apple Silicon.
+> JANG Research Document 06 -- Complete technical reference for implementing joint pruning and quantization in the JANG format for Apple Silicon.
 
 ---
 
@@ -10,7 +10,7 @@
 2. [Pruning Criteria -- Which Weights to Remove](#2-pruning-criteria--which-weights-to-remove)
 3. [Why Pruning + Quantization is Better Than Either Alone](#3-why-pruning--quantization-is-better-than-either-alone)
 4. [State-of-the-Art Combined Methods](#4-state-of-the-art-combined-methods)
-5. [Implementing Pruning + Quantization for MXQ](#5-implementing-pruning--quantization-for-mxq)
+5. [Implementing Pruning + Quantization for JANG](#5-implementing-pruning--quantization-for-jang)
 6. [Practical Sparsity Levels for LLMs](#6-practical-sparsity-levels-for-llms)
 7. [Hardware Considerations for Sparse+Quantized Inference](#7-hardware-considerations-for-sparsequantized-inference)
 
@@ -111,7 +111,7 @@ This is the most hardware-friendly sparse format because:
 
 The tradeoff: block-sparse can only represent sparsity at the block granularity. If a block has even one important weight, the entire block must be retained. This means block-sparse typically achieves lower effective sparsity than element-wise unstructured pruning for the same quality target.
 
-For LLM weight matrices with typical dimensions of 4096x4096 or larger, row-blocks of 32 or 64 elements are a natural fit. A "block" in this context means a contiguous group of weights within a single row (matching the quantization group size in MXQ).
+For LLM weight matrices with typical dimensions of 4096x4096 or larger, row-blocks of 32 or 64 elements are a natural fit. A "block" in this context means a contiguous group of weights within a single row (matching the quantization group size in JANG).
 
 #### 1.2.2 Hardware Support for Sparse Computation
 
@@ -134,7 +134,7 @@ However, Apple's sparse support has significant limitations for LLM inference:
 
 4. **MLX sparse support**: As of MLX 0.31 (early 2026), MLX does not expose a first-class sparse tensor type or sparse GEMM operation. Sparse computation in MLX must be implemented through custom Metal kernels or by using masking and dense operations.
 
-**Practical implication for MXQ**: On Apple Silicon, the primary benefit of pruning is **memory bandwidth reduction** (fewer weights to load from unified memory), not computational speedup from sparse hardware. The Metal kernel can skip loading zero blocks entirely, achieving bandwidth savings proportional to the sparsity ratio. Actual FLOP savings require either block-sparse approaches (where entire matmul tiles are skipped) or a future Apple Silicon generation with sparse matmul acceleration.
+**Practical implication for JANG**: On Apple Silicon, the primary benefit of pruning is **memory bandwidth reduction** (fewer weights to load from unified memory), not computational speedup from sparse hardware. The Metal kernel can skip loading zero blocks entirely, achieving bandwidth savings proportional to the sparsity ratio. Actual FLOP savings require either block-sparse approaches (where entire matmul tiles are skipped) or a future Apple Silicon generation with sparse matmul acceleration.
 
 ### 1.3 Structured Pruning
 
@@ -245,7 +245,7 @@ As of early 2026, Apple Silicon does **not** have hardware-accelerated N:M struc
 - It is unclear whether this provides actual computational speedup or just memory savings
 - It is not accessible from Metal or MLX
 
-**Implication for MXQ**: On Apple Silicon, the value of N:M sparsity is weaker than on NVIDIA hardware. Without dedicated sparse hardware, the overhead of managing the sparse metadata and performing indexed lookups may negate the benefit of reduced computation. The primary sparsity benefit on Apple Silicon remains memory bandwidth reduction through block-level skipping in the Metal kernel.
+**Implication for JANG**: On Apple Silicon, the value of N:M sparsity is weaker than on NVIDIA hardware. Without dedicated sparse hardware, the overhead of managing the sparse metadata and performing indexed lookups may negate the benefit of reduced computation. The primary sparsity benefit on Apple Silicon remains memory bandwidth reduction through block-level skipping in the Metal kernel.
 
 ---
 
@@ -378,7 +378,7 @@ Intuition: a weight matters if it is both large AND processes large activations.
 
 **Performance**: Wanda at 50% unstructured sparsity on LLaMA-65B and LLaMA-2-70B matches the zero-shot accuracy of the dense baseline. At 50% sparsity, Wanda performs comparably to the much more expensive SparseGPT, though SparseGPT pulls ahead at higher sparsity levels (60%+) where weight compensation becomes important.
 
-**Connection to MXQ**: Wanda's importance metric |w| * ||x|| is essentially the same signal MXQ already uses for bit allocation (the AWQ-style activation-aware scoring). This means MXQ's existing calibration infrastructure can produce both:
+**Connection to JANG**: Wanda's importance metric |w| * ||x|| is essentially the same signal JANG already uses for bit allocation (the AWQ-style activation-aware scoring). This means JANG's existing calibration infrastructure can produce both:
 1. Bit allocation decisions (how many bits per block) for quantization
 2. Pruning decisions (which blocks to zero out) for sparsity
 
@@ -463,7 +463,7 @@ Total model size = num_weights * (1 - sparsity) * bits_per_remaining_weight / 8 
 | **Prune 50% + Q4** | **50%** | **4** | **2.0** | **17.5 GB** |
 | **Prune 50% + Q3** | **50%** | **3** | **1.5** | **13.1 GB** |
 | **Prune 50% + Q2** | **50%** | **2** | **1.0** | **8.75 GB** |
-| Prune 30% + Q2.5 (MXQ) | 30% | 2.5 | 1.75 | 15.3 GB |
+| Prune 30% + Q2.5 (JANG) | 30% | 2.5 | 1.75 | 15.3 GB |
 
 The combined approach achieves compression levels impossible with either technique alone. 50% pruning + 4-bit quantization achieves an effective 2 bits per weight -- the same storage as 2-bit quantization alone, but with dramatically better quality because the 2-bit quantization of useless weights is replaced by simply not storing them.
 
@@ -587,7 +587,7 @@ A simpler but effective combination: use Wanda for pruning (fast, no weight upda
 - The sequential approach (prune, then quantize independently) misses joint optimization opportunities
 - At 50% sparsity, nearly matches SparseGPT; at 60%+, gap widens
 
-**For MXQ**: This is the pragmatic starting point. MXQ already computes activation-aware importance scores (AWQ-style) for bit allocation. Extending this to also produce pruning decisions requires minimal additional infrastructure -- the same forward pass that calibrates quantization also calibrates pruning.
+**For JANG**: This is the pragmatic starting point. JANG already computes activation-aware importance scores (AWQ-style) for bit allocation. Extending this to also produce pruning decisions requires minimal additional infrastructure -- the same forward pass that calibrates quantization also calibrates pruning.
 
 ### 4.3 OWL (Outlier Weighed Layerwise Sparsity)
 
@@ -615,7 +615,7 @@ OWL (Yin et al., ICML 2024) addresses a crucial observation: not all layers shou
 
 **Performance**: At 70% average sparsity, OWL + Wanda achieves 61.22 points lower perplexity than uniform-sparsity Wanda, and 6.80 points lower than uniform-sparsity SparseGPT. The non-uniform allocation is the "missing secret sauce" for high-sparsity pruning.
 
-**Connection to MXQ**: OWL's per-layer sparsity allocation is directly analogous to MXQ's per-layer bit allocation. MXQ already assigns different bit widths to different layers based on importance. Extending this to also assign different sparsity ratios per layer is natural -- layers that are important get both more bits AND less pruning.
+**Connection to JANG**: OWL's per-layer sparsity allocation is directly analogous to JANG's per-layer bit allocation. JANG already assigns different bit widths to different layers based on importance. Extending this to also assign different sparsity ratios per layer is natural -- layers that are important get both more bits AND less pruning.
 
 ### 4.4 REAP (Router-weighted Expert Activation Pruning)
 
@@ -637,9 +637,9 @@ This captures both selection frequency (how often the expert is chosen, reflecte
 
 **Results**: REAP achieves near-lossless compression on code generation tasks even when pruning 50% of experts from trillion-parameter models. Published pruned models include DeepSeek-V3.2, Qwen3-Coder-480B, and Kimi-K2 on HuggingFace under Cerebras.
 
-**Relevance to MXQ's dense-model pruning**: REAP itself targets MoE expert pruning, which is a different problem than weight-level pruning in dense models. However, REAP's core principle -- combining routing/selection information with output magnitude for saliency -- is conceptually similar to Wanda's |w| * ||x|| metric. For MLXQ:
+**Relevance to JANG's dense-model pruning**: REAP itself targets MoE expert pruning, which is a different problem than weight-level pruning in dense models. However, REAP's core principle -- combining routing/selection information with output magnitude for saliency -- is conceptually similar to Wanda's |w| * ||x|| metric. For JANG:
 
-- **For MoE models**: REAP-style expert pruning is complementary to weight-level pruning + quantization. First prune unnecessary experts (structural compression), then apply MXQ (pruning + quantization) to the remaining experts' weights.
+- **For MoE models**: REAP-style expert pruning is complementary to weight-level pruning + quantization. First prune unnecessary experts (structural compression), then apply JANG (pruning + quantization) to the remaining experts' weights.
 - **For dense models**: REAP's gating * activation-norm saliency concept can inspire per-block pruning metrics where the "gating" signal is replaced by the block's contribution to the layer output norm.
 
 ### 4.5 2:4 Structured Sparsity + Quantization
@@ -655,8 +655,8 @@ When hardware supports N:M sparsity, combining it with quantization gives both s
 **On Apple Silicon**:
 - No hardware N:M acceleration, so the speed benefit is absent
 - Memory benefit still applies: 50% fewer weights to load from memory
-- For MXQ, block-level sparsity (entire quantization groups zeroed out) is more practical than element-wise N:M because:
-  - The MXQ kernel already processes weight blocks (groups of 32 or 64)
+- For JANG, block-level sparsity (entire quantization groups zeroed out) is more practical than element-wise N:M because:
+  - The JANG kernel already processes weight blocks (groups of 32 or 64)
   - A block-level bitmap (1 bit per block) has negligible overhead
   - Skipping an entire zero block saves one complete block-dequant + accumulate operation
   - No need for per-element sparse metadata within blocks
@@ -679,7 +679,7 @@ The most aggressive compression strategy combines all three techniques:
    - This step can recover most of the quality lost in pruning
    - NVIDIA's Minitron approach: prune Nemotron-4-15B to 8B parameters, then distill, achieving quality competitive with LLaMA-3-8B (trained from scratch at much higher cost)
 
-3. **Quantize** (post-training): Apply MXQ-style mixed-precision quantization to the distilled model
+3. **Quantize** (post-training): Apply JANG-style mixed-precision quantization to the distilled model
    - The distilled model is already compact from pruning
    - Quantization further compresses the remaining weights
    - The combination achieves extreme compression ratios
@@ -698,27 +698,27 @@ Pruning is weaker because it removes redundant weights (small perturbation if do
 Example: 70B model
   After 50% pruning:     35B effective parameters
   After distillation:    quality recovered to near-original
-  After MXQ-2.5 quant:   35B * 2.5 bits = 10.9 GB
+  After JANG-2.5 quant:   35B * 2.5 bits = 10.9 GB
 
 Compared to:
-  70B MXQ-2.5 (quant only): 70B * 2.5 bits = 21.9 GB
+  70B JANG-2.5 (quant only): 70B * 2.5 bits = 21.9 GB
   70B at 4-bit (quant only): 70B * 4 bits   = 35.0 GB
 ```
 
 The triple-stack achieves the same quality in roughly half the size of quantization alone. The catch is that distillation requires substantial compute (a teacher model inference pass over a large corpus + student fine-tuning), making it significantly more expensive than post-training methods.
 
-**For MXQ**: The triple-stack is a future direction. The initial MXQ release should focus on post-training pruning + quantization (no distillation), which requires only calibration data and no fine-tuning. Distillation can be added as a quality-recovery step in a future version for users willing to invest the compute.
+**For JANG**: The triple-stack is a future direction. The initial JANG release should focus on post-training pruning + quantization (no distillation), which requires only calibration data and no fine-tuning. Distillation can be added as a quality-recovery step in a future version for users willing to invest the compute.
 
 ---
 
-## 5. Implementing Pruning + Quantization for MXQ
+## 5. Implementing Pruning + Quantization for JANG
 
 ### 5.1 Proposed Pipeline
 
-The MXQ pruning + quantization pipeline extends the existing MXQ quantization pipeline with a pruning stage:
+The JANG pruning + quantization pipeline extends the existing JANG quantization pipeline with a pruning stage:
 
 ```
-[Calibrate] -> [Score] -> [Prune] -> [Re-Score] -> [Allocate] -> [Quantize] -> [Pack .mxq]
+[Calibrate] -> [Score] -> [Prune] -> [Re-Score] -> [Allocate] -> [Quantize] -> [Pack .jang]
                importance  zero-out   recalculate   bits/block    mixed-prec   sparse+quant
                scores      weights    importance     per block     per block    format
 ```
@@ -730,7 +730,7 @@ Run the calibration dataset through the full-precision model, collecting:
 - Per-block output sensitivity (KL-divergence when block is perturbed)
 - Optionally: Hessian diagonal approximation H_ii per layer
 
-This is identical to the existing MXQ calibration step. No additional forward passes are needed -- the same calibration run produces both pruning and quantization metrics.
+This is identical to the existing JANG calibration step. No additional forward passes are needed -- the same calibration run produces both pruning and quantization metrics.
 
 #### Step 2: Score (Unified Importance)
 
@@ -752,10 +752,10 @@ The distribution of BlockImportance across all blocks in the model determines bo
 
 Zero out entire blocks with importance below a threshold. The threshold is determined by the target sparsity level.
 
-**Block-level pruning** (recommended for MXQ):
+**Block-level pruning** (recommended for JANG):
 - Prune at the granularity of quantization groups (32 or 64 weights)
 - If all weights in a block are unimportant, the entire block is zeroed
-- This aligns with MXQ's block-based storage and Metal kernel processing
+- This aligns with JANG's block-based storage and Metal kernel processing
 
 **Layer-wise sparsity allocation** (OWL-inspired):
 - Not all layers get the same sparsity ratio
@@ -815,7 +815,7 @@ After pruning, re-run the calibration to compute updated importance scores for t
 
 #### Step 5: Allocate Bits
 
-Using the post-pruning importance scores, allocate bit widths to each surviving (non-pruned) block. This is the standard MXQ bit allocation algorithm, but operating only on the subset of blocks that survived pruning.
+Using the post-pruning importance scores, allocate bit widths to each surviving (non-pruned) block. This is the standard JANG bit allocation algorithm, but operating only on the subset of blocks that survived pruning.
 
 ```
 Available bit widths: {2, 3, 4, 5, 6, 8}
@@ -838,22 +838,22 @@ Effective bits per original weight = 0.70 * 2.5 = 1.75 bits
 
 #### Step 6: Quantize
 
-Quantize each surviving block at its allocated bit width using the existing MXQ quantization (GPTQ-style with error compensation). Pruned blocks are skipped entirely.
+Quantize each surviving block at its allocated bit width using the existing JANG quantization (GPTQ-style with error compensation). Pruned blocks are skipped entirely.
 
 For the Hessian-based compensation step, the Hessian is computed from the pruned model's activations (using the post-pruning calibration data from step 4). This ensures the compensation accounts for the changed activation patterns.
 
 #### Step 7: Pack
 
-Store the sparse + quantized representation in the `.mxq` format.
+Store the sparse + quantized representation in the `.jang` format.
 
-### 5.2 Sparse Storage in .mxq Format
+### 5.2 Sparse Storage in .jang Format
 
-The MXQ format must store both the pruning mask (which blocks are zero) and the quantized data (for non-zero blocks). The proposed format extension:
+The JANG format must store both the pruning mask (which blocks are zero) and the quantized data (for non-zero blocks). The proposed format extension:
 
 **Per-tensor storage**:
 
 ```
-Standard MXQ tensors (existing):
+Standard JANG tensors (existing):
   layers.N.self_attn.q_proj.weight           -> packed quantized data
   layers.N.self_attn.q_proj.weight_scales    -> per-block scale factors
   layers.N.self_attn.q_proj.weight_zeros     -> per-block zero points
@@ -896,7 +896,7 @@ The mask tells the reader which dense block index each stored block corresponds 
 **Reading the data (Metal kernel pseudo-code)**:
 
 ```metal
-kernel void mxq_sparse_dequant(
+kernel void jang_sparse_dequant(
     device const uint8_t* sparse_mask,
     device const uint8_t* packed_data,
     device const half* scales,
@@ -926,7 +926,7 @@ kernel void mxq_sparse_dequant(
     half scale = scales[data_block_idx];
     half zero = zeros[data_block_idx];
 
-    // ... standard MXQ dequantization of packed_data at data_block_idx ...
+    // ... standard JANG dequantization of packed_data at data_block_idx ...
 }
 ```
 
@@ -950,16 +950,16 @@ Disadvantages:
 - Zero blocks still occupy space in the quantized data array (though they could be stored as a single zero byte each)
 - Does not achieve full memory savings from pruning -- the quantized data array is the same size as without pruning
 
-For MXQ v1, the simpler approach (bit_width = 0 sentinel) is recommended. The packed bitmap approach can be added in v2 when memory savings from pruning are critical.
+For JANG v1, the simpler approach (bit_width = 0 sentinel) is recommended. The packed bitmap approach can be added in v2 when memory savings from pruning are critical.
 
 ### 5.3 Metal Kernel Integration
 
-The MXQ Metal dequant kernel needs minimal modification to support sparsity:
+The JANG Metal dequant kernel needs minimal modification to support sparsity:
 
 **For the simple approach (bit_width = 0 sentinel)**:
 
 ```metal
-// In mxq_dequant_matmul kernel:
+// In jang_dequant_matmul kernel:
 uint bits = weight_bits[block_idx];
 
 if (bits == 0) {
@@ -1014,18 +1014,18 @@ The cost is one additional forward pass (typically a few minutes). The quality i
 | Sequential with re-calibration | Better | Moderate | Low |
 | Joint (SparseGPT+GPTQ single pass) | Best | Slow | High |
 
-Recommendation for MXQ v1: **Sequential with re-calibration**. It achieves near-optimal quality with manageable complexity. The joint approach can be added in a future version for maximum quality.
+Recommendation for JANG v1: **Sequential with re-calibration**. It achieves near-optimal quality with manageable complexity. The joint approach can be added in a future version for maximum quality.
 
-### 5.5 Updated mxq_config.json
+### 5.5 Updated jang_config.json
 
-The MXQ configuration file extends to include sparsity information:
+The JANG configuration file extends to include sparsity information:
 
 ```json
 {
-  "format": "mxq",
+  "format": "jang",
   "format_version": "1.1",
   "quantization": {
-    "method": "mxq-importance-sparse",
+    "method": "jang-importance-sparse",
     "target_bits": 2.5,
     "actual_bits": 2.52,
     "block_size": 64,
@@ -1038,7 +1038,7 @@ The MXQ configuration file extends to include sparsity information:
       "layer_sparsity_allocation": "owl",
       "recalibrated_after_pruning": true
     },
-    "calibration_dataset": "mxq-calib-v1",
+    "calibration_dataset": "jang-calib-v1",
     "scoring_method": "awq+sensitivity"
   },
   "layer_allocation": {
@@ -1052,8 +1052,8 @@ The MXQ configuration file extends to include sparsity information:
   },
   "quality_metrics": {
     "perplexity_bf16": 5.21,
-    "perplexity_mxq_sparse": 5.35,
-    "perplexity_mxq_dense": 5.38,
+    "perplexity_jang_sparse": 5.35,
+    "perplexity_jang_dense": 5.38,
     "perplexity_uniform_4bit": 5.42
   }
 }
@@ -1063,7 +1063,7 @@ The MXQ configuration file extends to include sparsity information:
 
 ```bash
 # Prune + quantize in one step
-mxq quantize \
+jang quantize \
   --model mlx-community/Qwen3.5-72B-bf16 \
   --imatrix ./imatrix.safetensors \
   --bits 2.5 \
@@ -1071,7 +1071,7 @@ mxq quantize \
   --sparsity-method wanda \
   --sparsity-allocation owl \
   --recalibrate \
-  --output ./Qwen3.5-72B-MXQ-S30-2.5bit
+  --output ./Qwen3.5-72B-JANG-S30-2.5bit
 
 # Naming convention: S30 = 30% sparse
 # Effective bits: 0.70 * 2.5 = 1.75 bits per original weight
@@ -1268,7 +1268,7 @@ Apple Silicon's compute capabilities for sparse operations as of 2025-2026:
 
 ### 7.2 Block-Sparse vs Element-Wise Sparse on Metal
 
-For MXQ on Apple Silicon, the choice between block-sparse and element-wise sparse has dramatic performance implications:
+For JANG on Apple Silicon, the choice between block-sparse and element-wise sparse has dramatic performance implications:
 
 **Element-wise sparse** (individual zero weights):
 
@@ -1302,14 +1302,14 @@ Performance characteristics:
   ~30-40% speedup on memory-bandwidth-bound operations.
 ```
 
-**Recommendation for MXQ**: Block-sparse at the quantization group granularity (32 or 64 weights per block). This naturally aligns with:
-- MXQ's per-block bit allocation (each block already has its own scale, zero, and bit width)
+**Recommendation for JANG**: Block-sparse at the quantization group granularity (32 or 64 weights per block). This naturally aligns with:
+- JANG's per-block bit allocation (each block already has its own scale, zero, and bit width)
 - Metal thread group processing (32 threads per SIMD group matches 32-weight blocks)
 - The dequantization kernel (which already processes one block per iteration)
 
 ### 7.3 The Overhead of Checking Sparsity Masks in the Kernel
 
-Every block in the MXQ kernel must check the sparsity mask to decide whether to skip or compute. The overhead of this check depends on the implementation:
+Every block in the JANG kernel must check the sparsity mask to decide whether to skip or compute. The overhead of this check depends on the implementation:
 
 **Bit_width == 0 sentinel check (simplest)**:
 
@@ -1345,7 +1345,7 @@ Cost: This requires counting set bits in all mask bytes before the current posit
 
 With a precomputed prefix sum table (one entry per 256 blocks = ~1 KB), the index computation is ~5-10 nanoseconds.
 
-**Overall assessment**: Sparsity mask overhead is negligible (< 1% of kernel time) for all approaches. The sentinel check (bit_width == 0) is simplest and fastest, and should be the default for MXQ v1.
+**Overall assessment**: Sparsity mask overhead is negligible (< 1% of kernel time) for all approaches. The sentinel check (bit_width == 0) is simplest and fastest, and should be the default for JANG v1.
 
 ### 7.4 When Sparsity Helps vs Hurts Performance
 
@@ -1376,12 +1376,12 @@ With a precomputed prefix sum table (one entry per 256 blocks = ~1 KB), the inde
 
 5. **Load imbalance**: If sparsity is non-uniform across rows/columns, some thread groups have more work than others, leading to underutilization of GPU resources.
 
-**Break-even analysis for Apple Silicon with block-sparse MXQ**:
+**Break-even analysis for Apple Silicon with block-sparse JANG**:
 
 ```
 Assumptions:
   - M4 Pro memory bandwidth: ~273 GB/s
-  - 70B model at MXQ-2.5: 22 GB weight data
+  - 70B model at JANG-2.5: 22 GB weight data
   - Time to load all weights: 22 GB / 273 GB/s = 80.6 ms
   - Sparsity mask check overhead: ~0.5 ms (negligible)
 
@@ -1411,13 +1411,13 @@ Even 10% block sparsity is worth implementing because:
 
 There is no meaningful break-even point for block-sparse on Apple Silicon -- any amount of block sparsity provides proportional memory bandwidth savings with negligible overhead. This is because block-sparse avoids the irregular memory access patterns that cause problems with element-wise sparsity.
 
-### 7.5 Block Sparsity Design Recommendations for MXQ
+### 7.5 Block Sparsity Design Recommendations for JANG
 
-Based on the hardware analysis, these are the recommended design choices for MXQ v1:
+Based on the hardware analysis, these are the recommended design choices for JANG v1:
 
-**Block size: 64 weights** (matching MXQ quantization group size)
+**Block size: 64 weights** (matching JANG quantization group size)
 
-- Aligns with MXQ's existing per-block scale/zero/bits metadata
+- Aligns with JANG's existing per-block scale/zero/bits metadata
 - Two SIMD groups (2 * 32 = 64) process one block
 - Efficient cache line usage (64 weights at 2.5 bits = 20 bytes, fits in one cache line)
 
@@ -1436,14 +1436,14 @@ Based on the hardware analysis, these are the recommended design choices for MXQ
 - No popcount/prefix-sum index computation needed
 - Simpler implementation, slightly more memory usage, significantly simpler kernel
 
-**Target sparsity: 20-30% for quality-first profiles (MXQ-2.5, MXQ-3)**
+**Target sparsity: 20-30% for quality-first profiles (JANG-2.5, JANG-3)**
 
 - At 20-30% block sparsity, quality impact is negligible for all tested models
 - Memory savings: 20-30% fewer weights to load
-- Effective bits per weight: 0.70 * 2.5 = 1.75 (for MXQ-2.5 at 30% sparsity)
-- This achieves MXQ-2.5 quality at MXQ-1.75 effective size
+- Effective bits per weight: 0.70 * 2.5 = 1.75 (for JANG-2.5 at 30% sparsity)
+- This achieves JANG-2.5 quality at JANG-1.75 effective size
 
-**Target sparsity: 40-50% for compression-first profiles (MXQ-2, MXQ-1.5)**
+**Target sparsity: 40-50% for compression-first profiles (JANG-2, JANG-1.5)**
 
 - Higher sparsity for users who need maximum compression
 - Quality will degrade noticeably but may be acceptable for specific use cases
@@ -1493,27 +1493,27 @@ Reference table for combined pruning + quantization compression:
 
 Note: Actual model sizes will be slightly larger due to metadata (scales, zeros, bit widths, sparsity masks, embedding layer, lm_head at higher precision).
 
-## Appendix C: Decision Framework for MXQ Users
+## Appendix C: Decision Framework for JANG Users
 
 ```
 Question: How should I choose sparsity and bit width for my model?
 
 If RAM is not a constraint:
-  -> MXQ-4bit, 0% sparsity (best quality, ~35 GB for 70B)
+  -> JANG-4bit, 0% sparsity (best quality, ~35 GB for 70B)
 
 If you need 70B on 32 GB Mac:
-  -> MXQ-2.5bit, 0% sparsity (21.9 GB, matches 4-bit quality)
+  -> JANG-2.5bit, 0% sparsity (21.9 GB, matches 4-bit quality)
 
 If you need 70B on 24 GB Mac:
-  -> MXQ-2.5bit, 20% sparsity (17.5 GB, near-identical to 4-bit)
-  or MXQ-3bit, 30% sparsity (18.4 GB, near-identical to 4-bit)
+  -> JANG-2.5bit, 20% sparsity (17.5 GB, near-identical to 4-bit)
+  or JANG-3bit, 30% sparsity (18.4 GB, near-identical to 4-bit)
 
 If you need 70B on 16 GB Mac:
-  -> MXQ-2.5bit, 40% sparsity (13.1 GB, slight quality loss)
-  or MXQ-2bit, 30% sparsity (12.3 GB, moderate quality loss)
+  -> JANG-2.5bit, 40% sparsity (13.1 GB, slight quality loss)
+  or JANG-2bit, 30% sparsity (12.3 GB, moderate quality loss)
 
 If you need maximum compression (research/experimental):
-  -> MXQ-2bit, 50% sparsity (8.75 GB, noticeable quality loss)
+  -> JANG-2bit, 50% sparsity (8.75 GB, noticeable quality loss)
   -> Only recommended for 70B+ models
 ```
 
@@ -1521,10 +1521,10 @@ If you need maximum compression (research/experimental):
 
 | Approach | Platform | Effective Bits | Sparse HW Accel | Block-Sparse | Quality |
 |----------|----------|---------------|-----------------|-------------|---------|
-| MXQ sparse (proposed) | Apple Silicon | 1.5-2.5 | No (bandwidth only) | Yes (block) | Good-Excellent |
+| JANG sparse (proposed) | Apple Silicon | 1.5-2.5 | No (bandwidth only) | Yes (block) | Good-Excellent |
 | Sparse-Marlin (NVIDIA) | CUDA (Ampere+) | 2.0 | Yes (2:4 Tensor Core) | 2:4 structured | Good |
 | SparseGPT+GPTQ | CUDA | 1.5-2.0 | Optional | Unstructured | Excellent |
 | GGUF Q2_K sparse | CPU | ~2.5 | No | No | Mediocre |
 | EXL2 + sparse | CUDA | variable | No | No | Good |
 
-MXQ's advantage on Apple Silicon: block-sparse at quantization-group granularity provides consistent memory bandwidth savings without requiring sparse hardware support. The unified memory architecture ensures that bandwidth savings translate directly to inference speedup, unlike discrete GPU systems where PCIe transfer and GPU memory bandwidth are separate bottlenecks.
+JANG's advantage on Apple Silicon: block-sparse at quantization-group granularity provides consistent memory bandwidth savings without requiring sparse hardware support. The unified memory architecture ensures that bandwidth savings translate directly to inference speedup, unlike discrete GPU systems where PCIe transfer and GPU memory bandwidth are separate bottlenecks.

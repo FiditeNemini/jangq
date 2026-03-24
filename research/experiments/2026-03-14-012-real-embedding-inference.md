@@ -6,9 +6,9 @@
 
 ## Setup
 - Same as experiment 011 but with real kernel dispatch
-- Embedding dequant: `mxq_embedding_dequant` kernel
-- Attention: `mxq_attention_decode` kernel with GQA
-- LM head: tied embeddings via `mxq_dequant_gemv` on embed_tokens
+- Embedding dequant: `jang_embedding_dequant` kernel
+- Attention: `jang_attention_decode` kernel with GQA
+- LM head: tied embeddings via `jang_dequant_gemv` on embed_tokens
 
 ## Results
 

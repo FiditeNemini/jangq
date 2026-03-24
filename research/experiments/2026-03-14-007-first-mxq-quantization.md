@@ -1,13 +1,13 @@
-# Experiment 007: First MLXQ Model Quantization
+# Experiment 007: First JANG Model Quantization
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
-**Status**: PASS — first MXQ model ever created
+**Status**: PASS — first JANG model ever created
 
 ## Setup
 
 - **Source model**: Qwen/Qwen2.5-0.5B (494M parameters, bfloat16)
-- **Target**: MXQ-2.5bit
+- **Target**: JANG-2.5bit
 - **Block size**: 64
 - **Calibration**: weight-only (no forward pass)
 - **Quantization**: RTN (round-to-nearest), vectorized
@@ -66,8 +66,8 @@
    width and quantize entire groups with numpy broadcasting. Result: 169 tensors
    in 64 seconds.
 
-4. **Format roundtrip**: The output .mxq model loads correctly via the reader
-   and produces a valid summary via `mxq-tools inspect`.
+4. **Format roundtrip**: The output .jang model loads correctly via the reader
+   and produces a valid summary via `jang-tools inspect`.
 
 ## Issues Found
 

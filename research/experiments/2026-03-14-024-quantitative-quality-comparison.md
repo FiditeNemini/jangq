@@ -1,4 +1,4 @@
-# Experiment 024: Quantitative Quality Comparison — MXQ vs MLX
+# Experiment 024: Quantitative Quality Comparison — JANG vs MLX
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
@@ -6,9 +6,9 @@
 
 ## Purpose
 
-Quantitatively compare MXQ quantization quality against MLX's built-in
+Quantitatively compare JANG quantization quality against MLX's built-in
 quantization and the bf16 reference. This is the experiment that determines
-whether MXQ's approach has value.
+whether JANG's approach has value.
 
 ## Model: Qwen2.5-3B
 
@@ -19,26 +19,26 @@ Prompt: `<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|
 | Method | Bits | Top Token | Correct? | Top Logit | Logit MSE | KL Div |
 |--------|------|-----------|----------|-----------|-----------|--------|
 | bf16 reference | 16 | 'The' | YES | 15.38 | 0.00 | 0.00 |
-| **MXQ 8-bit (RTN)** | 8 | **'The'** | **YES** | **15.38** | **~0.5** | **~0.1** |
+| **JANG 8-bit (RTN)** | 8 | **'The'** | **YES** | **15.38** | **~0.5** | **~0.1** |
 | **MLX uniform 4-bit** | 4.5 | **'The'** | **YES** | **11.31** | **11.31** | **1.50** |
-| MXQ 4-bit (RTN) | 4 | 'How' | NO | 12.04 | >15 | >5 |
+| JANG 4-bit (RTN) | 4 | 'How' | NO | 12.04 | >15 | >5 |
 | MLX uniform 2-bit | 2.5 | 'izu' | NO | 8.56 | 17.56 | 10.21 |
 
 ## Analysis
 
 ### What the data tells us
 
-1. **MXQ 8-bit ≈ reference**: logit 15.38 matches bf16's 15.38 exactly.
-   At 8-bit, both MXQ and MLX are essentially lossless.
+1. **JANG 8-bit ≈ reference**: logit 15.38 matches bf16's 15.38 exactly.
+   At 8-bit, both JANG and MLX are essentially lossless.
 
-2. **MLX 4-bit works, MXQ 4-bit doesn't**: Both use RTN (round-to-nearest).
-   MLX uses group_size=64, 4-bit uniform. MXQ uses block_size=64 with
-   variable allocation. Yet MLX gets the right token and MXQ doesn't.
+2. **MLX 4-bit works, JANG 4-bit doesn't**: Both use RTN (round-to-nearest).
+   MLX uses group_size=64, 4-bit uniform. JANG uses block_size=64 with
+   variable allocation. Yet MLX gets the right token and JANG doesn't.
 
 3. **MLX uniform 2-bit fails too**: KL=10.2, wrong token. So aggressive
    quantization is hard regardless of method.
 
-### Why MLX 4-bit beats MXQ 4-bit
+### Why MLX 4-bit beats JANG 4-bit
 
 MLX's `mx.quantize()` and `mx.dequantize()` are **hardware-optimized
 primitives** implemented in C++/Metal. The quantization uses affine scaling
@@ -51,17 +51,17 @@ when writing to output buffers. The repeated float16 truncation across
 24 layers compounds.
 
 Additionally, MLX 4-bit actually uses 4.501 effective bits (the group
-scale/bias overhead adds ~0.5 bits). Our MXQ 4-bit has 4.0 actual average
+scale/bias overhead adds ~0.5 bits). Our JANG 4-bit has 4.0 actual average
 because the allocator gives some blocks fewer bits (3-bit) to keep the
 average at 4.0. Those 3-bit blocks introduce more error than uniform 4-bit.
 
-### The real path to MXQ's advantage
+### The real path to JANG's advantage
 
-MXQ's variable bit-width can only help when combined with:
+JANG's variable bit-width can only help when combined with:
 
 1. **GPTQ error compensation**: Reduces per-block error by 2-5x by
    adjusting remaining weights after each quantization step. This is
-   what makes EXL2 (the closest analog to MXQ) actually work.
+   what makes EXL2 (the closest analog to JANG) actually work.
 
 2. **Optimal bit allocation**: Our current greedy allocator uses
    weight-only statistics. AWQ-style activation-aware scoring would
@@ -74,7 +74,7 @@ MXQ's variable bit-width can only help when combined with:
    quantization errors matter less because each weight contributes
    less to the output.
 
-## Mathematical Framework for MXQ's Advantage
+## Mathematical Framework for JANG's Advantage
 
 ### Rate-Distortion Theory
 
@@ -127,7 +127,7 @@ subsequent weights are adjusted to absorb it.
 ## Action Plan
 
 1. **Implement GPTQ** for per-block quantization → reduces per-block error
-2. **Re-run this comparison** with GPTQ: MXQ-4bit-GPTQ vs MLX uniform 4-bit
-3. **If MXQ-4bit-GPTQ beats MLX-4bit**: the approach is validated
-4. **Test MXQ-2.5bit-GPTQ vs MLX-4bit**: the headline claim
+2. **Re-run this comparison** with GPTQ: JANG-4bit-GPTQ vs MLX uniform 4-bit
+3. **If JANG-4bit-GPTQ beats MLX-4bit**: the approach is validated
+4. **Test JANG-2.5bit-GPTQ vs MLX-4bit**: the headline claim
 5. **Perplexity evaluation on wikitext**: proper benchmark, not just one prompt

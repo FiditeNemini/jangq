@@ -1,8 +1,8 @@
 # Calibration and Importance Scoring for Quantization
 
-## MXQ Research Document 08
+## JANG Research Document 08
 
-This document provides the complete technical foundation for MXQ Phase 1: the calibration engine and importance scoring pipeline. Everything in Phase 2 (bit allocation and quantization) and Phase 3 (the MXQ file format) depends on the quality of the importance matrix produced here. A bad importance matrix means bad quantization, no matter how sophisticated the bit allocation algorithm is.
+This document provides the complete technical foundation for JANG Phase 1: the calibration engine and importance scoring pipeline. Everything in Phase 2 (bit allocation and quantization) and Phase 3 (the JANG file format) depends on the quality of the importance matrix produced here. A bad importance matrix means bad quantization, no matter how sophisticated the bit allocation algorithm is.
 
 ---
 
@@ -14,7 +14,7 @@ A large language model like Qwen3.5-72B has approximately 72 billion weights. Wh
 
 **Uniform quantization** treats every weight identically. Every weight in every layer gets the same number of bits. This is what MLX's built-in quantization does. At 4 bits per weight, uniform quantization works well enough because 4 bits can represent 16 distinct values per block, which is sufficient to approximate most weight distributions. But at 2-3 bits, uniform quantization falls apart. With only 4-8 distinct values per block, the approximation error becomes catastrophic for weights that the model relies on heavily during inference.
 
-**Importance-aware quantization** (what MXQ does) recognizes that not all weights contribute equally to the model's output. Some weights process activations that are consistently large during inference. Some weights sit on paths that are critical for the model's predictions. Others are nearly dead -- they process near-zero activations or contribute negligibly to the output. The key insight: we can give fewer bits to the unimportant weights and more bits to the important ones, achieving the same average bit width as uniform quantization but with dramatically lower effective error.
+**Importance-aware quantization** (what JANG does) recognizes that not all weights contribute equally to the model's output. Some weights process activations that are consistently large during inference. Some weights sit on paths that are critical for the model's predictions. Others are nearly dead -- they process near-zero activations or contribute negligibly to the output. The key insight: we can give fewer bits to the unimportant weights and more bits to the important ones, achieving the same average bit width as uniform quantization but with dramatically lower effective error.
 
 **Calibration** is the process of determining which weights are important. We run representative data through the full-precision model and observe how each weight interacts with real activations. This produces an importance matrix: a score for every weight block in the model that tells us how many bits it deserves.
 
@@ -22,7 +22,7 @@ A large language model like Qwen3.5-72B has approximately 72 billion weights. Wh
 
 There is a fundamental bootstrapping problem: to determine how to compress the model, we need the full-precision model. The full-precision model is the thing we are trying to compress because it does not fit in memory (or at least, we want it to fit in less memory). This means calibration must happen on a machine with enough resources to run the full model at full precision, even though the end goal is to run the quantized model on a smaller machine.
 
-For MXQ, this means:
+For JANG, this means:
 - **Calibration** happens on a machine with enough unified memory to load the bf16/f16 model (e.g., a Mac Studio with 192GB for a 72B model, or an A100 cluster)
 - **Inference** happens on the target machine (e.g., a MacBook with 32GB)
 - The importance matrix bridges the gap: computed once on the big machine, used to produce a model that runs on the small machine
@@ -39,7 +39,7 @@ At 4-bit uniform quantization, calibration barely matters. The quantization erro
 
 If we allocate bits randomly, the model produces garbage. If we allocate bits based on a high-quality importance matrix, the model matches 4-bit uniform quality. The difference between "garbage" and "matches 4-bit" is entirely determined by the quality of the importance scores.
 
-The importance matrix is, in a very real sense, the intellectual property of MXQ. The calibration dataset composition, the scoring algorithm, and the aggregation method together form the "secret sauce" that determines whether MXQ-2.5 bit produces a usable model or not.
+The importance matrix is, in a very real sense, the intellectual property of JANG. The calibration dataset composition, the scoring algorithm, and the aggregation method together form the "secret sauce" that determines whether JANG-2.5 bit produces a usable model or not.
 
 ---
 
@@ -69,11 +69,11 @@ The calibration dataset must satisfy several competing constraints:
 
 **Pile subsets.** The Pile is a diverse corpus with named subsets (PubMed, ArXiv, GitHub, StackExchange, etc.). Pros: can select specific subsets to control the mix. Cons: quality varies by subset.
 
-**Custom curated (MXQ approach).** For MXQ, we build a custom calibration dataset rather than relying on a single existing corpus. This gives us precise control over the distribution.
+**Custom curated (JANG approach).** For JANG, we build a custom calibration dataset rather than relying on a single existing corpus. This gives us precise control over the distribution.
 
-### MXQ Calibration Dataset Composition
+### JANG Calibration Dataset Composition
 
-For a general-purpose LLM, the MXQ calibration dataset (`mxq-calib-v1`) targets the following composition:
+For a general-purpose LLM, the JANG calibration dataset (`jang-calib-v1`) targets the following composition:
 
 ```
 Category breakdown (~1000 samples total):
@@ -117,7 +117,7 @@ Multilingual (15%, ~150 samples):
   - Arabic: 10 samples
 ```
 
-This composition is tuned for MXQ's target use case: general-purpose LLMs running on Apple Silicon via vMLX Engine. The heavy code allocation reflects the fact that code generation is disproportionately sensitive to quantization (code requires precise token prediction; a single wrong token breaks syntax). The conversation allocation reflects that most vMLX users will be running chat-format inference.
+This composition is tuned for JANG's target use case: general-purpose LLMs running on Apple Silicon via vMLX Engine. The heavy code allocation reflects the fact that code generation is disproportionately sensitive to quantization (code requires precise token prediction; a single wrong token breaks syntax). The conversation allocation reflects that most vMLX users will be running chat-format inference.
 
 ### Calibration Sequence Length
 
@@ -131,7 +131,7 @@ The sequence length of calibration samples affects which activation patterns are
 
 **Very long sequences (32K+).** Only needed for models specifically designed for very long context (128K+ models). The computational cost is high and the marginal benefit is small unless long-context use is the primary use case.
 
-For MXQ, the standard configuration is:
+For JANG, the standard configuration is:
 
 ```
 Sequence length distribution:
@@ -159,7 +159,7 @@ For reference, llama.cpp's imatrix tool works as follows:
 
 The llama.cpp imatrix stores, for each weight tensor, a float array of per-column importance values. The importance is computed as the sum of squared input activations for each column (channel), accumulated across all calibration tokens. This is equivalent to the diagonal of the Hessian approximation X^T X, which we discuss in detail in Section 4.
 
-MXQ uses a more sophisticated approach than llama.cpp's imatrix:
+JANG uses a more sophisticated approach than llama.cpp's imatrix:
 1. We collect richer statistics (not just squared activation sums)
 2. We compute per-block scores (not just per-column)
 3. We combine multiple scoring methods (not just activation magnitude)
@@ -443,7 +443,7 @@ Outlier channels are critically important for model function. They act as "infor
 
 2. **Quantization damage.** Outlier channels need the most bits because their large dynamic range is hardest to represent with few quantization levels.
 
-MXQ handles outliers in two ways:
+JANG handles outliers in two ways:
 
 **Detection:** A channel is classified as an outlier if its maximum absolute activation exceeds 6 standard deviations of the channel-wise maximum distribution for that layer.
 
@@ -562,7 +562,7 @@ Total: O(C * model_forward_pass) + O(total_weights)
 
 This is fast. The scoring computation itself is negligible compared to the calibration forward passes.
 
-**Quality assessment:** AWQ-style scoring is the workhorse of importance-aware quantization. It captures roughly 85-90% of the information that more expensive methods (Hessian, Fisher) provide, at a fraction of the cost. For MXQ, this is the primary scoring method.
+**Quality assessment:** AWQ-style scoring is the workhorse of importance-aware quantization. It captures roughly 85-90% of the information that more expensive methods (Hessian, Fisher) provide, at a fraction of the cost. For JANG, this is the primary scoring method.
 
 ### 4b. Hessian Diagonal Scoring
 
@@ -945,7 +945,7 @@ For a 70B model (L=80, d_out=8192, d_in=8192, group_size=128, block_size=64):
 This is completely impractical for routine use.
 ```
 
-**Practical use in MLXQ:** Sensitivity analysis is used only for validation:
+**Practical use in JANG:** Sensitivity analysis is used only for validation:
 1. Run on a small model (1B-7B parameters) to validate that AWQ/Hessian scoring produces the same ranking as sensitivity analysis
 2. Spot-check specific layers where AWQ/Hessian scores seem suspicious
 3. Never run on the full model as part of the calibration pipeline
@@ -954,7 +954,7 @@ This is completely impractical for routine use.
 
 ### 4e. Combined Scoring
 
-MXQ uses a combined scoring approach that takes the best of each method while keeping computational cost manageable.
+JANG uses a combined scoring approach that takes the best of each method while keeping computational cost manageable.
 
 **Primary approach: weighted combination of AWQ and Hessian.**
 
@@ -1039,7 +1039,7 @@ where:
 
 This approach says: "Start with the AWQ ranking, but adjust it upward for blocks where the Hessian says the loss is extra-sensitive, and downward for blocks where the Hessian says the loss is insensitive." The advantage is that AWQ provides the overall ranking (which is usually correct) while Hessian provides targeted corrections for edge cases.
 
-**The practical recommendation for MLXQ:**
+**The practical recommendation for JANG:**
 
 ```
 For calibration speed and quality:
@@ -1092,7 +1092,7 @@ Metadata:
   - scoring_method: "awq+hessian"  (or "awq", "hessian", "fisher", etc.)
   - scoring_weights: {"alpha": 0.5, "beta": 0.5}
   - block_size: 64
-  - calibration_dataset: "mxq-calib-v1"
+  - calibration_dataset: "jang-calib-v1"
   - calibration_samples: 512
   - calibration_tokens: 1048576  (total tokens processed)
   - calibration_seq_length: 2048
@@ -1100,12 +1100,12 @@ Metadata:
   - source_model: "Qwen/Qwen3.5-72B"
   - source_dtype: "bfloat16"
   - timestamp: "2026-03-14T10:30:00Z"
-  - mxq_version: "0.1.0"
+  - jang_version: "0.1.0"
 ```
 
 ### File Format: Safetensors
 
-MXQ stores the importance matrix in safetensors format. Safetensors provides:
+JANG stores the importance matrix in safetensors format. Safetensors provides:
 
 1. **Memory-mapped loading:** Can load individual tensors without reading the entire file
 2. **Metadata header:** JSON metadata stored in the file header
@@ -1231,7 +1231,7 @@ Plus embedding and lm_head:
 Grand total: ~2.4 GB
 ```
 
-This is significant (1.6% of the bf16 model size) but acceptable. The importance matrix is computed once and reused for all quantization profiles (MXQ-2, MXQ-2.5, MXQ-3, etc.).
+This is significant (1.6% of the bf16 model size) but acceptable. The importance matrix is computed once and reused for all quantization profiles (JANG-2, JANG-2.5, JANG-3, etc.).
 
 **Optimization: store only block-level scores.** If we omit the per-channel statistics (which are only needed for debugging and re-scoring) and store only the per-block importance scores, the file size drops dramatically:
 
@@ -1258,7 +1258,7 @@ llama.cpp imatrix binary format:
     - values: float32[n_values]  -- one value per column (input channel)
 ```
 
-The values are the raw sum of squared input activations per channel (our `sum_sq`). llama.cpp does not store per-block scores, combined metrics, outlier flags, or rich metadata. The MXQ format is a strict superset of what llama.cpp stores, providing much richer information for the bit allocation algorithm.
+The values are the raw sum of squared input activations per channel (our `sum_sq`). llama.cpp does not store per-block scores, combined metrics, outlier flags, or rich metadata. The JANG format is a strict superset of what llama.cpp stores, providing much richer information for the bit allocation algorithm.
 
 ---
 
@@ -1684,8 +1684,8 @@ Lower perplexity is better. A perplexity of 1.0 would mean the model perfectly p
 PPL_ratio = PPL(quantized) / PPL(full_precision)
 
 PPL_ratio = 1.00: quantization introduces no error (impossible in practice)
-PPL_ratio = 1.01-1.03: excellent (typical for MXQ-3 and above)
-PPL_ratio = 1.03-1.05: good (target for MXQ-2.5)
+PPL_ratio = 1.01-1.03: excellent (typical for JANG-3 and above)
+PPL_ratio = 1.03-1.05: good (target for JANG-2.5)
 PPL_ratio = 1.05-1.10: acceptable (aggressive compression)
 PPL_ratio > 1.10: concerning (quality degradation is noticeable)
 PPL_ratio > 1.50: poor (model outputs are noticeably degraded)
@@ -1777,15 +1777,15 @@ mean_KL = (1/N) * sum_{i=1}^{N} KL(P_full(.|context_i) || P_quant(.|context_i))
 **Interpretation:**
 ```
 mean_KL < 0.001: negligible distribution shift
-mean_KL 0.001-0.01: minimal shift (typical for MXQ-3+)
-mean_KL 0.01-0.1: noticeable shift (typical for MXQ-2.5)
+mean_KL 0.001-0.01: minimal shift (typical for JANG-3+)
+mean_KL 0.01-0.1: noticeable shift (typical for JANG-2.5)
 mean_KL 0.1-1.0: significant shift (aggressive compression)
 mean_KL > 1.0: severe shift (model behavior substantially altered)
 ```
 
 ### Per-Layer Error Analysis
 
-Beyond aggregate metrics, MXQ tracks the quantization error at each layer individually. This helps diagnose problems: if one layer has disproportionate error, the importance scores or bit allocation for that layer may need adjustment.
+Beyond aggregate metrics, JANG tracks the quantization error at each layer individually. This helps diagnose problems: if one layer has disproportionate error, the importance scores or bit allocation for that layer may need adjustment.
 
 **Relative Frobenius norm error:**
 
@@ -1840,7 +1840,7 @@ def per_layer_error_analysis(original_model, quantized_model):
 
 ### Task-Specific Benchmarks
 
-Perplexity and KL divergence are aggregate measures. They tell us the overall quality but not how specific capabilities are affected. MXQ validates quantized models on task-specific benchmarks:
+Perplexity and KL divergence are aggregate measures. They tell us the overall quality but not how specific capabilities are affected. JANG validates quantized models on task-specific benchmarks:
 
 **MMLU (Massive Multitask Language Understanding).** 57 subjects, 14,042 multiple-choice questions. Tests factual knowledge and reasoning. Quantization typically affects MMLU by 1-3% at 3-bit average, 3-7% at 2.5-bit average.
 
@@ -1849,7 +1849,7 @@ Perplexity and KL divergence are aggregate measures. They tell us the overall qu
 - Variable names and function signatures must be precisely recalled
 - Logical operators (==, !=, >=) differ by a single token
 
-MXQ addresses this by including code in the calibration dataset, ensuring code-relevant weights receive sufficient bits.
+JANG addresses this by including code in the calibration dataset, ensuring code-relevant weights receive sufficient bits.
 
 **GSM8K (math reasoning).** 1,319 grade-school math word problems. Tests arithmetic and step-by-step reasoning. Math is sensitive to quantization because:
 - Numerical computations require precise intermediate values
@@ -1902,7 +1902,7 @@ spearman_rho < 0.90: allocation is unstable, need more calibration data
 
 **Diminishing returns:** Beyond 1024 samples, the marginal improvement in score stability is negligible. The scores converge well before this point for most models.
 
-**MXQ default:** 512 samples. This balances quality and compute cost. For a 72B model at 2048 tokens per sample, this processes approximately 1 million calibration tokens.
+**JANG default:** 512 samples. This balances quality and compute cost. For a 72B model at 2048 tokens per sample, this processes approximately 1 million calibration tokens.
 
 ### Sequence Length Matching
 
@@ -1952,7 +1952,7 @@ Importance matrices are expensive to compute. For a 72B model with 512 calibrati
 - Store the calibration dataset hash (SHA-256 of the exact data used)
 - Store the random seed if any randomness was involved (sample ordering, etc.)
 - Store the model identifier (exact HuggingFace model ID or weight hash)
-- Store the MXQ version used for calibration
+- Store the JANG version used for calibration
 - Store all hyperparameters (block_size, scoring_method, scoring_weights)
 
 Given the same inputs and hyperparameters, the importance matrix should be bit-for-bit identical. If it is not (due to floating-point non-determinism on GPU), it should be stable enough that the resulting bit allocation is identical.
@@ -1963,7 +1963,7 @@ Given the same inputs and hyperparameters, the importance matrix should be bit-f
 imatrix_<model_hash>_<dataset_hash>_<block_size>_<scoring_method>.safetensors
 
 Example:
-imatrix_qwen35_72b_bf16_a1b2c3_mxqcalib_v1_d4e5f6_bs64_awq_hessian.safetensors
+imatrix_qwen35_72b_bf16_a1b2c3_jangcalib_v1_d4e5f6_bs64_awq_hessian.safetensors
 ```
 
 ### Computational Cost Summary
@@ -1996,14 +1996,14 @@ For comparison, full sensitivity analysis:
 
 ### End-to-End Calibration Pipeline
 
-The complete MXQ calibration pipeline, from raw model to importance matrix:
+The complete JANG calibration pipeline, from raw model to importance matrix:
 
 ```
 Step 1: Load full-precision model
-  mxq calibrate --model Qwen/Qwen3.5-72B --dtype bfloat16
+  jang calibrate --model Qwen/Qwen3.5-72B --dtype bfloat16
 
 Step 2: Load calibration dataset
-  --dataset mxq-calib-v1 (built-in)
+  --dataset jang-calib-v1 (built-in)
   or --dataset-path /path/to/custom.jsonl
 
 Step 3: Tokenize calibration samples
@@ -2038,7 +2038,7 @@ Step 8: Validate (optional but recommended)
 Output: imatrix.safetensors (~1-2 GB for a 72B model)
 ```
 
-This importance matrix is then consumed by Phase 2 (bit allocation and quantization) to produce the final MXQ model. A single importance matrix supports all bit width targets (MXQ-2, MXQ-2.5, MXQ-3, MXQ-4, etc.) -- only the bit allocation changes, not the importance scores.
+This importance matrix is then consumed by Phase 2 (bit allocation and quantization) to produce the final JANG model. A single importance matrix supports all bit width targets (JANG-2, JANG-2.5, JANG-3, JANG-4, etc.) -- only the bit allocation changes, not the importance scores.
 
 ---
 
@@ -2067,7 +2067,7 @@ This importance matrix is then consumed by Phase 2 (bit allocation and quantizat
 - **AWQ: Activation-aware Weight Quantization.** Lin et al., 2023. The foundation for activation-magnitude scoring.
 - **GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers.** Frantar et al., 2023. Hessian-based quantization with optimal brain surgeon updates.
 - **SqueezeLLM: Dense-and-Sparse Quantization.** Kim et al., 2023. Sensitivity-based importance scoring with outlier protection.
-- **EXL2 / ExLlamaV2.** Turboderp, 2023. Mixed-precision per-block quantization with calibrated bit allocation (the closest prior art to MXQ's approach, but for CUDA).
+- **EXL2 / ExLlamaV2.** Turboderp, 2023. Mixed-precision per-block quantization with calibrated bit allocation (the closest prior art to JANG's approach, but for CUDA).
 - **LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale.** Dettmers et al., 2022. First systematic study of outlier channels in LLMs.
 - **Optimal Brain Damage.** LeCun, Denker, Solla, 1989. Hessian diagonal for weight pruning (the theoretical foundation for Hessian-based importance scoring).
 - **QuIP#: Even Better LLM Quantization with Hadamard Incoherence and Lattice Codebooks.** Tseng et al., 2024. State-of-the-art low-bit quantization with incoherence processing.

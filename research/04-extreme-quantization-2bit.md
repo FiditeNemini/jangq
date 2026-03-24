@@ -1,6 +1,6 @@
 # Extreme Quantization: Making 2-Bit Models Capable
 
-> A comprehensive technical reference for MXQ development. Covers the theory, techniques,
+> A comprehensive technical reference for JANG development. Covers the theory, techniques,
 > calibration requirements, benchmarks, and emerging methods that make sub-3-bit quantization
 > viable for large language models on Apple Silicon.
 
@@ -43,12 +43,12 @@ comfortably on a 24 GB machine -- and on a 32 GB Mac with generous context headr
 At 4-bit, that same 70B model requires 35 GB of weights alone, ruling out anything
 below 48 GB.
 
-For MXQ's target market (Mac users running local inference), this is transformative:
+For JANG's target market (Mac users running local inference), this is transformative:
 **2-bit makes 70B+ models accessible on hardware that most Mac users already own.**
 
 The same arithmetic scales to larger models:
 
-| Model        | FP16    | 4-bit   | 2.5-bit (MXQ) | 2-bit   |
+| Model        | FP16    | 4-bit   | 2.5-bit (JANG) | 2-bit   |
 |-------------|---------|---------|---------------|---------|
 | 7B          | 14 GB   | 3.5 GB  | 2.2 GB        | 1.75 GB |
 | 13B         | 26 GB   | 6.5 GB  | 4.1 GB        | 3.25 GB |
@@ -814,7 +814,7 @@ remaining columns are available for error absorption. This is particularly impor
 Empirically, act-order improves perplexity by 0.1-0.3 at 4-bit but by 0.5-2.0+ at
 2-bit -- the impact scales with quantization aggressiveness.
 
-### 2.6 Mixed-Precision 2-Bit: The MXQ Approach
+### 2.6 Mixed-Precision 2-Bit: The JANG Approach
 
 #### The Key Insight
 
@@ -929,9 +929,9 @@ is found by:
 This greedy algorithm is optimal for the discrete problem when the distortion
 functions D_i(b) are convex in b (which they are for quantization).
 
-#### Why This Is What Makes MXQ Theoretically Optimal
+#### Why This Is What Makes JANG Theoretically Optimal
 
-MXQ's calibration-driven bit allocation implements this optimization:
+JANG's calibration-driven bit allocation implements this optimization:
 
 1. **Calibration** (Phase 1) measures D_i(b_i) for each block by evaluating the
    output distortion at each bit width using actual calibration data.
@@ -1100,7 +1100,7 @@ magnitude choice.
 
 #### 3.3.5 Combining Multiple Metrics
 
-For MXQ at 2-bit, the recommended approach combines multiple metrics:
+For JANG at 2-bit, the recommended approach combines multiple metrics:
 
 ```
 final_score_i = alpha * H_diag_normalized_i
@@ -1118,9 +1118,9 @@ Recommended weights for 2-bit:
 The combined score is more robust than any individual metric, which is critical at
 2-bit where a single misallocated block can noticeably degrade output quality.
 
-### 3.4 The Importance of Calibration for MXQ
+### 3.4 The Importance of Calibration for JANG
 
-MXQ's bit allocation algorithm takes the importance scores from calibration and
+JANG's bit allocation algorithm takes the importance scores from calibration and
 decides which blocks get 2, 3, 4, or more bits. Bad calibration leads to:
 
 1. **Over-allocation**: giving 4 bits to insensitive blocks, wasting the bit budget
@@ -1130,7 +1130,7 @@ decides which blocks get 2, 3, 4, or more bits. Bad calibration leads to:
    layers, amplifying the damage
 
 At 4-bit uniform quantization, bad calibration affects only GPTQ compensation quality.
-At MXQ's mixed-precision 2-bit, bad calibration affects the *structural decision* of
+At JANG's mixed-precision 2-bit, bad calibration affects the *structural decision* of
 how many bits each block gets -- a much more consequential error.
 
 ---
@@ -1159,7 +1159,7 @@ context unless otherwise noted.
 | VPTQ               | 2.0  | 8.68          | +3.21 (+59%)  |
 | QTIP               | 2.0  | ~8.3          | +2.8 (~51%)   |
 
-**Llama-2 7B at ~2.5 bits per weight (the MXQ sweet spot):**
+**Llama-2 7B at ~2.5 bits per weight (the JANG sweet spot):**
 
 | Method             | bpw  | WikiText-2 PPL | delta vs FP16 |
 |--------------------|------|---------------|---------------|
@@ -1167,7 +1167,7 @@ context unless otherwise noted.
 | QuIP#              | 2.5  | 7.15          | +1.68 (+31%)  |
 | AQLM               | 2.5  | 6.98          | +1.51 (+28%)  |
 | VPTQ               | 2.5  | 6.81          | +1.34 (+25%)  |
-| **MXQ target**     | 2.5  | **<5.75**     | **<5% delta** |
+| **JANG target**     | 2.5  | **<5.75**     | **<5% delta** |
 
 **Llama-2 70B at ~2 bits per weight:**
 
@@ -1243,7 +1243,7 @@ entirely, regardless of the technique used. This is the "critical mass" hypothes
 | 70B       | 85-92% of FP16 quality     | Good                |
 | 100B+     | 90-95% of FP16 quality     | Very good           |
 
-At 2.5-bit (MXQ's target):
+At 2.5-bit (JANG's target):
 
 | Model Size | 2.5-bit Quality (optimal allocation) | Viability     |
 |-----------|--------------------------------------|---------------|
@@ -1579,13 +1579,13 @@ distillation found that the optimal ordering is:
 Pruning -> Knowledge Distillation -> Quantization  (P-KD-Q)
 ```
 
-For MXQ (which does not perform pruning), the relevant finding is that distillation
+For JANG (which does not perform pruning), the relevant finding is that distillation
 *before* final quantization produces better results than distillation *after*. This
 suggests a pipeline of:
 
 1. Fine-tune the FP16 model with self-distillation to make it more quantization-
    friendly
-2. Apply MXQ mixed-precision quantization to the distilled model
+2. Apply JANG mixed-precision quantization to the distilled model
 3. (Optional) Light fine-tuning of quantized model
 
 ### 5.5 1-Bit Models: The Extreme Frontier
@@ -1714,15 +1714,15 @@ By optimizing the training protocol (learning rate schedule, quantization functi
 gradient estimation), ParetoQ achieves quality at 600M parameters that previously
 required 3B parameters at the same bitrate.
 
-#### Implications for MXQ
+#### Implications for JANG
 
 ParetoQ's findings suggest that:
-1. Mixed-precision (MXQ's approach) is particularly valuable in the 2-3 bit regime
+1. Mixed-precision (JANG's approach) is particularly valuable in the 2-3 bit regime
    because this is exactly where the phase transition occurs -- some blocks may need
    3+ bits to remain in the "perturbation" regime, while others can survive at 2 bits
    in the "restructured" regime.
 
-2. For PTQ methods like MXQ, the 2.5-bit sweet spot is well-chosen: it allows enough
+2. For PTQ methods like JANG, the 2.5-bit sweet spot is well-chosen: it allows enough
    blocks to remain at 3+ bits to preserve the pre-trained representations where it
    matters, while compressing insensitive blocks to 2 bits.
 
@@ -1775,10 +1775,10 @@ with no production implementation yet.
 
 ## Summary: The 2-Bit Toolkit
 
-For MXQ's target of 2-2.5 bit average precision, the following techniques are most
+For JANG's target of 2-2.5 bit average precision, the following techniques are most
 relevant, roughly ordered by implementation priority:
 
-| Technique | Impact at 2-bit | Complexity | MXQ Priority |
+| Technique | Impact at 2-bit | Complexity | JANG Priority |
 |-----------|----------------|------------|-------------|
 | Mixed-precision bit allocation | Very high (30%+ distortion reduction) | Medium | Core feature |
 | GPTQ error compensation + act-order | High (50-70% of remaining gap) | Medium | Core feature |
@@ -1791,7 +1791,7 @@ relevant, roughly ordered by implementation priority:
 | QAT | Very high (2-3 PPL improvement) | Very high | Not in scope |
 
 The combination of mixed-precision allocation, GPTQ compensation, NF2 levels,
-incoherence processing, and high-quality calibration should enable MXQ to achieve its
+incoherence processing, and high-quality calibration should enable JANG to achieve its
 target of matching uniform 4-bit quality at 2.5-bit average -- a 37.5% memory
 reduction that makes 70B models accessible on 32 GB Macs.
 

@@ -37,7 +37,7 @@ layer_types: ['linear_attention', 'linear_attention', 'linear_attention',
 - `mtp_num_hidden_layers: 1` — multi-token prediction head
 - Vision-language model with image_token_id, video_token_id
 
-### Quantization Implications for MLXQ
+### Quantization Implications for JANG
 
 1. **Linear attention layers** have different weight structure than full attention:
    - May have different sensitivity profile
@@ -69,7 +69,7 @@ layer_types: ['linear_attention', 'linear_attention', 'linear_attention',
 | Vision | No | Yes (VL model) |
 | Gating | No | attn_output_gate |
 
-## MLXQ Adaptation Needed
+## JANG Adaptation Needed
 
 1. Add `linear_attention` layer type to architecture detection
 2. Add partial RoPE support to Metal kernel
@@ -77,5 +77,5 @@ layer_types: ['linear_attention', 'linear_attention', 'linear_attention',
 4. Per-layer-type bit allocation: linear attn vs full attn
 5. Vision encoder handling (if quantizing VL models)
 
-This is the cutting-edge architecture that MLXQ should target to
+This is the cutting-edge architecture that JANG should target to
 differentiate from GGUF and other formats that don't handle hybrids well.

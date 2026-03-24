@@ -1,4 +1,4 @@
-# Experiment 038: Multi-Model MLXQ vs Uniform Comparison
+# Experiment 038: Multi-Model JANG vs Uniform Comparison
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
@@ -12,8 +12,8 @@
 | Config | Bits | "Is a tomato a fruit?" |
 |--------|------|----------------------|
 | Uniform 4-bit | 4.00 | Repetition loop ✗ |
-| **MLXQ MLP=4/A=5** | **4.12** | **"A tomato is a fruit."** ✓ |
-| MLXQ MLP=4/A=8 | 4.49 | "A tomato is a fruit." ✓ |
+| **JANG MLP=4/A=5** | **4.12** | **"A tomato is a fruit."** ✓ |
+| JANG MLP=4/A=8 | 4.49 | "A tomato is a fruit." ✓ |
 
 ### SmolLM2-1.7B (llama, MHA, traditional RoPE)
 
@@ -21,11 +21,11 @@
 |--------|------|--------|-----|---------|
 | bf16 | 16 | "A tomato is a fruit." ✓ | "4" ✓ | "Paris" ✓ |
 | Uniform 4-bit | 4.0 | "botanically a fruit" ✓ | "4" ✓ | "Paris" ✓ |
-| MLXQ MLP=4/A=5 | 4.3 | "botanically a fruit" ✓ | starts looping | "Paris" ✓ |
+| JANG MLP=4/A=5 | 4.3 | "botanically a fruit" ✓ | starts looping | "Paris" ✓ |
 | Uniform 3-bit | 3.0 | "fruit or vegetable" (loops) | "4" ✓ | "Paris" ✓ |
-| **MLXQ MLP=3/A=6** | **4.0** | **"A tomato is a fruit."** ✓ | starts looping | "Paris" ✓ |
+| **JANG MLP=3/A=6** | **4.0** | **"A tomato is a fruit."** ✓ | starts looping | "Paris" ✓ |
 
-Note: SmolLM2 at MLXQ MLP=3/A=6 (4.0 eff bits) gives better tomato answer
+Note: SmolLM2 at JANG MLP=3/A=6 (4.0 eff bits) gives better tomato answer
 than uniform 3-bit (3.5 eff bits) — "A tomato is a fruit" vs "fruit or vegetable" loop.
 
 ### TinyLlama-1.1B (llama, GQA 8:1, traditional RoPE)
@@ -35,19 +35,19 @@ than uniform 3-bit (3.5 eff bits) — "A tomato is a fruit" vs "fruit or vegetab
 | bf16 | 16 | "Tomatoes are a fruit." ✓ | "4" ✓ | "Paris" ✓ |
 | Uniform 4-bit | 4.0 | "Tomato is a fruit." ✓ | "4" ✓ | "Paris" ✓ |
 | Uniform 3-bit | 3.0 | "not fruits" (wrong!) | "4" ✓ | "Paris" ✓ |
-| **MLXQ MLP=3/A=6** | **4.0** | **"not a fruit" (wrong)** | "4" ✓ | "Paris" ✓ |
+| **JANG MLP=3/A=6** | **4.0** | **"not a fruit" (wrong)** | "4" ✓ | "Paris" ✓ |
 
 TinyLlama at 3-bit gives wrong answer regardless of allocation — model too small.
 
 ## Key Findings Across Models
 
-1. **Qwen2.5-3B**: MLXQ clearly beats uniform at ~4 bits (prevents repetition loops)
-2. **SmolLM2-1.7B**: MLXQ MLP=3/A=6 gives better tomato answer than uniform 3-bit
+1. **Qwen2.5-3B**: JANG clearly beats uniform at ~4 bits (prevents repetition loops)
+2. **SmolLM2-1.7B**: JANG MLP=3/A=6 gives better tomato answer than uniform 3-bit
 3. **TinyLlama-1.1B**: Too small — 3-bit factual errors regardless of allocation
 
 ## Pattern
 
-- **MLXQ's advantage is most visible on Qwen** (GQA architecture is more
+- **JANG's advantage is most visible on Qwen** (GQA architecture is more
   sensitive to attention precision — fewer KV heads = each matters more)
 - **MHA models** (SmolLM2, TinyLlama with 32 heads) are more robust to
   attention quantization because redundancy across many heads

@@ -1,6 +1,6 @@
 # 07 -- Matrix Mathematics for LLM Inference
 
-> Mathematical foundations for understanding, implementing, and optimizing MXQ quantization on Apple Silicon.
+> Mathematical foundations for understanding, implementing, and optimizing JANG quantization on Apple Silicon.
 
 ---
 
@@ -21,7 +21,7 @@
 
 ### 1.1 Matrix Multiplication: The Core Operation
 
-Every linear layer in a transformer is a matrix multiplication. This single operation dominates the computational cost of LLM inference. Understanding it precisely is non-negotiable for building MXQ.
+Every linear layer in a transformer is a matrix multiplication. This single operation dominates the computational cost of LLM inference. Understanding it precisely is non-negotiable for building JANG.
 
 **Definition.** Given matrices A of shape (n x k) and B of shape (k x m), their product C = A x B is a matrix of shape (n x m) where each element is defined by:
 
@@ -153,7 +153,7 @@ Multiply-adds: batch_size * hidden_dim * output_dim
              = 1,879,048,192 ~ 1.88 billion
 ```
 
-The weight matrix W is read once from memory but used for 8 different inputs. This increases arithmetic intensity by 8x, moving closer to compute-bound territory. However, on single-user desktop inference (the primary MXQ use case), batch_size=1 is the dominant regime.
+The weight matrix W is read once from memory but used for 8 different inputs. This increases arithmetic intensity by 8x, moving closer to compute-bound territory. However, on single-user desktop inference (the primary JANG use case), batch_size=1 is the dominant regime.
 
 ---
 
@@ -312,7 +312,7 @@ From the numbers above:
 - Generating one token requires reading all 69.5 billion weight parameters from memory
 - At fp16 (2 bytes/param): 139 GB must be read per token
 - At 4-bit (0.5 bytes/param): 34.75 GB must be read per token
-- At 2.5-bit MXQ (0.3125 bytes/param): 21.7 GB must be read per token
+- At 2.5-bit JANG (0.3125 bytes/param): 21.7 GB must be read per token
 - At 2-bit (0.25 bytes/param): 17.4 GB must be read per token
 
 On M4 Max with 546 GB/s memory bandwidth:
@@ -320,11 +320,11 @@ On M4 Max with 546 GB/s memory bandwidth:
 ```
 Theoretical tokens/sec at fp16:  546 / 139 = 3.9 tok/s
 Theoretical tokens/sec at 4-bit: 546 / 34.75 = 15.7 tok/s
-Theoretical tokens/sec at MXQ-2.5: 546 / 21.7 = 25.2 tok/s
+Theoretical tokens/sec at JANG-2.5: 546 / 21.7 = 25.2 tok/s
 Theoretical tokens/sec at 2-bit: 546 / 17.4 = 31.4 tok/s
 ```
 
-The relationship is nearly linear: halving the bit width roughly doubles the generation speed. This is the entire reason MXQ exists. If we can make 2.5-bit quality match 4-bit quality, we get 60% faster generation and 37% less RAM usage for free.
+The relationship is nearly linear: halving the bit width roughly doubles the generation speed. This is the entire reason JANG exists. If we can make 2.5-bit quality match 4-bit quality, we get 60% faster generation and 37% less RAM usage for free.
 
 ---
 
@@ -499,7 +499,7 @@ P(token_1) changed from 0.6439 to 0.7054 -- a 9.6% relative error
 P(token_2) changed from 0.2369 to 0.1573 -- a 33.6% relative error!
 ```
 
-A 10% error in one logit caused a 34% error in a probability. This is why lm_head weights are critical and MXQ assigns them a 6-bit minimum.
+A 10% error in one logit caused a 34% error in a probability. This is why lm_head weights are critical and JANG assigns them a 6-bit minimum.
 
 **Error impact by position (qualitative):**
 
@@ -509,7 +509,7 @@ Error impact:    EXTREME HIGH  MED  ...  LOW  ...  MED  HIGH EXTREME EXTREME
 Recommended bits: 6   5   4        2-3       3    4    5     6
 ```
 
-This matches MXQ's design: first/last layer protection with +1 bit bonus, embedding at 4-bit minimum, lm_head at 6-bit minimum.
+This matches JANG's design: first/last layer protection with +1 bit bonus, embedding at 4-bit minimum, lm_head at 6-bit minimum.
 
 ### 3.5 Mixed-Precision Accumulation
 
@@ -543,7 +543,7 @@ This is 0.001% of a typical sum value -- negligible.
 
 The fp32 accumulation costs almost nothing on modern hardware (Apple Silicon has fp32 ALUs) but eliminates a major source of numerical error.
 
-**In the MXQ pipeline:**
+**In the JANG pipeline:**
 ```
 Quantized weight (2-8 bit integer)
   -> Dequantize: multiply by scale, add zero_point -> fp16
@@ -576,7 +576,7 @@ for each a_i:
 Rounding error: O(epsilon * max|a_i|)    // independent of N!
 ```
 
-**Why this matters for MLXQ:**
+**Why this matters for JANG:**
 
 During calibration, we accumulate activation statistics across potentially thousands of samples. For a channel with 8192 values accumulated over 1000 samples, the standard fp32 sum has error ~ 8,192,000 * 1.19e-7 ~ 0.97. Using Kahan summation reduces this to ~ 1.19e-7, which is negligible. The cost is one extra addition and three extra subtractions per accumulation step -- roughly 4x the arithmetic cost, but summation is never the bottleneck (matmuls are).
 
@@ -810,7 +810,7 @@ The optimal alpha is found by grid search over [0, 1], typically alpha ~ 0.5.
 | Uses off-diagonal Hessian | Yes | No |
 | Compensates errors | Yes (exact) | No (pre-scaling only) |
 
-**MXQ's approach** combines both: AWQ-style activation importance for fast per-block scoring (to decide bit allocation), with optional GPTQ-style compensation within each block (to minimize error at the allocated bit width).
+**JANG's approach** combines both: AWQ-style activation importance for fast per-block scoring (to decide bit allocation), with optional GPTQ-style compensation within each block (to minimize error at the allocated bit width).
 
 ---
 
@@ -920,7 +920,7 @@ y = x * (dequantize(W_frozen_quantized) + A * B)
   = x * dequantize(W_frozen_quantized) + (x * A) * B
 ```
 
-This is complementary to MLXQ: a model could be quantized with MXQ for efficient inference, and then LoRA-adapted for specific tasks with the LoRA weights stored separately at full precision.
+This is complementary to JANG: a model could be quantized with JANG for efficient inference, and then LoRA-adapted for specific tasks with the LoRA weights stored separately at full precision.
 
 ---
 
@@ -963,7 +963,7 @@ This has a direct impact on quantization: uniform quantization (equal spacing of
 
 ### 6.2 Layer-by-Layer Distribution Differences
 
-Different components of a transformer have qualitatively different weight distributions, which has direct implications for how MXQ should allocate bits.
+Different components of a transformer have qualitatively different weight distributions, which has direct implications for how JANG should allocate bits.
 
 **Embedding layer:**
 ```
@@ -1015,7 +1015,7 @@ Quantization impact: The gate projection controls information flow through the M
                      However, these are also the largest matrices (most parameters),
                      so they dominate the total model size.
 Recommended: 2-3 bits for most blocks. 4-6 bits for outlier blocks.
-             This is where MXQ's mixed precision has the most impact.
+             This is where JANG's mixed precision has the most impact.
 ```
 
 **MLP down projection:**
@@ -1073,7 +1073,7 @@ For K_e = 10 (outlier-heavy layers): many levels near 0, a few widely-spaced lev
 
 This is one reason why NormalFloat (NF4) quantization (used in QLoRA) outperforms standard uniform integer quantization: NF4 places quantization levels at the quantiles of a normal distribution, effectively accounting for the approximately Gaussian shape.
 
-MXQ handles kurtosis differently: instead of non-uniform quantization levels, it uses uniform levels within each block but allocates more bits to blocks that contain outliers (the blocks responsible for the heavy tails). This is simpler to implement in hardware (uniform dequantization per block) while still adapting to the distribution shape.
+JANG handles kurtosis differently: instead of non-uniform quantization levels, it uses uniform levels within each block but allocates more bits to blocks that contain outliers (the blocks responsible for the heavy tails). This is simpler to implement in hardware (uniform dequantization per block) while still adapting to the distribution shape.
 
 ### 6.4 The Emergent Outlier Phenomenon
 
@@ -1115,7 +1115,7 @@ Mean weight magnitude: ~0.012
 Relative error: ~97x -- the quantized values are 100x wrong.
 ```
 
-MXQ addresses this by giving the block containing the outlier more bits (e.g., 6-bit = 64 levels), allowing both the outlier and the normal weights to be represented accurately, while other blocks without outliers can use 2 bits safely.
+JANG addresses this by giving the block containing the outlier more bits (e.g., 6-bit = 64 levels), allowing both the outlier and the normal weights to be represented accurately, while other blocks without outliers can use 2 bits safely.
 
 ---
 
@@ -1280,11 +1280,11 @@ Result: Block 4 (highest variance) gets 4.4 bits.
         Block 2 (moderate variance) gets 3.4 bits.
 ```
 
-Since practical bit widths are integers (or at least from a discrete set like {2, 3, 4, 5, 6, 8}), the real allocation rounds to the nearest available bit width and then adjusts the budget iteratively. MXQ's allocate.py implements this rounding with a greedy algorithm that iteratively upgrades the most-underserved block.
+Since practical bit widths are integers (or at least from a discrete set like {2, 3, 4, 5, 6, 8}), the real allocation rounds to the nearest available bit width and then adjusts the budget iteratively. JANG's allocate.py implements this rounding with a greedy algorithm that iteratively upgrades the most-underserved block.
 
-### 7.5 This Is the Theoretical Foundation for MXQ
+### 7.5 This Is the Theoretical Foundation for JANG
 
-MXQ's bit allocation algorithm is a practical implementation of this rate-distortion theory:
+JANG's bit allocation algorithm is a practical implementation of this rate-distortion theory:
 
 1. **Calibration** (Phase 1) measures the "variance" of each block -- but instead of simple statistical variance, it uses activation-weighted importance (a better proxy for distortion than raw variance).
 
@@ -1293,7 +1293,7 @@ MXQ's bit allocation algorithm is a practical implementation of this rate-distor
 3. **The formula** is essentially the rate-distortion optimal allocation, but with importance scores replacing variances:
 
 ```
-MXQ allocation: b_i ~ B/N + 0.5 * log2(importance_i / geometric_mean(importance))
+JANG allocation: b_i ~ B/N + 0.5 * log2(importance_i / geometric_mean(importance))
 ```
 
 ### 7.6 Sensitivity-Weighted Distortion
@@ -1337,7 +1337,7 @@ Block A: 3.83 bits (rounds to 4)
 Block B: 2.17 bits (rounds to 2)
 ```
 
-This is precisely the scenario in MLXQ: MLP gate projections have low variance but high sensitivity (through the gating mechanism), while MLP up projections have higher variance but lower sensitivity. The sensitivity-weighted allocation gives gate projections more bits than raw variance alone would suggest.
+This is precisely the scenario in JANG: MLP gate projections have low variance but high sensitivity (through the gating mechanism), while MLP up projections have higher variance but lower sensitivity. The sensitivity-weighted allocation gives gate projections more bits than raw variance alone would suggest.
 
 ---
 
@@ -1415,7 +1415,7 @@ AI ~ 2 / bytes_per_weight
 | 8-bit | 1.0 | 2.0 | Memory-bound |
 | 4-bit | 0.5 | 4.0 | Memory-bound |
 | 3-bit | 0.375 | 5.3 | Memory-bound |
-| MXQ-2.5 | 0.3125 | 6.4 | Memory-bound |
+| JANG-2.5 | 0.3125 | 6.4 | Memory-bound |
 | 2-bit | 0.25 | 8.0 | Memory-bound |
 | 1-bit (binary) | 0.125 | 16.0 | Memory-bound (approaching ridge) |
 
@@ -1450,10 +1450,10 @@ For a 70B model:
 | 8-bit | 8 | 69.5 GB | 7.9 |
 | 4-bit | 4 | 34.75 GB | 15.7 |
 | 3-bit | 3 | 26.1 GB | 20.9 |
-| MXQ-2.5 | 2.5 | 21.7 GB | 25.2 |
+| JANG-2.5 | 2.5 | 21.7 GB | 25.2 |
 | 2-bit | 2 | 17.4 GB | 31.4 |
 
-**This is the entire economic argument for MXQ.** At 2.5-bit average with 4-bit quality, MXQ delivers 60% more tokens per second than uniform 4-bit quantization.
+**This is the entire economic argument for JANG.** At 2.5-bit average with 4-bit quality, JANG delivers 60% more tokens per second than uniform 4-bit quantization.
 
 ### 8.4 Worked Example: M4 Max with 70B Model
 
@@ -1486,7 +1486,7 @@ Effective compute utilization:
   (Very low -- all that GPU compute is idle, waiting for memory)
 ```
 
-**Case 2: MXQ-2.5bit**
+**Case 2: JANG-2.5bit**
 ```
 Weight storage: 69.5e9 * 0.3125 bytes = 21.72 GB
 Quantization metadata: ~1.0 GB (more metadata due to variable bit widths per block)
@@ -1509,7 +1509,7 @@ Speedup vs 4-bit: 23.5 / 15.5 = 1.52x (52% faster)
 RAM savings: 35.25 - 23.2 = 12.05 GB saved (34% less)
 ```
 
-**Case 3: MXQ-2.5bit on M4 Max 36GB (32GB usable)**
+**Case 3: JANG-2.5bit on M4 Max 36GB (32GB usable)**
 ```
 Can the model fit at all?
   Model weights + metadata: 23.2 GB
@@ -1562,7 +1562,7 @@ An often-overlooked cost in mixed-precision quantization is the per-block metada
 Per block metadata:
   - scale: 1 fp16 value = 2 bytes
   - zero_point: 1 fp16 value = 2 bytes
-  - bit_width: 1 uint8 value = 1 byte (MXQ-specific, not needed in uniform quantization)
+  - bit_width: 1 uint8 value = 1 byte (JANG-specific, not needed in uniform quantization)
   Total: 5 bytes per block
 ```
 
@@ -1584,14 +1584,14 @@ Metadata overhead = 5 bytes / 128 weights = 0.039 bytes/weight = 0.3125 bits/wei
 **Impact on effective bit width:**
 
 ```
-For MXQ-2.5 with block_size=64:
+For JANG-2.5 with block_size=64:
   Effective bits = 2.5 (weight data) + 0.625 (metadata) = 3.125 bits/weight
 
-For MXQ-2.5 with block_size=128:
+For JANG-2.5 with block_size=128:
   Effective bits = 2.5 (weight data) + 0.3125 (metadata) = 2.8125 bits/weight
 ```
 
-This means the practical bit width is higher than the nominal bit width. Larger block sizes reduce overhead but also reduce the granularity of the quantization (fewer blocks means less adaptive allocation). The MXQ plan specifies block_size=64, which is a reasonable tradeoff: 0.625 bits overhead is significant but manageable at the 2.5-bit target.
+This means the practical bit width is higher than the nominal bit width. Larger block sizes reduce overhead but also reduce the granularity of the quantization (fewer blocks means less adaptive allocation). The JANG plan specifies block_size=64, which is a reasonable tradeoff: 0.625 bits overhead is significant but manageable at the 2.5-bit target.
 
 **Optimization: compress the bit_width map.** Since bit_widths come from a small set {2, 3, 4, 5, 6, 8}, they can be encoded in 3 bits instead of 8, or run-length encoded if adjacent blocks tend to have the same bit width. This reduces the per-block overhead from 5 bytes to 4.375 bytes (saving 0.1 bits/weight at block_size=64) -- a minor improvement.
 
@@ -1610,7 +1610,7 @@ Per weight dequantization:
   Total: ~5-6 ops per weight
 ```
 
-For MXQ with variable bit widths, there is additional overhead:
+For JANG with variable bit widths, there is additional overhead:
 ```
   5. Read bit_width for this block: 1 memory read (cached per block)
   6. Compute bit offset: 1-2 integer ops
@@ -1636,7 +1636,7 @@ At 2-bit (0.25 bytes/weight):
   Headroom: 38 / 17.5 = 2.17x
 ```
 
-Even at 2-bit, the GPU has 2.17x more compute than needed for dequantization. The dequantization is comfortably within the compute budget. This confirms that the MXQ Metal kernels will not create a computational bottleneck, even with the additional variable-bitwidth logic.
+Even at 2-bit, the GPU has 2.17x more compute than needed for dequantization. The dequantization is comfortably within the compute budget. This confirms that the JANG Metal kernels will not create a computational bottleneck, even with the additional variable-bitwidth logic.
 
 However, the headroom shrinks at lower bit widths, and a poorly-optimized dequantization kernel could become the bottleneck. The kernel must:
 - Coalesce memory reads (all threads in a SIMD group read adjacent memory)
@@ -1653,19 +1653,19 @@ Format         Weight size   tok/s (theory)   RAM needed   Quality
 FP16           139.0 GB      3.9              139+ GB      Baseline
 8-bit          69.5 GB       7.9              70+ GB       ~Lossless
 4-bit          34.75 GB      15.7             35+ GB       Good
-MXQ-3.0        26.1 GB       20.9             27+ GB       Near 4-bit
-MXQ-2.5        21.7 GB       25.2             23+ GB       Matches 4-bit
+JANG-3.0        26.1 GB       20.9             27+ GB       Near 4-bit
+JANG-2.5        21.7 GB       25.2             23+ GB       Matches 4-bit
 2-bit uniform  17.4 GB       31.4             18+ GB       Garbage
-MXQ-2.0        17.4 GB       31.4             18+ GB       Usable*
+JANG-2.0        17.4 GB       31.4             18+ GB       Usable*
 
-*MXQ-2.0 is a stretch target. Quality at 2.0 average bits depends heavily
+*JANG-2.0 is a stretch target. Quality at 2.0 average bits depends heavily
 on the model and how well the importance-weighted allocation works.
-MXQ-2.5 is the sweet spot.
+JANG-2.5 is the sweet spot.
 
 Key relationship:
   tokens_per_second ~ memory_bandwidth / (parameters * bits / 8)
   Halving the bits roughly doubles the speed.
-  This is why MXQ exists.
+  This is why JANG exists.
 ```
 
 ---
@@ -1745,4 +1745,4 @@ AI ~ 2 / bytes_per_weight
 
 ---
 
-*This document provides the mathematical foundation for all phases of MXQ implementation. The formulas and analysis here directly inform the design of the calibration engine (Phase 1), bit allocation algorithm (Phase 2), and Metal dequantization kernels (Phase 4). Every design decision in MXQ -- from block sizes to minimum bit widths to layer-type priors -- can be traced back to the mathematics described above.*
+*This document provides the mathematical foundation for all phases of JANG implementation. The formulas and analysis here directly inform the design of the calibration engine (Phase 1), bit allocation algorithm (Phase 2), and Metal dequantization kernels (Phase 4). Every design decision in JANG -- from block sizes to minimum bit widths to layer-type priors -- can be traced back to the mathematics described above.*

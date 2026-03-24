@@ -1,6 +1,6 @@
 # Apple Metal GPU Computing for ML Inference
 
-> Research document for MLXQ — Mixed-Precision Importance Quantization
+> Research document for JANG — Mixed-Precision Importance Quantization
 > Covers everything needed to design and implement Metal compute kernels for variable bit-width quantized matrix multiplication on Apple Silicon.
 
 ---
@@ -30,7 +30,7 @@ Apple Silicon integrates the GPU on the same die (or dies, for Ultra variants) a
 | M4 Max | 32-40 | 18.0 | 36.0 | 546 | 128 GB |
 | M4 Ultra | 64-80 | 36.0 | 72.0 | 819 | 512 GB |
 
-**For MXQ**: The M4 Ultra at 512 GB unified RAM and 819 GB/s bandwidth is the high-end target. The M4 Max at 128 GB / 546 GB/s is the sweet spot for 70B models. The M4 Pro at 48 GB / 273 GB/s is the mass-market target where MXQ-2.5bit makes a 70B model barely fit.
+**For JANG**: The M4 Ultra at 512 GB unified RAM and 819 GB/s bandwidth is the high-end target. The M4 Max at 128 GB / 546 GB/s is the sweet spot for 70B models. The M4 Pro at 48 GB / 273 GB/s is the mass-market target where JANG-2.5bit makes a 70B model barely fit.
 
 ### 1.2 GPU Core Types
 
@@ -55,7 +55,7 @@ Apple GPUs use a SIMD width of **32 threads**. This is the fundamental execution
 - SIMD group operations (shuffles, reductions) operate across all 32 threads with hardware support
 - This is the same width as NVIDIA warps (32) and wider than AMD wavefronts on RDNA (32) though narrower than GCN wavefronts (64)
 
-**For MXQ**: SIMD width of 32 is critical for kernel design. When we have blocks of 32 or 64 weights (MXQ block size), a single SIMD group can process one or two blocks. SIMD-group reductions (`simd_sum`) let us accumulate dot products without threadgroup barriers.
+**For JANG**: SIMD width of 32 is critical for kernel design. When we have blocks of 32 or 64 weights (JANG block size), a single SIMD group can process one or two blocks. SIMD-group reductions (`simd_sum`) let us accumulate dot products without threadgroup barriers.
 
 ### 1.4 Threadgroup Sizes
 
@@ -82,7 +82,7 @@ Apple Silicon's memory hierarchy, from fastest to slowest:
 - Fastest storage — zero latency for ALU operations
 - Apple does not publicly document register file size, but empirically each thread can use ~32-64 registers (128-256 bytes) before spilling
 - Register pressure affects occupancy: more registers per thread = fewer concurrent threads per core
-- For MXQ kernels: keep dequantized values and accumulator in registers
+- For JANG kernels: keep dequantized values and accumulator in registers
 
 #### 1.5.2 Threadgroup Memory (Shared Memory)
 
@@ -93,7 +93,7 @@ Apple Silicon's memory hierarchy, from fastest to slowest:
 - Declared in kernel as: `threadgroup float shared_tile[TILE_SIZE][TILE_SIZE];`
 - Bank conflicts: threadgroup memory is banked (likely 32 banks on Apple GPUs, matching SIMD width). Accessing the same bank from different threads in a SIMD group causes serialization. Padding arrays by 1 element per row avoids conflicts for column access patterns.
 
-**For MXQ tiled matmul**:
+**For JANG tiled matmul**:
 - 32 KB is enough for two 64x64 tiles of float16 (2 * 64 * 64 * 2 bytes = 16 KB) plus scales/zeros
 - Or two 32x32 tiles of float32 (2 * 32 * 32 * 4 bytes = 8 KB) with room for metadata
 - Double buffering (prefetch next tile while computing current) fits in 32 KB for tiles up to ~48x48 in float16
@@ -111,7 +111,7 @@ Apple Silicon's memory hierarchy, from fastest to slowest:
 - Shared between CPU and GPU — unified memory architecture
 - Bandwidth is the defining performance characteristic for inference:
 
-| Chip Tier | Bandwidth | Token/s for 70B fp16 (140 GB) | Token/s for 70B MXQ-2.5 (22 GB) |
+| Chip Tier | Bandwidth | Token/s for 70B fp16 (140 GB) | Token/s for 70B JANG-2.5 (22 GB) |
 |-----------|-----------|-------------------------------|----------------------------------|
 | Base (M4) | 120 GB/s | 0.86 (won't fit anyway) | 5.5 |
 | Pro (M4 Pro) | 273 GB/s | 1.95 (won't fit) | 12.4 |
@@ -122,7 +122,7 @@ These are theoretical maximums — real throughput is ~70-85% of peak due to ker
 
 **The formula**: `tokens_per_second ≈ memory_bandwidth / model_size_bytes` for autoregressive token generation (batch size 1). This is because each token generation requires reading ALL model weights once. This makes bandwidth the singular bottleneck for inference.
 
-**Why MXQ directly improves throughput**: A 2.5-bit model is 6.4x smaller than fp16. This means 6.4x more tokens per second at the same bandwidth, or equivalently, the model fits on a machine with 6.4x less RAM.
+**Why JANG directly improves throughput**: A 2.5-bit model is 6.4x smaller than fp16. This means 6.4x more tokens per second at the same bandwidth, or equivalently, the model fits on a machine with 6.4x less RAM.
 
 ### 1.6 Unified Memory Architecture — Why It Matters for ML
 
@@ -142,12 +142,12 @@ Apple's unified memory eliminates all three problems:
 
 4. **Memory-mapped model loading**: We can `mmap()` a model file and create an `MTLBuffer` directly from the mapped pages. The OS handles paging — only the weights currently being accessed need to be in physical RAM. For a 200 GB model on a 128 GB machine, the OS pages weights in and out of swap, with only a performance (not correctness) penalty.
 
-**For MXQ specifically**: Unified memory means we can `mmap` the `.mxq.safetensors` file and create `MTLBuffer` objects pointing directly at the quantized weight data. No copies, no conversion, no staging buffers. The GPU reads quantized data directly from the memory-mapped file pages. This is the fastest possible path from disk to GPU computation.
+**For JANG specifically**: Unified memory means we can `mmap` the `.jang.safetensors` file and create `MTLBuffer` objects pointing directly at the quantized weight data. No copies, no conversion, no staging buffers. The GPU reads quantized data directly from the memory-mapped file pages. This is the fastest possible path from disk to GPU computation.
 
 ### 1.7 M3 and M4 Compute-Relevant Features
 
 **M3 (A17 Pro GPU architecture)**:
-- **Dynamic caching**: Hardware dynamically allocates register file space based on actual kernel requirements, rather than worst-case static allocation. This improves occupancy for kernels with variable register pressure — directly relevant for MXQ kernels where different bit-width paths use different numbers of registers.
+- **Dynamic caching**: Hardware dynamically allocates register file space based on actual kernel requirements, rather than worst-case static allocation. This improves occupancy for kernels with variable register pressure — directly relevant for JANG kernels where different bit-width paths use different numbers of registers.
 - **Mesh shading**: Not relevant for compute.
 - **Ray tracing hardware**: Not relevant for compute.
 - **BFloat16 support**: M3 added native bfloat16 (bf16) support in the GPU. This is significant for ML — bf16 has the same dynamic range as fp32 (8-bit exponent) with reduced precision (7-bit mantissa vs 23-bit). `simdgroup_matrix` operations support bf16 on M3+.
@@ -220,7 +220,7 @@ let library = try device.makeLibrary(source: metalSource, options: nil)
 // Or from file: device.makeLibrary(filepath: "kernels.metallib")
 
 // 4. Get a specific kernel function
-let function = library.makeFunction(name: "mxq_dequant_matmul")!
+let function = library.makeFunction(name: "jang_dequant_matmul")!
 
 // 5. Create pipeline state (expensive — cache this!)
 let pipelineState = try device.makeComputePipelineState(function: function)
@@ -274,7 +274,7 @@ commandBuffer.waitUntilCompleted()  // Block until GPU finishes
 - Useful when kernel parameters need to be baked in (e.g., bit width, block size) for maximum performance
 - llama.cpp uses runtime compilation to specialize kernels for specific quantization formats
 
-**For MXQ**: Use build-time compilation for fixed kernels (matmul, dequant). Consider runtime compilation for generating specialized kernel variants for specific bit-width combinations — a kernel that only handles 2-bit and 3-bit blocks can be faster than a generic kernel that handles all bit widths, because the compiler can optimize the unpacking logic.
+**For JANG**: Use build-time compilation for fixed kernels (matmul, dequant). Consider runtime compilation for generating specialized kernel variants for specific bit-width combinations — a kernel that only handles 2-bit and 3-bit blocks can be faster than a generic kernel that handles all bit widths, because the compiler can optimize the unpacking logic.
 
 ### 2.3 Setting Buffers and Data
 
@@ -352,7 +352,7 @@ encoder.dispatchThreads(totalThreads, threadsPerThreadgroup: threadgroupSize)
 - Threads per threadgroup: depends on how much work each thread does
   - If each thread computes one output element: TILE_M * TILE_N threads
   - If using simdgroup_matrix (each SIMD group computes 8x8): TILE_M * TILE_N / 64 * 32 threads
-- For MXQ GEMV (batch=1): M=1, so grid is 1D along N. Each threadgroup handles TILE_N output elements, with K divided among threads for the reduction.
+- For JANG GEMV (batch=1): M=1, so grid is 1D along N. Each threadgroup handles TILE_N output elements, with K divided among threads for the reduction.
 
 ### 2.5 Synchronization
 
@@ -426,7 +426,7 @@ encoder.endEncoding()
 commandBuffer.commit()
 ```
 
-**For MXQ**: Use a fused dequant+matmul kernel instead of two separate dispatches. Separate dispatches write dequantized weights to device memory (slow), then read them back (slow again). A fused kernel dequantizes in registers or threadgroup memory and immediately multiplies — the dequantized values never touch device memory.
+**For JANG**: Use a fused dequant+matmul kernel instead of two separate dispatches. Separate dispatches write dequantized weights to device memory (slow), then read them back (slow again). A fused kernel dequantizes in registers or threadgroup memory and immediately multiplies — the dequantized values never touch device memory.
 
 ### 2.7 Triple Buffering for Overlapping CPU/GPU Work
 
@@ -473,7 +473,7 @@ A Metal compute kernel is declared with the `kernel` qualifier and `void` return
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void mxq_dequant_matmul(
+kernel void jang_dequant_matmul(
     // Buffer arguments — bound via setBuffer()/setBytes()
     device const uint8_t*  packed_weights  [[buffer(0)]],
     device const half*     scales          [[buffer(1)]],
@@ -522,7 +522,7 @@ constant uint& matrix_size [[buffer(6)]];  // Small, uniform access
 float accumulator = 0.0;
 ```
 
-**Key distinction for MXQ**: Weight buffers are `device const` (huge, read-only). Scales and zeros are also `device const` (smaller, read-only). Output is `device` (write). Threadgroup memory holds tiles of activations and dequantized weight tiles. Local accumulators are `thread`.
+**Key distinction for JANG**: Weight buffers are `device const` (huge, read-only). Scales and zeros are also `device const` (smaller, read-only). Output is `device` (write). Threadgroup memory holds tiles of activations and dequantized weight tiles. Local accumulators are `thread`.
 
 ### 3.3 Thread Indexing
 
@@ -587,7 +587,7 @@ bool all_true = simd_all(predicate);
 bool any_true = simd_any(predicate);
 ```
 
-**For MXQ dot product reduction**:
+**For JANG dot product reduction**:
 ```metal
 // Each lane computes one element of the dot product
 // Then reduce across the SIMD group
@@ -670,7 +670,7 @@ packed_half4  ph4;     // 8 bytes (vs half4 which may be 8 or 16 depending on co
 packed_float4 pf4;     // 16 bytes
 ```
 
-**For MXQ quantized weights**:
+**For JANG quantized weights**:
 - Quantized data: `uint8_t` arrays containing packed 2/3/4/5/6/8-bit values
 - Scales: `half` (fp16) — one per block (32 or 64 weights)
 - Zero points: `half` (fp16) — one per block
@@ -764,7 +764,7 @@ device atomic_float* sum [[buffer(8)]];
 atomic_fetch_add_explicit(sum, partial_result, memory_order_relaxed);
 ```
 
-For MXQ kernels, atomics are generally avoided in the hot path — they serialize access. Prefer SIMD reductions and threadgroup reductions using shared memory.
+For JANG kernels, atomics are generally avoided in the hot path — they serialize access. Prefer SIMD reductions and threadgroup reductions using shared memory.
 
 ### 3.9 Metal Math Functions
 
@@ -1050,7 +1050,7 @@ threadgroup_barrier(mem_flags::mem_threadgroup);
 // Now access As with any pattern — it's in fast SRAM
 ```
 
-**For MXQ**: Quantized weight data is packed tightly. For 4-bit weights, each byte contains 2 weights. Adjacent threads should read adjacent bytes for coalescing. When the block layout stores weights for contiguous output channels sequentially, GEMV access (one thread per output channel, reading the same input channel) is naturally coalesced along the output dimension.
+**For JANG**: Quantized weight data is packed tightly. For 4-bit weights, each byte contains 2 weights. Adjacent threads should read adjacent bytes for coalescing. When the block layout stores weights for contiguous output channels sequentially, GEMV access (one thread per output channel, reading the same input channel) is naturally coalesced along the output dimension.
 
 ### 4.6 Double Buffering in Threadgroup Memory
 
@@ -1131,7 +1131,7 @@ fp16, B=128: 128 FLOP/byte (compute-bound)
 4-bit, B=17: 68 (compute-bound!)
 ```
 
-**For MXQ**: Token generation (B=1) is always bandwidth-bound. Every byte saved by quantization directly translates to proportionally faster generation. Prefill with large batch/sequence length crosses the ridge point much sooner with quantized weights.
+**For JANG**: Token generation (B=1) is always bandwidth-bound. Every byte saved by quantization directly translates to proportionally faster generation. Prefill with large batch/sequence length crosses the ridge point much sooner with quantized weights.
 
 ### 4.8 Batched Matmul
 
@@ -1168,10 +1168,10 @@ For inference with shared weights across batches, the weight matrix B is read on
 
 ### 5.1 The Core Challenge
 
-MXQ needs a fused kernel that:
+JANG needs a fused kernel that:
 1. Reads quantized weights (2-8 bits per weight) from device memory
 2. Reads per-block scale and zero point
-3. Reads the bit width for each block (variable per block — this is unique to MXQ)
+3. Reads the bit width for each block (variable per block — this is unique to JANG)
 4. Unpacks and dequantizes in registers
 5. Multiplies with input activations
 6. Accumulates and writes output
@@ -1205,11 +1205,11 @@ For autoregressive generation, M=1. The matmul becomes a matrix-vector product. 
 // Each threadgroup computes TILE_N output elements
 // Within each threadgroup, threads cooperatively reduce over K
 
-#define BLOCK_SIZE 64   // MXQ quantization block size
+#define BLOCK_SIZE 64   // JANG quantization block size
 #define TILE_N 4        // Output elements per threadgroup (rows of W)
 #define SIMD_SIZE 32
 
-kernel void mxq_gemv(
+kernel void jang_gemv(
     device const uint8_t*  packed_weights  [[buffer(0)]],  // Packed quantized data
     device const half*     scales          [[buffer(1)]],  // Per-block scales
     device const half*     zeros           [[buffer(2)]],  // Per-block zeros
@@ -1282,7 +1282,7 @@ For M > 1, we use a tiled approach where the weight tile is dequantized into thr
 #define TILE_N 32
 #define TILE_K 64   // Match block size for aligned dequantization
 
-kernel void mxq_gemm(
+kernel void jang_gemm(
     device const uint8_t*  packed_weights  [[buffer(0)]],
     device const half*     scales          [[buffer(1)]],
     device const half*     zeros           [[buffer(2)]],
@@ -1406,17 +1406,17 @@ llama.cpp's Metal kernels (in `ggml/src/ggml-metal/ggml-metal.metal`) are the mo
 
 **Specialized packing**: Each format has hand-tuned unpacking code. For example, Q4_K stores scales and values in a specific interleaved layout optimized for coalesced access.
 
-**The K-quant formats** (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K) use per-block and per-super-block scales with different bit widths for different "importance levels" of a block — conceptually similar to MXQ but at a coarser granularity (per-format, not per-block).
+**The K-quant formats** (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K) use per-block and per-super-block scales with different bit widths for different "importance levels" of a block — conceptually similar to JANG but at a coarser granularity (per-format, not per-block).
 
-**Relevant patterns for MXQ**:
+**Relevant patterns for JANG**:
 1. Pre-compute byte offsets for each block to avoid runtime bit-offset arithmetic
 2. Use `simdgroup_multiply_accumulate` for the GEMM path
 3. Specialize kernels for common bit-width combinations (e.g., "all 2-bit" vs "all 4-bit" vs "mixed")
 4. Pack metadata (scale, zero, bit_width) into a single struct per block for cache-friendly access
 
-### 5.5 Variable Bit-Width Challenge — The MXQ-Specific Problem
+### 5.5 Variable Bit-Width Challenge — The JANG-Specific Problem
 
-MXQ's distinguishing feature is per-block bit-width allocation. This creates a challenge: adjacent blocks may have different bit widths, meaning:
+JANG's distinguishing feature is per-block bit-width allocation. This creates a challenge: adjacent blocks may have different bit widths, meaning:
 1. The byte offset of block N depends on the bit widths of all preceding blocks
 2. Threads processing different blocks execute different unpacking code (potential branch divergence)
 3. The data layout is irregular — no simple stride pattern
@@ -1461,9 +1461,9 @@ switch (bits) {
 Pros: Simple, works with standard matmul tiling.
 Cons: Branch divergence if threads in the same SIMD group process blocks with different bit widths. On Apple GPUs, divergent branches cause both paths to execute (masked), doubling or worse the execution time.
 
-**Mitigation**: Since MXQ block size is 64 and SIMD width is 32, a SIMD group processes at most 2 blocks at a time. If we ensure that blocks along the K dimension within a tile have the same bit width (or at most 2 different widths), divergence is limited.
+**Mitigation**: Since JANG block size is 64 and SIMD width is 32, a SIMD group processes at most 2 blocks at a time. If we ensure that blocks along the K dimension within a tile have the same bit width (or at most 2 different widths), divergence is limited.
 
-**Option C: Pre-sort blocks by bit width within each row (recommended for MXQ)**
+**Option C: Pre-sort blocks by bit width within each row (recommended for JANG)**
 
 Reorder the weight storage so that within each row (output channel), blocks are sorted by bit width. Within each group of same-width blocks, the standard tiled matmul works without divergence.
 
@@ -1488,7 +1488,7 @@ float act = float(input[original_k]);
 Pros: Zero branch divergence, optimal unpacking, standard tiled structure.
 Cons: Extra memory for permutation indices. Indirect activation access may hurt cache (but activations are small — one vector for GEMV).
 
-**For MXQ, Option C is recommended**. The permutation indices add ~4 bytes per block (one uint32 per element, or one uint32 per block if blocks are contiguous in the sorted layout). For a 4096x4096 matrix with block_size=64, there are 4096*64 = 262,144 blocks. Permutation adds ~1 MB — negligible compared to the weight data.
+**For JANG, Option C is recommended**. The permutation indices add ~4 bytes per block (one uint32 per element, or one uint32 per block if blocks are contiguous in the sorted layout). For a 4096x4096 matrix with block_size=64, there are 4096*64 = 262,144 blocks. Permutation adds ~1 MB — negligible compared to the weight data.
 
 ### 5.6 Performance Optimization
 
@@ -1551,7 +1551,7 @@ Factors that limit occupancy:
 2. **Threadgroup memory**: 32 KB per threadgroup. If a threadgroup uses 16 KB, only 2 threadgroups can coexist per core.
 3. **Threadgroup size**: Maximum 1024. Smaller threadgroups allow more threadgroups per core.
 
-For MXQ kernels:
+For JANG kernels:
 - **GEMV (token gen)**: Use 128 or 256 threads per threadgroup (4-8 SIMD groups). Low register pressure (just accumulator + dequant temps). Can have 4-8 threadgroups per core. Threadgroup memory: minimal (just the reduction buffer).
 - **GEMM (prefill)**: Use 256 or 512 threads per threadgroup. Moderate threadgroup memory (~8-16 KB for tiles). Can have 2-4 threadgroups per core.
 
@@ -1570,7 +1570,7 @@ print("Thread execution width (SIMD size): \(pipelineState.threadExecutionWidth)
 
 ### 6.1 Loading Large Models via MTLBuffer
 
-A 70B model at MXQ-2.5bit is approximately 22 GB. The weights must be accessible as one or more `MTLBuffer` objects.
+A 70B model at JANG-2.5bit is approximately 22 GB. The weights must be accessible as one or more `MTLBuffer` objects.
 
 **Approach 1: Load into MTLBuffer directly**
 ```swift
@@ -1599,7 +1599,7 @@ let buffer = device.makeBuffer(bytesNoCopy: mappedData,
                                 })
 ```
 
-This is the preferred approach for MLXQ:
+This is the preferred approach for JANG:
 - Zero memory overhead — the buffer IS the file's page cache
 - OS handles paging — only pages accessed by the GPU are loaded from disk
 - First access to each page incurs a page fault (~microseconds), but subsequent accesses hit the page cache
@@ -1621,10 +1621,10 @@ For unified memory, `.storageModeShared` means the CPU and GPU access the exact 
 
 ### 6.3 Memory-Mapped Buffers — Zero-Copy Model Loading
 
-The ideal MXQ model loading path:
+The ideal JANG model loading path:
 
 ```
-Disk (.mxq.safetensors file)
+Disk (.jang.safetensors file)
   → mmap() system call
     → Virtual memory pages (not yet in physical RAM)
       → MTLBuffer (bytesNoCopy, storageModeShared)
@@ -1656,7 +1656,7 @@ On a 128 GB Mac running a 200 GB model:
 - Each token generation reads all 200 GB of weights. With 128 GB RAM, ~72 GB must be swapped in/out per token.
 - At 5 GB/s SSD speed: 72 GB / 5 = ~14.4 seconds per token. Usable for offline processing, terrible for interactive use.
 
-**MXQ mitigates this**: At MXQ-2.5bit, that 200 GB fp16 model becomes ~31 GB. On a 128 GB Mac, it fits entirely in RAM with room to spare. No swapping needed.
+**JANG mitigates this**: At JANG-2.5bit, that 200 GB fp16 model becomes ~31 GB. On a 128 GB Mac, it fits entirely in RAM with room to spare. No swapping needed.
 
 **madvise hints for mmap'd models**:
 ```c
@@ -1679,7 +1679,7 @@ For inference, `MADV_WILLNEED` on startup (pre-loads the model) followed by `MAD
 - **setBuffer offset**: Must be 4-byte aligned minimum. For optimal performance, use 256-byte alignment (matching Apple GPU cache line behavior). safetensors format typically aligns tensors to 64-byte boundaries, which satisfies this.
 - **simdgroup_load**: The source pointer must be naturally aligned for the element type (2-byte for half, 4-byte for float).
 
-For MXQ file format design: ensure that each tensor shard's data starts at a 16 KB boundary within the safetensors file. This allows direct mmap-to-MTLBuffer mapping without any alignment fixups.
+For JANG file format design: ensure that each tensor shard's data starts at a 16 KB boundary within the safetensors file. This allows direct mmap-to-MTLBuffer mapping without any alignment fixups.
 
 ```swift
 // Verify alignment
@@ -1746,16 +1746,16 @@ if device.areBarycentricCoordsSupported { ... }  // Not relevant for compute
 **Option 2: Command-line compilation (for packages and CI)**
 ```bash
 # Compile .metal source to .air (intermediate)
-xcrun -sdk macosx metal -c mxq_dequant.metal -o mxq_dequant.air
+xcrun -sdk macosx metal -c jang_dequant.metal -o jang_dequant.air
 
 # Link .air files into .metallib
-xcrun -sdk macosx metallib mxq_dequant.air mxq_matmul.air -o mxq_kernels.metallib
+xcrun -sdk macosx metallib jang_dequant.air jang_matmul.air -o jang_kernels.metallib
 
 # With optimization flags
-xcrun -sdk macosx metal -c -ffast-math -O2 mxq_dequant.metal -o mxq_dequant.air
+xcrun -sdk macosx metal -c -ffast-math -O2 jang_dequant.metal -o jang_dequant.air
 
 # With specific target (Apple Silicon GPU)
-xcrun -sdk macosx metal -c -std=metal3.1 -target air64-apple-macos14 mxq_dequant.metal -o mxq_dequant.air
+xcrun -sdk macosx metal -c -std=metal3.1 -target air64-apple-macos14 jang_dequant.metal -o jang_dequant.air
 ```
 
 **Option 3: Runtime compilation from source string**
@@ -1781,7 +1781,7 @@ let archive = try device.makeBinaryArchive(descriptor: descriptor)
 // Fastest loading — no compilation at all
 ```
 
-**For MXQ**: Use command-line compilation in the Swift Package build process. Ship a `.metallib` file as a package resource. Optionally, support runtime compilation for JIT-specialized kernels (e.g., generating a kernel that only handles the specific bit widths present in the loaded model).
+**For JANG**: Use command-line compilation in the Swift Package build process. Ship a `.metallib` file as a package resource. Optionally, support runtime compilation for JIT-specialized kernels (e.g., generating a kernel that only handles the specific bit widths present in the loaded model).
 
 ### 7.3 MetalKit vs Raw Metal API
 
@@ -1793,7 +1793,7 @@ let archive = try device.makeBinaryArchive(descriptor: descriptor)
 // Pure compute — no MetalKit needed
 import Metal
 
-class MXQEngine {
+class JANGEngine {
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     var pipelineStates: [String: MTLComputePipelineState] = [:]
@@ -1802,9 +1802,9 @@ class MXQEngine {
         device = MTLCreateSystemDefaultDevice()!
         commandQueue = device.makeCommandQueue()!
 
-        let library = try device.makeLibrary(filepath: "mxq_kernels.metallib")
-        let functions = ["mxq_gemv_2bit", "mxq_gemv_3bit", "mxq_gemv_4bit",
-                         "mxq_gemm_generic"]
+        let library = try device.makeLibrary(filepath: "jang_kernels.metallib")
+        let functions = ["jang_gemv_2bit", "jang_gemv_3bit", "jang_gemv_4bit",
+                         "jang_gemm_generic"]
         for name in functions {
             let function = library.makeFunction(name: name)!
             pipelineStates[name] = try device.makeComputePipelineState(function: function)
@@ -1834,7 +1834,7 @@ let buffer = device.makeBuffer(bytesNoCopy: UnsafeMutableRawPointer(mutating: ra
 **Shared struct between Swift and Metal**:
 ```swift
 // Swift side
-struct MXQParams {
+struct JANGParams {
     var M: UInt32
     var N: UInt32
     var K: UInt32
@@ -1842,13 +1842,13 @@ struct MXQParams {
     var numBitGroups: UInt32
 }
 // Pass via setBytes
-var params = MXQParams(M: 1, N: 4096, K: 4096, blockSize: 64, numBitGroups: 3)
-encoder.setBytes(&params, length: MemoryLayout<MXQParams>.size, index: 6)
+var params = JANGParams(M: 1, N: 4096, K: 4096, blockSize: 64, numBitGroups: 3)
+encoder.setBytes(&params, length: MemoryLayout<JANGParams>.size, index: 6)
 ```
 
 ```metal
 // Metal side — must match Swift struct layout exactly
-struct MXQParams {
+struct JANGParams {
     uint M;
     uint N;
     uint K;
@@ -1856,7 +1856,7 @@ struct MXQParams {
     uint numBitGroups;
 };
 
-kernel void mxq_kernel(constant MXQParams& params [[buffer(6)]]) {
+kernel void jang_kernel(constant JANGParams& params [[buffer(6)]]) {
     uint N = params.N;
     // ...
 }
@@ -1905,21 +1905,21 @@ vDSP_vadd(a, 1, b, 1, &output, 1, vDSP_Length(N))  // Element-wise add
 ### 7.6 Building a Swift Package with Metal Shaders
 
 ```
-MXQEngine/
+JANGEngine/
   Package.swift
   Sources/
-    MXQEngine/
+    JANGEngine/
       Engine.swift
       MetalKernels.swift
       ModelLoader.swift
       Resources/
-        mxq_kernels.metallib      // Precompiled shaders
-    MXQMetal/
-      mxq_dequant.metal           // Metal source files
-      mxq_matmul.metal
-      mxq_gemv.metal
+        jang_kernels.metallib      // Precompiled shaders
+    JANGMetal/
+      jang_dequant.metal           // Metal source files
+      jang_matmul.metal
+      jang_gemv.metal
   Tests/
-    MXQEngineTests/
+    JANGEngineTests/
       KernelTests.swift
 ```
 
@@ -1929,17 +1929,17 @@ MXQEngine/
 import PackageDescription
 
 let package = Package(
-    name: "MXQEngine",
+    name: "JANGEngine",
     platforms: [.macOS(.v14)],  // Metal 3.1 minimum
     products: [
-        .library(name: "MXQEngine", targets: ["MXQEngine"]),
+        .library(name: "JANGEngine", targets: ["JANGEngine"]),
     ],
     targets: [
         .target(
-            name: "MXQEngine",
+            name: "JANGEngine",
             dependencies: [],
             resources: [
-                .copy("Resources/mxq_kernels.metallib")
+                .copy("Resources/jang_kernels.metallib")
             ]
         ),
         // Build Metal sources as part of the package
@@ -1950,8 +1950,8 @@ let package = Package(
             capability: .buildTool()
         ),
         .testTarget(
-            name: "MXQEngineTests",
-            dependencies: ["MXQEngine"]
+            name: "JANGEngineTests",
+            dependencies: ["JANGEngine"]
         ),
     ]
 )
@@ -1961,12 +1961,12 @@ let package = Package(
 ```swift
 import Metal
 
-class MXQKernels {
+class JANGKernels {
     let library: MTLLibrary
 
     init(device: MTLDevice) throws {
         // Load from bundle resource
-        guard let url = Bundle.module.url(forResource: "mxq_kernels", withExtension: "metallib") else {
+        guard let url = Bundle.module.url(forResource: "jang_kernels", withExtension: "metallib") else {
             fatalError("Metal library not found in package resources")
         }
         library = try device.makeLibrary(URL: url)
@@ -1981,12 +1981,12 @@ Swift Package Manager does not natively compile `.metal` files. Options:
 2. Write a Build Tool Plugin that invokes `xcrun metal` and `xcrun metallib`
 3. Compile Metal source strings at runtime (slower startup but simplest integration)
 
-For MXQ, pre-compiling to `.metallib` is recommended. The build script:
+For JANG, pre-compiling to `.metallib` is recommended. The build script:
 ```bash
 #!/bin/bash
 # build_metallib.sh — run before swift build
-METAL_DIR="Sources/MXQMetal"
-OUTPUT="Sources/MXQEngine/Resources/mxq_kernels.metallib"
+METAL_DIR="Sources/JANGMetal"
+OUTPUT="Sources/JANGEngine/Resources/jang_kernels.metallib"
 
 AIR_FILES=()
 for metal_file in "$METAL_DIR"/*.metal; do
@@ -2057,10 +2057,10 @@ commandBuffer.commit()
 
 ### 8.1 Exploiting Unified Memory for Model Loading
 
-The zero-copy path for MXQ model loading:
+The zero-copy path for JANG model loading:
 
 ```
-File on disk (.mxq.safetensors)
+File on disk (.jang.safetensors)
   → mmap() (no copy, just virtual address mapping)
     → MTLBuffer(bytesNoCopy:) (no copy, just wraps the mmap)
       → GPU setBuffer() (no copy, just binds the virtual address)
@@ -2083,7 +2083,7 @@ bytes_per_token = model_size_bytes  (must read all weights for each token)
 
 Effective bandwidth is typically 70-85% of theoretical peak:
 
-| Chip | Peak BW | Effective BW (~80%) | MXQ-2.5 70B (22GB) | MXQ-3 70B (27GB) | fp16 70B (140GB) |
+| Chip | Peak BW | Effective BW (~80%) | JANG-2.5 70B (22GB) | JANG-3 70B (27GB) | fp16 70B (140GB) |
 |------|---------|-------------------|---------------------|-------------------|------------------|
 | M4 | 120 | 96 | 4.4 tok/s | 3.6 tok/s | Won't fit |
 | M4 Pro 48GB | 273 | 218 | 9.9 tok/s | 8.1 tok/s | Won't fit |
@@ -2091,12 +2091,12 @@ Effective bandwidth is typically 70-85% of theoretical peak:
 | M4 Ultra 512GB | 819 | 655 | 29.8 tok/s | 24.3 tok/s | 4.7 tok/s |
 | M2 Ultra 192GB | 800 | 640 | 29.1 tok/s | 23.7 tok/s | 4.6 tok/s |
 
-**MXQ-2.5 on M4 Max delivers ~20 tok/s for a 70B model** — fast enough for interactive use. Without quantization, the same model at fp16 would only achieve ~3 tok/s (and barely fits in 128 GB).
+**JANG-2.5 on M4 Max delivers ~20 tok/s for a 70B model** — fast enough for interactive use. Without quantization, the same model at fp16 would only achieve ~3 tok/s (and barely fits in 128 GB).
 
 **For 120B models (e.g., Nemotron-H)**:
-- MXQ-2.5: ~38 GB → M4 Max 128GB: 11.5 tok/s
-- MXQ-3: ~45 GB → M4 Max 128GB: 9.7 tok/s
-- MXQ-2.5: ~38 GB → M4 Ultra 512GB: 17.2 tok/s
+- JANG-2.5: ~38 GB → M4 Max 128GB: 11.5 tok/s
+- JANG-3: ~45 GB → M4 Max 128GB: 9.7 tok/s
+- JANG-2.5: ~38 GB → M4 Ultra 512GB: 17.2 tok/s
 
 ### 8.3 Prefill Performance (Compute-Bound Regime)
 
@@ -2117,13 +2117,13 @@ attention is not purely matmul, etc. Typically ~0.7 for dense models.
 
 Prefill is compute-bound for sequence lengths above ~66 tokens (the ridge point calculated earlier). Quantization provides modest benefit for prefill — the weights are smaller to load from memory, but the computation (dequant + matmul) takes approximately the same time.
 
-However, MXQ does help prefill by enabling larger models to fit in memory. A model that doesn't fit can't do prefill at all.
+However, JANG does help prefill by enabling larger models to fit in memory. A model that doesn't fit can't do prefill at all.
 
 ### 8.4 How Quantization Helps Both Regimes
 
 **Token generation (bandwidth-bound)**:
 - Direct, near-linear speedup: N-bit quantization reads N/16 as many bytes as fp16
-- MXQ-2.5: 6.4x fewer bytes → ~6.4x faster token generation
+- JANG-2.5: 6.4x fewer bytes → ~6.4x faster token generation
 - The dequantization compute (bit unpacking, scale/zero application) is essentially free because the GPU ALUs are 98% idle waiting for memory anyway
 
 **Prefill (compute-bound)**:
@@ -2135,7 +2135,7 @@ However, MXQ does help prefill by enabling larger models to fit in memory. A mod
 **Context window / KV cache**:
 - Quantized weights leave more RAM for KV cache
 - A 70B model at fp16 uses 140 GB for weights, leaving ~0 GB for KV cache on a 128 GB Mac
-- The same model at MXQ-2.5 uses 22 GB, leaving 106 GB for KV cache
+- The same model at JANG-2.5 uses 22 GB, leaving 106 GB for KV cache
 - At fp16 KV, 106 GB supports ~200K-400K tokens of context for 70B model
 - This enables extremely long context windows that are impossible without weight quantization
 
@@ -2147,7 +2147,7 @@ The Apple Neural Engine (ANE) is a dedicated matrix accelerator present in all A
 - M3: 18 TOPS (int8)
 - M4: 38 TOPS (int8)
 
-**Can the ANE accelerate MXQ inference?**
+**Can the ANE accelerate JANG inference?**
 
 Limitations:
 1. **Core ML only**: The ANE is only programmable via Core ML. No Metal API access. No custom kernels.
@@ -2155,16 +2155,16 @@ Limitations:
 3. **Graph-level optimization**: Core ML compiles entire model graphs, not individual operations. You can't use ANE for just the matmul and Metal for everything else (in practice).
 4. **Limited precision**: ANE int8 TOPS doesn't help with fp16 accumulation needed for quality.
 
-**Verdict**: The Neural Engine is not suitable for MXQ inference. Its fixed quantization format support cannot handle variable per-block bit widths. Metal compute kernels on the GPU are the correct approach.
+**Verdict**: The Neural Engine is not suitable for JANG inference. Its fixed quantization format support cannot handle variable per-block bit widths. Metal compute kernels on the GPU are the correct approach.
 
 However, the ANE could theoretically be used for:
 - Running a small draft model for speculative decoding (via Core ML)
 - Embedding computation (if the embedding layer is a standard format)
 - Pre/post-processing operations (tokenizer, sampling)
 
-For MXQ, all core inference computation should target Metal GPU compute.
+For JANG, all core inference computation should target Metal GPU compute.
 
-### 8.6 Summary: Design Principles for MXQ Metal Kernels
+### 8.6 Summary: Design Principles for JANG Metal Kernels
 
 1. **Fuse dequant + matmul**: Never write dequantized weights to device memory. Dequantize in registers or threadgroup memory and immediately multiply.
 
@@ -2174,11 +2174,11 @@ For MXQ, all core inference computation should target Metal GPU compute.
 
 4. **Use simd_sum for GEMV**: For single-token generation, SIMD group reductions are more efficient than threadgroup reductions for the dot product.
 
-5. **Exploit zero-copy loading**: mmap the .mxq.safetensors file, create MTLBuffer with bytesNoCopy. No copies, no conversion.
+5. **Exploit zero-copy loading**: mmap the .jang.safetensors file, create MTLBuffer with bytesNoCopy. No copies, no conversion.
 
 6. **Pre-compute block byte offsets**: Store cumulative byte offsets per block to avoid runtime offset calculation. Adds a small metadata table but eliminates the serial dependency of "sum all previous block sizes to find my offset."
 
-7. **Specialize common paths**: If a model uses only 2-bit and 3-bit blocks (common for MXQ-2.5), compile a specialized kernel that only handles those two widths. The compiler can optimize more aggressively.
+7. **Specialize common paths**: If a model uses only 2-bit and 3-bit blocks (common for JANG-2.5), compile a specialized kernel that only handles those two widths. The compiler can optimize more aggressively.
 
 8. **Profile with Metal System Trace**: Measure actual bandwidth utilization and occupancy. The GEMV kernel should achieve >70% of peak bandwidth. If it doesn't, the bottleneck is in the access pattern (non-coalesced reads, bank conflicts) rather than raw bandwidth.
 
@@ -2256,7 +2256,7 @@ simdgroup_multiply_accumulate(c, a, b, c);
 simdgroup_store(c, dst_ptr, stride);
 ```
 
-## Appendix C: Chip Specifications for MXQ Target Platforms
+## Appendix C: Chip Specifications for JANG Target Platforms
 
 | Property | M4 | M4 Pro | M4 Max | M4 Ultra |
 |----------|-----|--------|--------|----------|
@@ -2270,7 +2270,7 @@ simdgroup_store(c, dst_ptr, stride);
 | BFloat16 | Yes | Yes | Yes | Yes |
 | Page size | 16 KB | 16 KB | 16 KB | 16 KB |
 
-## Appendix D: Performance Model for MXQ Kernel Design
+## Appendix D: Performance Model for JANG Kernel Design
 
 ```
 # Token generation (GEMV, bandwidth-bound)

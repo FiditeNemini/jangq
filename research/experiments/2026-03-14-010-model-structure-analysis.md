@@ -7,7 +7,7 @@
 ## Purpose
 
 Before wiring the forward pass, verify the exact tensor layout and
-architecture details of the Qwen2.5-0.5B MXQ model to ensure correctness.
+architecture details of the Qwen2.5-0.5B JANG model to ensure correctness.
 
 ## Findings
 
@@ -68,7 +68,7 @@ The embedding is quantized at 4-bit. For a single token lookup:
 - Then dequant 14 blocks → 896 float16 values
 - This is efficient — only 448 bytes from GPU memory per token
 
-**Implementation**: Specialized kernel `mxq_embedding_dequant` that reads
+**Implementation**: Specialized kernel `jang_embedding_dequant` that reads
 a single row from the quantized embedding table.
 
 ### 2. Tied Embeddings / LM Head (Critical)
@@ -76,7 +76,7 @@ Since `tie_word_embeddings: true`, the lm_head uses embed_tokens weights
 transposed. For token generation:
 - Need: logits[v] = sum_h(hidden[h] × embed[v][h]) for all v in vocab
 - This is a dequant GEMV with the embedding matrix: output (151936,) = embed (151936, 896) × hidden (896,)
-- Our existing `mxq_dequant_gemv` kernel can handle this
+- Our existing `jang_dequant_gemv` kernel can handle this
 
 ### 3. GQA Attention Layout
 - 14 Q heads, 2 KV heads → each KV head serves 7 Q heads

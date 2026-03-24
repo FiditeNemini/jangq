@@ -6,7 +6,7 @@
 
 ## Hypothesis
 
-The MXQ bit packing engine (`pack.py`) correctly packs and unpacks integer values
+The JANG bit packing engine (`pack.py`) correctly packs and unpacks integer values
 at all supported bit widths (2, 3, 4, 5, 6, 8) without data loss, including edge
 cases like cross-byte boundaries for non-byte-aligned widths (3, 5, 6).
 
@@ -21,7 +21,7 @@ cases like cross-byte boundaries for non-byte-aligned widths (3, 5, 6).
   5. Edge cases: all-zero arrays, all-max-value arrays
 
 - **Bit widths tested**: 2, 3, 4, 5, 6, 8
-- **Block sizes**: 64 (default MXQ block size)
+- **Block sizes**: 64 (default JANG block size)
 - **RNG seeds**: 42, 123, 999 (reproducible)
 
 ## Results
@@ -66,7 +66,7 @@ Total time: 1.33 seconds
 
 All bit widths produce exact roundtrip results. The packing engine handles
 cross-byte boundaries correctly for non-byte-aligned widths (3, 5, 6).
-This is critical for MXQ because variable bit-width blocks will have
+This is critical for JANG because variable bit-width blocks will have
 different block sizes in bytes, and the dequantization kernel must correctly
 extract values that span byte boundaries.
 
@@ -74,4 +74,4 @@ extract values that span byte boundaries.
 
 The bit packing engine is correct and ready for use in the quantization pipeline.
 No data loss at any bit width. Fast paths for 2-bit and 4-bit provide optimization
-for the most common MXQ bit widths.
+for the most common JANG bit widths.

@@ -6,7 +6,7 @@
 
 ## The Breakthrough
 
-Using MLX's own quantizer (eliminating any MXQ kernel artifacts),
+Using MLX's own quantizer (eliminating any JANG kernel artifacts),
 variable bit allocation across layer types BEATS uniform allocation
 at the SAME or FEWER average bits.
 
@@ -66,21 +66,21 @@ The improvement depends on:
 - The weight fractions (12% attention, 88% MLP)
 - The MSE curve shape (exponential in bits: MSE ∝ 4^{-b})
 
-## Significance for MXQ
+## Significance for JANG
 
-This PROVES the core thesis of MLXQ:
+This PROVES the core thesis of JANG:
 1. Variable bit allocation across layers provides real quality advantage
 2. The improvement is measurable and consistent
 3. It works with standard quantization (no GPTQ needed for the proof)
 4. The gain comes from the attention/MLP sensitivity asymmetry
 
 For the paper, we can claim:
-"MXQ-3.4bit (MLP=3, attention=6) achieves equal or better output quality
+"JANG-3.4bit (MLP=3, attention=6) achieves equal or better output quality
 compared to uniform 4-bit quantization, while using 16% fewer bits."
 
 ## Next Steps
 
-1. Implement cross-layer allocation in MXQ's bit allocator
+1. Implement cross-layer allocation in JANG's bit allocator
 2. Add attention bit-width boost to the architecture config
 3. Run perplexity evaluation on wikitext-2 for proper benchmarking
 4. Test on 7B+ models where the improvement should be even larger

@@ -1,4 +1,4 @@
-# MXQ Experiment Log
+# JANG Experiment Log
 
 All experiments, benchmarks, and test results are documented here in chronological order.
 Each file records: hypothesis, method, raw results, analysis, and conclusions.

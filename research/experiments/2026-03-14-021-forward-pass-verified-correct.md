@@ -6,7 +6,7 @@
 
 ## The Finding
 
-**The MXQ forward pass is CORRECT.** The issue was quantization quality on
+**The JANG forward pass is CORRECT.** The issue was quantization quality on
 a tiny 0.5B model, NOT a bug in the Metal kernels or forward pass logic.
 
 ## Evidence
@@ -44,13 +44,13 @@ token 17 ('2') is the top prediction in both cases.
    = large accumulated error. Larger models (70B) have more layers but
    each layer is more robust to per-weight errors.
 
-3. **The sweet spot for MXQ is larger models**: The whole point of MXQ
+3. **The sweet spot for JANG is larger models**: The whole point of JANG
    is to make 70B models fit in 32GB RAM. A 0.5B model at 8-bit is
    already only 500MB — no need to compress it.
 
 ## What This Means
 
-- The entire MXQ pipeline works end-to-end: Python quantize → .mxq format
+- The entire JANG pipeline works end-to-end: Python quantize → .jang format
   → Swift loader → Metal kernels → correct token generation
 - All 12+ Metal kernels are verified correct
 - The tokenizer, attention, RoPE, KV cache, sampling all work
@@ -62,7 +62,7 @@ token 17 ('2') is the top prediction in both cases.
 ## Significance
 
 This is the most important experiment in the project so far. It proves
-that MXQ's fundamental architecture — variable bit-width quantization
+that JANG's fundamental architecture — variable bit-width quantization
 with custom Metal dequant kernels — produces correct inference results.
 The remaining work is optimization: better quantization algorithms,
 better calibration, and testing on larger models.

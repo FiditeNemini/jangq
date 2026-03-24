@@ -2,7 +2,7 @@
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
-**Status**: IMPORTANT — confirms MXQ runtime has a bug, model itself works
+**Status**: IMPORTANT — confirms JANG runtime has a bug, model itself works
 
 ## Setup
 
@@ -21,7 +21,7 @@ Prompt: "<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
 Output: "2+2=4\nassistant\n2+2=4"
 ```
 
-### MLXQ Runtime (our quantized model)
+### JANG Runtime (our quantized model)
 ```
 Prompt: Same chat template, identical token IDs (verified)
 Output: "pecting, 证<作之告-C...hsfp-8-d12+^ c."
@@ -33,7 +33,7 @@ The model produces correct output through MLX. The same model,
 quantized through our pipeline (with verified-correct dequantization),
 produces garbage through our Swift+Metal runtime.
 
-**This definitively confirms**: the issue is in the MXQ inference engine,
+**This definitively confirms**: the issue is in the JANG inference engine,
 not in the quantization quality or the model itself.
 
 **What's verified correct**:

@@ -1,6 +1,6 @@
 # Importance-Aware Quantization Methods: A Comprehensive Technical Reference
 
-> Research document for MXQ development. Covers every major importance-aware quantization
+> Research document for JANG development. Covers every major importance-aware quantization
 > method with full mathematical formulations, algorithmic details, and comparative analysis.
 
 ---
@@ -16,7 +16,7 @@
 7. [QuIP#: Quantization with Incoherence Processing](#7-quip-quantization-with-incoherence-processing)
 8. [AQLM: Additive Quantization for Language Models](#8-aqlm-additive-quantization-for-language-models)
 9. [Comparative Analysis](#9-comparative-analysis)
-10. [Implications for MXQ](#10-implications-for-mxq)
+10. [Implications for JANG](#10-implications-for-jang)
 
 ---
 
@@ -338,12 +338,12 @@ This makes AWQ one of the fastest quantization methods.
   The true optimal scaling (even assuming per-channel scaling) is the solution to a
   complex optimization problem that AWQ approximates.
 
-### 2.6 Relevance to MXQ
+### 2.6 Relevance to JANG
 
-AWQ's activation-based importance metric is directly useful for MXQ's calibration phase.
+AWQ's activation-based importance metric is directly useful for JANG's calibration phase.
 The key lesson is that activation magnitude is a fast, reliable proxy for weight importance.
-MXQ's scoring (Phase 1) should compute per-channel activation norms as one component of
-the importance score. However, MXQ goes beyond AWQ by using importance scores to allocate
+JANG's scoring (Phase 1) should compute per-channel activation norms as one component of
+the importance score. However, JANG goes beyond AWQ by using importance scores to allocate
 variable bit widths per block, rather than just scaling within a fixed bit width.
 
 ---
@@ -664,16 +664,16 @@ quantization typically takes 1-4 hours on a single GPU.
   where later columns tend to accumulate more error (because they absorb compensation
   from all preceding columns). Act-order mitigates but does not eliminate this.
 
-### 3.8 Relevance to MXQ
+### 3.8 Relevance to JANG
 
-GPTQ's optimal rounding and Hessian-based compensation should be used within MXQ's
-per-block quantization (Phase 2). After MXQ determines the bit allocation per block, each
+GPTQ's optimal rounding and Hessian-based compensation should be used within JANG's
+per-block quantization (Phase 2). After JANG determines the bit allocation per block, each
 block should be quantized using GPTQ-style optimal rounding rather than naive rounding.
 The key modification is that different blocks within the same layer use different bit
 widths -- the GPTQ algorithm itself is agnostic to the bit width, so this is
 straightforward to implement.
 
-The Hessian computation from GPTQ can also feed into MXQ's importance scoring (Phase 1):
+The Hessian computation from GPTQ can also feed into JANG's importance scoring (Phase 1):
 the diagonal of X^TX directly measures per-channel sensitivity.
 
 ---
@@ -692,7 +692,7 @@ weights in a layer, EXL2 assigns different bit widths to different blocks of wei
 on their measured sensitivity. This enables "fractional" average bit widths like 2.5, 3.5,
 or 4.25 bits per weight -- granularities that are impossible with uniform quantization.
 
-EXL2 is the closest existing analog to what MXQ aims to achieve, making it the most
+EXL2 is the closest existing analog to what JANG aims to achieve, making it the most
 important method to study and understand.
 
 ### 4.2 The EXL2 Pipeline
@@ -922,11 +922,11 @@ Key observations:
   Individual outlier weights within a block are not protected -- the entire block gets the
   same bit width.
 
-### 4.8 Lessons for MXQ
+### 4.8 Lessons for JANG
 
-EXL2 is the closest precedent for MXQ. Key takeaways:
+EXL2 is the closest precedent for JANG. Key takeaways:
 
-1. **The three-stage pipeline works**: Measure sensitivity, allocate bits, quantize. MXQ
+1. **The three-stage pipeline works**: Measure sensitivity, allocate bits, quantize. JANG
    should follow this structure.
 
 2. **Greedy allocation is sufficient**: The combinatorial optimization of bit allocation
@@ -934,12 +934,12 @@ EXL2 is the closest precedent for MXQ. Key takeaways:
    Dynamic programming is unnecessary.
 
 3. **GPTQ within each block**: Using optimal rounding within each block is important for
-   quality. MXQ should not use naive rounding.
+   quality. JANG should not use naive rounding.
 
 4. **Custom kernels are essential**: The inference engine must support variable-width
-   dequantization. For MXQ, this means Metal kernels.
+   dequantization. For JANG, this means Metal kernels.
 
-5. **What to improve**: MXQ can improve on EXL2 by:
+5. **What to improve**: JANG can improve on EXL2 by:
    - Adding layer-type priors (attention heads need more bits than MLP layers)
    - Using activation-aware importance (AWQ-style) in addition to Hessian-based sensitivity
    - Supporting Apple Silicon via Metal kernels instead of CUDA
@@ -1146,20 +1146,20 @@ outliers but becomes a bottleneck if the outlier fraction exceeds ~5%.
 - **Does not compose easily**: Hard to combine with methods like AWQ (which assumes all
   weights are uniformly quantized) or EXL2 (which assumes block-level uniformity).
 
-### 5.6 Relevance to MXQ
+### 5.6 Relevance to JANG
 
-SpQR's sensitivity metric (w^2 * H_{jj}) is directly useful for MXQ's importance scoring.
-MXQ should compute this metric and use it as one component of its block-level importance
+SpQR's sensitivity metric (w^2 * H_{jj}) is directly useful for JANG's importance scoring.
+JANG should compute this metric and use it as one component of its block-level importance
 score (e.g., the max or mean sensitivity within each block).
 
-However, MXQ should prefer block-level mixed precision (like EXL2) over sparse outlier
+However, JANG should prefer block-level mixed precision (like EXL2) over sparse outlier
 storage because:
 1. Block-level operations are much more efficient on Apple Silicon's unified memory
    architecture (coalesced reads, SIMD-friendly).
 2. Sparse scatter-add operations are less efficient on Metal than on CUDA.
-3. The MXQ file format is simpler without a sparse component.
+3. The JANG file format is simpler without a sparse component.
 
-That said, MXQ could consider a hybrid approach: mixed-precision blocks (EXL2-style) plus
+That said, JANG could consider a hybrid approach: mixed-precision blocks (EXL2-style) plus
 sparse outlier protection for the small number of extreme weights that even 8-bit blocks
 cannot adequately represent.
 
@@ -1366,10 +1366,10 @@ diagonal. In practice, the two metrics are highly correlated for well-trained mo
   information creates a complex pipeline that is harder to implement and debug than simpler
   methods.
 
-### 6.6 Relevance to MXQ
+### 6.6 Relevance to JANG
 
 SqueezeLLM's key lesson is that non-uniform quantization levels can improve quality but at
-the cost of LUT overhead and slower dequantization. For MXQ on Apple Silicon:
+the cost of LUT overhead and slower dequantization. For JANG on Apple Silicon:
 
 - **Against non-uniform quantization**: Metal kernels are optimized for regular memory
   access patterns. LUT-based dequantization would introduce irregular accesses that
@@ -1378,12 +1378,12 @@ the cost of LUT overhead and slower dequantization. For MXQ on Apple Silicon:
 
 - **For sensitivity-weighted optimization**: The idea of weighting the quantization
   objective by sensitivity is valuable regardless of whether uniform or non-uniform levels
-  are used. MXQ can apply sensitivity weighting to its bit allocation (giving more bits
+  are used. JANG can apply sensitivity weighting to its bit allocation (giving more bits
   to sensitive blocks) without adopting LUT-based levels.
 
 - **Fisher information**: Computing the Fisher information is expensive (requires backprop)
   and provides only marginally better sensitivity estimates than the Hessian diagonal
-  (which requires only forward passes). MXQ should use the Hessian diagonal (like
+  (which requires only forward passes). JANG should use the Hessian diagonal (like
   GPTQ/SpQR) rather than the Fisher information.
 
 ---
@@ -1663,11 +1663,11 @@ viable for the first time.
 - **Activation rotation**: The input rotation (V * x) must be applied at every inference
   step. For batched inference with large batch sizes, this can become non-trivial.
 
-### 7.8 Relevance to MXQ
+### 7.8 Relevance to JANG
 
-QuIP#'s incoherence processing is potentially very valuable for MLXQ:
+QuIP#'s incoherence processing is potentially very valuable for JANG:
 
-1. **Combining rotation with mixed precision**: MXQ could apply Hadamard rotation before
+1. **Combining rotation with mixed precision**: JANG could apply Hadamard rotation before
    quantization, then allocate bits per block on the rotated weights. Since the rotated
    weights are more uniform, the bit allocation might be more efficient (fewer blocks
    needing very high bit widths to handle outlier columns).
@@ -1677,7 +1677,7 @@ QuIP#'s incoherence processing is potentially very valuable for MLXQ:
    efficient.
 
 3. **Skip the E8 lattice**: The lattice codebook adds implementation complexity and
-   kernel complexity that may not be worth the 16% MSE improvement. MXQ could adopt
+   kernel complexity that may not be worth the 16% MSE improvement. JANG could adopt
    the Hadamard rotation (the bigger win) without the E8 lattice (the smaller,
    harder-to-implement win).
 
@@ -1919,26 +1919,26 @@ lattice quantization. However, the gap narrows at higher bit widths.
 - **Very limited hardware support**: Only custom CUDA kernels exist. No Metal, no CPU,
   no standard library support.
 
-### 8.8 Relevance to MXQ
+### 8.8 Relevance to JANG
 
-AQLM's approach is largely orthogonal to MXQ's design:
+AQLM's approach is largely orthogonal to JANG's design:
 
 - **Against adoption**: AQLM's multi-codebook vector quantization is fundamentally
-  incompatible with the per-block variable-bit-width approach that MXQ uses. The
+  incompatible with the per-block variable-bit-width approach that JANG uses. The
   codebook lookups are hard to implement efficiently on Metal (irregular memory access
   patterns conflict with Apple Silicon's unified memory bandwidth optimization). The
-  inference overhead (2-3x slower dequantization) is unacceptable for MXQ's
+  inference overhead (2-3x slower dequantization) is unacceptable for JANG's
   performance targets (<5% overhead vs uniform 4-bit).
 
 - **Theoretical benchmark**: AQLM represents the theoretical frontier of what is
-  achievable at 2 bits per weight. MXQ should compare its 2-bit quality against
+  achievable at 2 bits per weight. JANG should compare its 2-bit quality against
   AQLM to understand the gap between scalar mixed-precision quantization and
-  vector quantization. If MXQ at 2.5 bits matches AQLM at 2 bits, MXQ is
+  vector quantization. If JANG at 2.5 bits matches AQLM at 2 bits, JANG is
   competitive on the quality-per-bit curve.
 
-- **Codebook idea at higher level**: While per-group codebooks are impractical for MXQ,
+- **Codebook idea at higher level**: While per-group codebooks are impractical for JANG,
   the idea of learning quantization parameters from data (rather than using fixed
-  scale/zero) could inspire MXQ's group-level scale optimization. For example, MXQ
+  scale/zero) could inspire JANG's group-level scale optimization. For example, JANG
   could optimize group scales to minimize Hessian-weighted error rather than using
   min/max scaling.
 
@@ -2009,7 +2009,7 @@ The frontier at each bit width:
 
 Key observation: **the quality gap between methods shrinks as bit width increases**. At
 4 bits, even naive RTN is acceptable. The methods differentiate themselves primarily at
-2-3 bits, which is exactly the regime MXQ targets.
+2-3 bits, which is exactly the regime JANG targets.
 
 ### 9.3 Calibration Speed vs Quality Trade-off
 
@@ -2057,7 +2057,7 @@ No existing method combines all techniques. The theoretical ideal would combine:
 - Incoherence processing (QuIP#) for uniform weight distribution
 - Possibly sparse outlier protection (SpQR) for extreme outliers
 
-MXQ aims to combine the first three. The fourth (rotation) is an open question requiring
+JANG aims to combine the first three. The fourth (rotation) is an open question requiring
 empirical investigation.
 
 ### 9.5 Hardware Compatibility
@@ -2080,7 +2080,7 @@ empirical investigation.
 ```
 
 Every advanced quantization method requires custom GPU kernels. Apple Silicon has ZERO
-native support for any of these methods. This is MXQ's competitive opportunity: be the
+native support for any of these methods. This is JANG's competitive opportunity: be the
 first high-quality importance-aware quantization method with native Metal support.
 
 ### 9.6 Theoretical Limits
@@ -2106,13 +2106,13 @@ Approximate perplexity degradation vs bit width (very rough):
 The best current methods (AQLM, QuIP#) at 2 bits achieve ~0.4-0.55 PPL above fp16,
 which is within striking distance of the 3-bit uniform baseline. This suggests that
 2-bit quantization with mixed precision (averaging 2.5 bits) could potentially match
-uniform 4-bit quality, validating MXQ's core thesis.
+uniform 4-bit quality, validating JANG's core thesis.
 
 ---
 
-## 10. Implications for MXQ
+## 10. Implications for JANG
 
-### 10.1 What MXQ Should Adopt from Each Method
+### 10.1 What JANG Should Adopt from Each Method
 
 | Method   | Adopt                                                  | Skip                               |
 |----------|--------------------------------------------------------|-------------------------------------|
@@ -2124,9 +2124,9 @@ uniform 4-bit quality, validating MXQ's core thesis.
 | QuIP#    | Investigate Hadamard rotation as preprocessing         | E8 lattice codebooks                |
 | AQLM     | Use as quality benchmark at 2-bit                      | Multi-codebook vector quantization  |
 
-### 10.2 MXQ's Proposed Architecture (Informed by This Survey)
+### 10.2 JANG's Proposed Architecture (Informed by This Survey)
 
-Based on the analysis above, MXQ should implement:
+Based on the analysis above, JANG should implement:
 
 **Phase 1 -- Calibration & Importance Scoring**:
 1. Forward pass calibration (like AWQ) to compute per-channel activation norms
@@ -2138,7 +2138,7 @@ Based on the analysis above, MXQ should implement:
 **Phase 2 -- Bit Allocation**:
 1. Trial quantization at each candidate bit width per block (like EXL2 Stage 1)
 2. Greedy knapsack allocation to hit target average bits (like EXL2 Stage 2)
-3. Layer-type priors: attention > MLP, first/last layers protected (MXQ-specific)
+3. Layer-type priors: attention > MLP, first/last layers protected (JANG-specific)
 
 **Phase 3 -- Quantization**:
 1. GPTQ-style optimal rounding within each block at its allocated bit width
@@ -2153,29 +2153,29 @@ Based on the analysis above, MXQ should implement:
 
 ### 10.3 Expected Quality
 
-Based on the survey data, MXQ's expected quality at various average bit widths:
+Based on the survey data, JANG's expected quality at various average bit widths:
 
 ```
-MXQ-2.0 bpw: Should approach EXL2 at 2.0 (~6.85 PPL), potentially better with
+JANG-2.0 bpw: Should approach EXL2 at 2.0 (~6.85 PPL), potentially better with
              Hessian compensation + layer priors.
 
-MXQ-2.5 bpw: Should be between EXL2 at 2.5 (~5.62) and QuIP# at 2 (~5.75).
+JANG-2.5 bpw: Should be between EXL2 at 2.5 (~5.62) and QuIP# at 2 (~5.75).
              Target: < 5.60 PPL. This would validate the claim "matches 4-bit uniform."
 
-MXQ-3.0 bpw: Should be competitive with EXL2 at 3.0 (~5.41) and SpQR at 3 (~5.35).
+JANG-3.0 bpw: Should be competitive with EXL2 at 3.0 (~5.41) and SpQR at 3 (~5.35).
              Target: < 5.40 PPL.
 
-MXQ-4.0 bpw: All methods converge here. Target: < 5.23 PPL (match AWQ 4-bit).
+JANG-4.0 bpw: All methods converge here. Target: < 5.23 PPL (match AWQ 4-bit).
 ```
 
-The critical test is MXQ-2.5: if it achieves PPL < 5.42 (matching GPTQ 4-bit uniform),
+The critical test is JANG-2.5: if it achieves PPL < 5.42 (matching GPTQ 4-bit uniform),
 the core value proposition is proven.
 
 ### 10.4 Open Research Questions
 
 1. **Rotation vs mixed precision**: Does Hadamard rotation help or hurt when combined
    with mixed-precision bit allocation? Rotation makes weights more uniform, which
-   reduces the benefit of mixed precision. The answer determines whether MXQ should
+   reduces the benefit of mixed precision. The answer determines whether JANG should
    include a rotation step.
 
 2. **Block size**: Smaller blocks (32) enable finer-grained bit allocation but increase
@@ -2188,8 +2188,8 @@ the core value proposition is proven.
    allocation errors but may over-allocate bits to layers that do not need them.
 
 4. **Calibration data sensitivity**: How much does the choice of calibration data affect
-   MXQ quality? AWQ is robust (only needs activation norms); GPTQ/EXL2 are more
-   sensitive (use full Hessian). MXQ uses both, so its sensitivity is unclear.
+   JANG quality? AWQ is robust (only needs activation norms); GPTQ/EXL2 are more
+   sensitive (use full Hessian). JANG uses both, so its sensitivity is unclear.
 
 5. **Interaction with KV cache quantization**: If the KV cache is also quantized (as in
    vMLX), does the weight quantization strategy need to account for KV cache errors?

@@ -6,12 +6,12 @@
 
 ## The Result
 
-**Qwen3.5-4B at 2.5 bits: MLXQ MQ2S gets 6/6 correct, Uniform gets 0/6.**
+**Qwen3.5-4B at 2.5 bits: JANG MQ2S gets 6/6 correct, Uniform gets 0/6.**
 Same effective bits. Same model. Night and day difference.
 
 ## Side-by-Side at 2.5 Effective Bits
 
-| Prompt | Uniform 2-bit | MLXQ MQ2S |
+| Prompt | Uniform 2-bit | JANG MQ2S |
 |--------|--------------|-----------|
 | "What is 2+2?" | `2+2? 2+2? 2+2? 2+2?` | **"The answer is 4."** |
 | "Is a tomato a fruit?" | `1 1 1 1 1 1 1 1 1 1` | **"A tomato is a fruit, not a vegetable."** |
@@ -28,7 +28,7 @@ Qwen3.5-4B has a **hybrid architecture**:
 
 The full attention layers are CRITICAL — they're the only ones doing
 traditional attention with KV cache. When these 8 layers lose precision,
-the entire model collapses. MLXQ protects these 8 layers with 6-bit
+the entire model collapses. JANG protects these 8 layers with 6-bit
 while compressing the 24 linear layers and all MLP at 2-bit.
 
 This is the strongest demonstration yet that **architecture-aware
@@ -36,7 +36,7 @@ quantization is the right approach for modern hybrid models**.
 
 ## Also Notable: 3-bit Results
 
-At 3-bit, both uniform and MLXQ work well on this model:
+At 3-bit, both uniform and JANG work well on this model:
 - Uniform 3: correct answers, slight number spam on "2+2"
 - MQ3M: correct answers, cleaner output, uses <think> tags properly
 
@@ -54,9 +54,9 @@ Qwen3.5-4B:
 
 ## Significance
 
-This is the result that proves MLXQ's value for next-generation models:
+This is the result that proves JANG's value for next-generation models:
 1. Hybrid architectures (Qwen 3.5, Jamba, Nemotron) have mixed layer types
 2. Uniform quantization treats all layers equally — wastes bits on robust
    linear attention layers, starves critical full attention layers
-3. MLXQ allocates bits where they matter — dramatic quality improvement
+3. JANG allocates bits where they matter — dramatic quality improvement
 4. **6/6 vs 0/6 at the same bit count is the clearest win possible**

@@ -1,6 +1,6 @@
 # Audit: 01-quantization-fundamentals.md
 
-Mathematical formula verification for MXQ Research Document 01.
+Mathematical formula verification for JANG Research Document 01.
 
 Auditor: Claude Opus 4.6 (1M context)
 Date: 2026-03-14
@@ -567,7 +567,7 @@ $$\text{bits}_{\text{eff}} = N + \frac{8M}{B}$$
 
 Overhead bits: 40. Weight data bits: $2 \times 32 = 64$. Overhead as fraction of weight data: $40/64 = 0.625 = 62.5\%$. [VERIFIED]
 
-### Section 6.3 -- MXQ-2.5 Worked Example (lines 828-874)
+### Section 6.3 -- JANG-2.5 Worked Example (lines 828-874)
 
 **Target raw bits calculation (line 859):**
 $$N_{\text{target}} = \text{bits}_{\text{eff, target}} - \frac{8M}{B} = 2.5 - \frac{24}{64} = 2.5 - 0.375 = 2.125$$
@@ -693,7 +693,7 @@ $$\min_{\{N_k\}} \sum_k \rho_k \cdot \sigma_k^2 \cdot (2^{N_k - 1} - 1)^{-2} \qu
 - Lloyd-Max quantizer (Section 5.4): Correct
 - Lagrangian derivation for mixed-precision (Section 5.5): Correct (except terminological issues noted)
 - Block overhead formulas (Section 6.1--6.2): All 18 table entries verified correct
-- MXQ-2.5 worked example (Section 6.3): Correct
+- JANG-2.5 worked example (Section 6.3): Correct
 - Expected maximum formula (Section 6.5): Correct
 - Block MSE formula derivation (Section 6.5): Correct
 

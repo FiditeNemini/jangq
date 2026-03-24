@@ -713,7 +713,7 @@ through format conversion is accurate.
 
 ---
 
-## 10. Implications for MXQ (Section 10)
+## 10. Implications for JANG (Section 10)
 
 This section contains design recommendations, not factual claims, so there is less to
 audit. The recommendations are sensible and consistent with the survey.
@@ -799,4 +799,4 @@ Despite the issues above, the document is strong on:
 - Strengths/weaknesses analysis for each method
 - The method decomposition table (Section 9.4)
 - Overall narrative about the quantization landscape
-- Design implications for MXQ
+- Design implications for JANG

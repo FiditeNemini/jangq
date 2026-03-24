@@ -13,7 +13,7 @@ of the model quality.
 ## Method
 
 1. Compute embedding dequant for token 0 on CPU (Python numpy)
-2. Run same token 0 through GPU `mxq_embedding_dequant` kernel
+2. Run same token 0 through GPU `jang_embedding_dequant` kernel
 3. Compare values
 
 ## Results
@@ -42,9 +42,9 @@ projections from the normalized hidden state. ✓
 ## Analysis
 
 All three core kernels verified:
-1. **mxq_embedding_dequant**: exact match with CPU
-2. **mxq_rms_norm**: reasonable output (amplified + normalized)
-3. **mxq_dequant_gemv**: meaningful projection values
+1. **jang_embedding_dequant**: exact match with CPU
+2. **jang_rms_norm**: reasonable output (amplified + normalized)
+3. **jang_dequant_gemv**: meaningful projection values
 
 The garbage inference output is NOT caused by incorrect kernels.
 The issue must be in:

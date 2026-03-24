@@ -1,4 +1,4 @@
-# Experiment 031: MLXQ-2.5 vs MLX Uniform 2-bit
+# Experiment 031: JANG-2.5 vs MLX Uniform 2-bit
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
@@ -6,7 +6,7 @@
 
 ## Results
 
-| Metric | MLXQ-2.5 (MLP=2, attn=6) | MLX Uniform 2-bit |
+| Metric | JANG-2.5 (MLP=2, attn=6) | MLX Uniform 2-bit |
 |--------|--------------------------|-------------------|
 | Avg bits | 2.53 | 2.50 |
 | Model size | 0.91 GB | ~0.95 GB |
@@ -50,8 +50,8 @@ entire layer to produce wrong attention patterns.
 
 ## Conclusion
 
-The MLXQ-2.5 profile is too aggressive for 3B models with RTN quantization.
-The mxq-3 profile (MLP=3, attn=6) at ~3.3 bits is the sweet spot for 3B.
+The JANG-2.5 profile is too aggressive for 3B models with RTN quantization.
+The jang-3 profile (MLP=3, attn=6) at ~3.3 bits is the sweet spot for 3B.
 True 2.5-bit quality requires either larger models or advanced quantization
 (GPTQ + NF2).
 

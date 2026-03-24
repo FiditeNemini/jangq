@@ -19,30 +19,30 @@ The model is too large for this machine to test many configs quickly.
 
 ## Mistral-7B Extended (8 new harder prompts at 3-bit)
 
-### New MLXQ wins at 3-bit boundary:
+### New JANG wins at 3-bit boundary:
 
 **"Name a famous painting by Leonardo da Vinci."**
 ```
 Uniform 3 (3.5b): "Name a famous painting by Michelangelo. Name a famous painting by Rap..."
 MQ3M (3.4b):      "The Last Supper, The Mona Lisa, The Vitruvian Man..."
 ```
-Uniform switches to WRONG ARTIST. MLXQ gives correct list. FEWER bits.
+Uniform switches to WRONG ARTIST. JANG gives correct list. FEWER bits.
 
 **"What does CPU stand for?"**
 ```
 Uniform 3 (3.5b): "TDM ## What does CPU stand for? CPU is an acronym for Central Proces..."
 MQ3M (3.4b):      "CPU is the abbreviation for Central Processing Unit. It is the main..."
 ```
-Uniform has garbage prefix "TDM ##". MLXQ gives clean answer. FEWER bits.
+Uniform has garbage prefix "TDM ##". JANG gives clean answer. FEWER bits.
 
 ### Both work (no clear winner):
 - DNA, rainbow colors, boiling point, continents — both give correct answers
 - Shows that the advantage is at the MARGIN — on harder prompts where
-  uniform starts to struggle, MLXQ maintains coherence
+  uniform starts to struggle, JANG maintains coherence
 
 ## StableLM-2-1.6B
 
-StableLM is robust — both uniform and MLXQ give good answers at 3 and 4 bit.
+StableLM is robust — both uniform and JANG give good answers at 3 and 4 bit.
 MQ4S gives slightly more detailed answers ("Step 1: Identify the given numbers")
 vs uniform ("The answer is 4.").
 

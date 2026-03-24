@@ -1,7 +1,7 @@
 # Quantization Fundamentals
 
-> MXQ Research Document 01 -- Mathematical foundations for mixed-precision quantization.
-> All formulations in this document apply directly to the MXQ pipeline: calibrate, score, allocate, quantize, pack.
+> JANG Research Document 01 -- Mathematical foundations for mixed-precision quantization.
+> All formulations in this document apply directly to the JANG pipeline: calibrate, score, allocate, quantize, pack.
 
 ---
 
@@ -55,7 +55,7 @@ For $N = 4$: the integer range is $[-8, +7]$, giving 16 representable values. Th
 **When to use symmetric quantization:**
 - Weights with distributions centered near zero (which is the common case for transformer weights)
 - When you want simpler dequantization (no zero-point subtraction, saving one operation per weight)
-- When kernel throughput matters more than precision (MXQ's Metal kernels benefit from the simpler math)
+- When kernel throughput matters more than precision (JANG's Metal kernels benefit from the simpler math)
 
 **Limitation:** If the weight distribution is not symmetric around zero, one side of the range is wasted. For example, if weights range from $[-0.1, +1.0]$, symmetric quantization uses $\alpha = 1.0$ and allocates half the grid to $[-1.0, 0]$, but only a tiny sliver of that range is actually occupied.
 
@@ -115,8 +115,8 @@ $$s_{i,k} = \frac{\max_{j \in \text{group}_k}(|W_{ij}|)}{2^{N-1} - 1}$$
 
 Common group sizes: $g = 32, 64, 128$.
 
-**Per-block quantization (what MXQ uses):**
-A generalization of per-group where blocks are contiguous chunks of the flattened weight tensor, not necessarily aligned to row boundaries. MXQ uses block sizes of 32 or 64.
+**Per-block quantization (what JANG uses):**
+A generalization of per-group where blocks are contiguous chunks of the flattened weight tensor, not necessarily aligned to row boundaries. JANG uses block sizes of 32 or 64.
 
 For block size $B$ and a weight tensor with $P$ total parameters:
 - Number of blocks: $\lceil P / B \rceil$
@@ -141,7 +141,7 @@ Non-uniform quantization can achieve lower error for the same bit width because 
 2. Dequantization requires a lookup table instead of a simple multiply-add
 3. Lookup tables are slower on GPU hardware (especially Metal) than arithmetic
 
-In practice, MXQ uses uniform quantization with per-block scaling because the Metal dequant kernels need to be fast, and the per-block granularity compensates for much of the accuracy loss versus non-uniform schemes.
+In practice, JANG uses uniform quantization with per-block scaling because the Metal dequant kernels need to be fast, and the per-block granularity compensates for much of the accuracy loss versus non-uniform schemes.
 
 ### 1.6 The Quantization Error
 
@@ -167,7 +167,7 @@ $$E_{\text{output}} = \text{tr}\!\left((W - Q(W))^T X^T X (W - Q(W))\right)$$
 
 The matrix $H = X^T X$ is the **Hessian** (or more precisely, the second-moment matrix of activations). This tells us that weight errors in directions that are heavily activated by $X$ matter much more than errors in rarely-activated directions.
 
-This is exactly why importance-aware quantization (MXQ, AWQ, GPTQ) outperforms naive round-to-nearest: they weight the quantization error by the Hessian, allocating more precision to weights that the model actually uses heavily during inference.
+This is exactly why importance-aware quantization (JANG, AWQ, GPTQ) outperforms naive round-to-nearest: they weight the quantization error by the Hessian, allocating more precision to weights that the model actually uses heavily during inference.
 
 The true objective is:
 
@@ -239,7 +239,7 @@ $$\text{Total distortion} \approx \prod_{l=1}^{L} (1 + \epsilon_l) \approx \exp\
 
 With uniform 2-bit, $\epsilon_l$ is large enough that for $L = 80$ (a 70B model), the output distribution diverges from the original. This is why uniform 2-bit produces incoherent text.
 
-4. **Why MXQ makes 2-bit viable**: MXQ does not apply 2-bit uniformly. It applies 2-bit only to the least important blocks (where $\epsilon_l$ is small because the weights barely affect the output), while giving 4-6+ bits to the critical blocks. The average may be 2.5 bits, but the distribution of bits is matched to the distribution of importance.
+4. **Why JANG makes 2-bit viable**: JANG does not apply 2-bit uniformly. It applies 2-bit only to the least important blocks (where $\epsilon_l$ is small because the weights barely affect the output), while giving 4-6+ bits to the critical blocks. The average may be 2.5 bits, but the distribution of bits is matched to the distribution of importance.
 
 ### 2.4 Quantization Error as a Function of Bit Width
 
@@ -329,9 +329,9 @@ read_u16(byte 0) = byte1 << 8 | byte0 = 0b00001010_11101111 (example)
 (read_u16 >> 6) & 7 = extract the 3 bits starting at position 6 = 111 = 7
 ```
 
-**MXQ packing approach for Metal kernels:**
+**JANG packing approach for Metal kernels:**
 
-For GPU efficiency, MXQ uses 32-bit word-aligned packing. Each block of $B$ weights at $N$ bits is packed into $\lceil B \times N / 32 \rceil$ 32-bit words. This guarantees that block boundaries align to word boundaries, enabling coalesced memory reads on the GPU.
+For GPU efficiency, JANG uses 32-bit word-aligned packing. Each block of $B$ weights at $N$ bits is packed into $\lceil B \times N / 32 \rceil$ 32-bit words. This guarantees that block boundaries align to word boundaries, enabling coalesced memory reads on the GPU.
 
 For block size $B = 64$:
 
@@ -390,14 +390,14 @@ Compare with absmax: $s = 0.8/7 = 0.1143$, giving step size 0.1143 vs 0.0733. Mi
 
 ### 3.3 Per-Block Scaling with Block Sizes
 
-MXQ quantizes weights in contiguous blocks of $B$ weights, each with its own scale and zero-point.
+JANG quantizes weights in contiguous blocks of $B$ weights, each with its own scale and zero-point.
 
 **Block sizes and their properties:**
 
 | Block Size ($B$) | Scale Params per 4096x4096 Layer | Overhead (fp16 scale + fp16 zero) | Adaptability |
 |:-:|:-:|:-:|:-:|
 | 32 | 524,288 | 2.0 MB | Excellent -- captures local variation |
-| 64 | 262,144 | 1.0 MB | Good -- standard MXQ default |
+| 64 | 262,144 | 1.0 MB | Good -- standard JANG default |
 | 128 | 131,072 | 0.5 MB | Moderate -- misses fine-grained variation |
 | 256 | 65,536 | 0.25 MB | Poor -- too coarse for mixed-precision |
 
@@ -414,7 +414,7 @@ $$\text{overhead ratio} = \frac{32}{N \cdot B}$$
 
 For $N = 2, B = 64$: overhead = $32 / (2 \times 64) = 25\%$ of the weight data size.
 For $N = 4, B = 64$: overhead = $32 / (4 \times 64) = 12.5\%$.
-For $N = 2, B = 32$: overhead = $32 / (2 \times 32) = 50\%$ -- this is large, which is why MXQ defaults to $B = 64$.
+For $N = 2, B = 32$: overhead = $32 / (2 \times 32) = 50\%$ -- this is large, which is why JANG defaults to $B = 64$.
 
 ### 3.4 Super-Blocks (Scales of Scales)
 
@@ -446,7 +446,7 @@ where $m_k = M \cdot (d_k^{(\min)} / 15)$ is the sub-block minimum, similarly qu
 
 The advantage is that sub-block scales are stored in 4 bits instead of 16, reducing overhead by 4x at the sub-block level. The cost is an additional quantization error in the scale itself.
 
-**MXQ's approach:** MXQ stores per-block scales in full float16 (no super-blocks in v1.0). This is acceptable because MXQ uses block size 64, which already provides a good overhead ratio. Super-blocks may be introduced in a future version to squeeze more out of the 2-bit regime.
+**JANG's approach:** JANG stores per-block scales in full float16 (no super-blocks in v1.0). This is acceptable because JANG uses block size 64, which already provides a good overhead ratio. Super-blocks may be introduced in a future version to squeeze more out of the 2-bit regime.
 
 ### 3.5 Optimal Scale Factor via MSE Minimization
 
@@ -533,7 +533,7 @@ $$\min_{\hat{W}} \; \text{tr}\!\left((W - \hat{W})^T H (W - \hat{W})\right) \qua
 
 The greedy column-by-column approach with Hessian-based error compensation gives an approximate solution. The correction step is derived from the optimality condition: given that $w_i$ has been rounded (with error $\delta_i$), the optimal adjustment to the remaining weights is the one that minimizes the total Hessian-weighted error.
 
-**Why this matters for MLXQ:** MXQ can use GPTQ-style optimal rounding within each block during the quantization phase. The Hessian is estimated from the calibration data collected in Phase 1. This is especially valuable for 2-bit and 3-bit blocks where the rounding error per weight is large.
+**Why this matters for JANG:** JANG can use GPTQ-style optimal rounding within each block during the quantization phase. The Hessian is estimated from the calibration data collected in Phase 1. This is especially valuable for 2-bit and 3-bit blocks where the rounding error per weight is large.
 
 ### 4.3 AdaRound (Learning the Rounding)
 
@@ -582,7 +582,7 @@ In a real network, a single rounding error of $0.15$ is small. But this error fe
 
 $$\|y - \hat{y}\| \leq \sum_{l=1}^{L} \|W_l - \hat{W}_l\| \cdot \prod_{k=l+1}^{L} \|\hat{W}_k\| \cdot \|x\|$$
 
-The product term $\prod_{k=l+1}^{L} \|\hat{W}_k\|$ means early-layer errors are amplified by the norms of all subsequent layers. This is why MXQ gives extra bits to early layers (the "first/last layer protection" policy in the bit allocation algorithm).
+The product term $\prod_{k=l+1}^{L} \|\hat{W}_k\|$ means early-layer errors are amplified by the norms of all subsequent layers. This is why JANG gives extra bits to early layers (the "first/last layer protection" policy in the bit allocation algorithm).
 
 ---
 
@@ -667,7 +667,7 @@ Empirically, the weight distributions of trained transformers are well-approxima
 - Bimodal layers: some MLP layers develop bimodal weight distributions after training
 - Embedding layers: token embeddings often have non-Gaussian, heavy-tailed distributions
 
-MXQ handles these deviations through per-block scaling (each block adapts to its local distribution) and importance-aware bit allocation (outlier-heavy blocks can get more bits).
+JANG handles these deviations through per-block scaling (each block adapts to its local distribution) and importance-aware bit allocation (outlier-heavy blocks can get more bits).
 
 ### 5.4 Optimal Codebook Design: The Lloyd-Max Quantizer
 
@@ -699,7 +699,7 @@ Compare with uniform 2-bit symmetric: $c \in \{-3s, -s, +s, +3s\}$ which, with o
 
 The Lloyd-Max quantizer achieves MSE of $0.1175\sigma^2$ for 2-bit Gaussian, while uniform achieves $0.1188\sigma^2$ with optimal clipping -- only 1.1% worse. At 2-bit, uniform is nearly as good as non-uniform for Gaussian sources. The gap widens for non-Gaussian (heavy-tailed) distributions.
 
-**Relevance to MLXQ:** MXQ uses uniform quantization for Metal kernel efficiency, but the small optimality gap for Gaussian weights means this is not a significant sacrifice. The per-block scaling is more impactful than non-uniform grids.
+**Relevance to JANG:** JANG uses uniform quantization for Metal kernel efficiency, but the small optimality gap for Gaussian weights means this is not a significant sacrifice. The per-block scaling is more impactful than non-uniform grids.
 
 ### 5.5 Why Mixed-Precision Is Information-Theoretically Optimal
 
@@ -729,7 +729,7 @@ This is the **reverse water-filling** solution. The optimal bit allocation:
 
 **In simpler terms:** bits should flow to where the entropy is highest and where errors are most costly.
 
-**This is exactly the MXQ strategy.** The calibration phase estimates $\rho_l$ (importance) and the weight statistics give $\sigma_l^2$ (variance). The bit allocation phase then assigns bit widths per block to approximate the optimal reverse water-filling solution, subject to the constraint that bit widths must be integers in $\{2, 3, 4, 5, 6, 8\}$.
+**This is exactly the JANG strategy.** The calibration phase estimates $\rho_l$ (importance) and the weight statistics give $\sigma_l^2$ (variance). The bit allocation phase then assigns bit widths per block to approximate the optimal reverse water-filling solution, subject to the constraint that bit widths must be integers in $\{2, 3, 4, 5, 6, 8\}$.
 
 **Why uniform quantization (same bits everywhere) is suboptimal:**
 
@@ -743,7 +743,7 @@ $$D_{\text{mixed}} = \sum_l \rho_l \sigma_l^2 \cdot 2^{-2R_l^*}$$
 
 By the convexity of $2^{-2R}$ and Jensen's inequality applied in reverse, $D_{\text{mixed}} \leq D_{\text{uniform}}$ whenever the $\rho_l \sigma_l^2$ values are not all identical -- that is, whenever different parts of the model have different importance, which is always the case in practice.
 
-**Quantifying the gain:** For a model where $\rho_l \sigma_l^2$ varies by a factor of 100 across layers (typical for large transformers), mixed-precision quantization at average 2.5 bits can match uniform quantization at ~4 bits. This is the core theoretical justification for MXQ.
+**Quantifying the gain:** For a model where $\rho_l \sigma_l^2$ varies by a factor of 100 across layers (typical for large transformers), mixed-precision quantization at average 2.5 bits can match uniform quantization at ~4 bits. This is the core theoretical justification for JANG.
 
 ---
 
@@ -775,9 +775,9 @@ The improvement diminishes as blocks get smaller -- there's a law of diminishing
 |-----------|------|-----------|
 | Scale ($s$) | 2 bytes (float16) | Always |
 | Zero-point ($z$) | 2 bytes (float16) or 1 byte (int8) | Only for asymmetric |
-| Bit-width indicator | 1 byte (uint8) | Only for mixed-precision (MXQ) |
+| Bit-width indicator | 1 byte (uint8) | Only for mixed-precision (JANG) |
 
-For MXQ with asymmetric quantization, each block requires 5 bytes of metadata. For symmetric quantization, 3 bytes (scale + bit-width).
+For JANG with asymmetric quantization, each block requires 5 bytes of metadata. For symmetric quantization, 3 bytes (scale + bit-width).
 
 **The overhead formulas:**
 
@@ -803,7 +803,7 @@ This is the critical formula for comparing quantization schemes. The "advertised
 
 $$\text{bits}_{\text{eff}} = N + \frac{\text{overhead bits per block}}{B}$$
 
-**MXQ with symmetric quantization (scale only, fp16):**
+**JANG with symmetric quantization (scale only, fp16):**
 
 Overhead per block: scale (16 bits) + bit-width (8 bits) = 24 bits.
 
@@ -813,7 +813,7 @@ Overhead per block: scale (16 bits) + bit-width (8 bits) = 24 bits.
 | 3 | $3 + 24/32 = 3.75$ | $3 + 24/64 = 3.375$ | $3 + 24/128 = 3.1875$ |
 | 4 | $4 + 24/32 = 4.75$ | $4 + 24/64 = 4.375$ | $4 + 24/128 = 4.1875$ |
 
-**MXQ with asymmetric quantization (scale + zero-point, both fp16):**
+**JANG with asymmetric quantization (scale + zero-point, both fp16):**
 
 Overhead per block: scale (16 bits) + zero (16 bits) + bit-width (8 bits) = 40 bits.
 
@@ -823,19 +823,19 @@ Overhead per block: scale (16 bits) + zero (16 bits) + bit-width (8 bits) = 40 b
 | 3 | $3 + 40/32 = 4.25$ | $3 + 40/64 = 3.625$ | $3 + 40/128 = 3.3125$ |
 | 4 | $4 + 40/32 = 5.25$ | $4 + 40/64 = 4.625$ | $4 + 40/128 = 4.3125$ |
 
-At $N = 2$ with $B = 32$ and asymmetric quantization, the effective bit width is 3.25 -- the metadata overhead is 62.5% of the weight data. This is why MXQ defaults to $B = 64$.
+At $N = 2$ with $B = 32$ and asymmetric quantization, the effective bit width is 3.25 -- the metadata overhead is 62.5% of the weight data. This is why JANG defaults to $B = 64$.
 
-### 6.3 Worked Example: MXQ-2.5 for a 70B Model
+### 6.3 Worked Example: JANG-2.5 for a 70B Model
 
 **Model specifications (Qwen3.5-72B-like):**
 - Total parameters: $P = 72 \times 10^9$ = 72 billion
 - Full precision (bf16): $72 \times 10^9 \times 2$ bytes = 144 GB
 
-**MXQ-2.5 target: average 2.5 effective bits per weight.**
+**JANG-2.5 target: average 2.5 effective bits per weight.**
 
 Using block size $B = 64$ with symmetric quantization (24 bits overhead per block):
 
-The bit allocation from the MXQ plan assigns:
+The bit allocation from the JANG plan assigns:
 - Embeddings and lm_head (~1B params): 4-6 bits
 - Attention Q/K/V (~15B params): 3-4 bits
 - MLP gate/up/down (~45B params): 2-3 bits
@@ -858,7 +858,7 @@ Note: the effective bits (2.87) are higher than the target (2.5) because of meta
 
 $$N_{\text{target}} = \text{bits}_{\text{eff, target}} - \frac{8M}{B} = 2.5 - \frac{24}{64} = 2.125 \text{ average raw bits}$$
 
-So to achieve 2.5 effective bits per weight, MXQ needs to average ~2.1 raw bits (before metadata). This means the MLP blocks (which dominate parameter count) must be overwhelmingly 2-bit.
+So to achieve 2.5 effective bits per weight, JANG needs to average ~2.1 raw bits (before metadata). This means the MLP blocks (which dominate parameter count) must be overwhelmingly 2-bit.
 
 **Comparison with alternatives:**
 
@@ -869,13 +869,13 @@ So to achieve 2.5 effective bits per weight, MXQ needs to average ~2.1 raw bits 
 | GGUF Q4_K_M | ~42 GB | ~4.7 |
 | MLX 2-bit uniform ($B=64$) | ~22 GB | 2.5 |
 | GGUF Q2_K | ~27 GB | ~2.6 |
-| **MXQ-2.5** | **~26 GB** | **~2.9** |
+| **JANG-2.5** | **~26 GB** | **~2.9** |
 
-MXQ-2.5 is slightly larger than uniform 2-bit (due to mixed-precision overhead), but the quality difference is massive: MXQ-2.5 targets perplexity within 5% of uniform 4-bit, while uniform 2-bit is unusable.
+JANG-2.5 is slightly larger than uniform 2-bit (due to mixed-precision overhead), but the quality difference is massive: JANG-2.5 targets perplexity within 5% of uniform 4-bit, while uniform 2-bit is unusable.
 
 ### 6.4 Block Alignment and GPU Efficiency
 
-On Metal (Apple GPU), memory reads are most efficient when aligned to 16-byte (128-bit) boundaries. MXQ's packing scheme aligns blocks to 32-bit word boundaries as a minimum, and ideally to 128-bit boundaries for vectorized reads.
+On Metal (Apple GPU), memory reads are most efficient when aligned to 16-byte (128-bit) boundaries. JANG's packing scheme aligns blocks to 32-bit word boundaries as a minimum, and ideally to 128-bit boundaries for vectorized reads.
 
 For block size $B = 64$ at $N = 2$:
 - Block data size: $64 \times 2 / 8 = 16$ bytes = 128 bits (exactly one 128-bit read)
@@ -889,11 +889,11 @@ For $N = 3$:
 For $N = 4$:
 - Block data size: $64 \times 4 / 8 = 32$ bytes = 256 bits (two 128-bit reads)
 
-**Mixed-precision complication:** In MXQ, adjacent blocks may have different bit widths. The byte offset of block $k$ depends on the bit widths of all preceding blocks:
+**Mixed-precision complication:** In JANG, adjacent blocks may have different bit widths. The byte offset of block $k$ depends on the bit widths of all preceding blocks:
 
 $$\text{byte\_offset}(k) = \sum_{j=0}^{k-1} \left\lceil \frac{B \cdot N_j}{8} \right\rceil$$
 
-This variable-offset indexing prevents simple stride-based access. MXQ addresses this by precomputing a block offset table (a small array of $n_b$ uint32 values giving the byte offset of each block). The Metal kernel loads this table into shared memory for fast lookup.
+This variable-offset indexing prevents simple stride-based access. JANG addresses this by precomputing a block offset table (a small array of $n_b$ uint32 values giving the byte offset of each block). The Metal kernel loads this table into shared memory for fast lookup.
 
 **Alternative: fixed-stride with padding.** Allocate the maximum block size ($B \times 8 / 8 = B$ bytes per block, assuming max 8-bit) for every block, regardless of actual bit width. This wastes space but enables stride-based access:
 
@@ -901,7 +901,7 @@ $$\text{byte\_offset}(k) = k \times B$$
 
 The space overhead for a 2.5-bit average model: each block is allocated $B = 64$ bytes but uses only $64 \times 2.5 / 8 = 20$ bytes on average. The waste is $44 / 64 = 69\%$, which is unacceptable.
 
-MXQ uses the offset table approach, which adds $n_b \times 4$ bytes (about 0.2% overhead for a 70B model) but eliminates all padding waste.
+JANG uses the offset table approach, which adds $n_b \times 4$ bytes (about 0.2% overhead for a 70B model) but eliminates all padding waste.
 
 ### 6.5 Block Quantization Error Analysis
 
@@ -938,11 +938,11 @@ $$\text{MSE}_{\text{block}} \approx \frac{\Delta_k^2}{12} = \frac{(3.11\sigma)^2
 | 6 | 961 | 0.000839 | 19.6x better |
 | 8 | 16129 | 0.0000500 | 328x better |
 
-This table quantifies the MXQ tradeoff: giving a block 2 bits instead of 4 increases its MSE by 37x, but if that block has importance $\rho$ that is 37x lower than average, the contribution to total output error is the same. MXQ's calibration identifies which blocks can tolerate 37x more MSE without degrading the model.
+This table quantifies the JANG tradeoff: giving a block 2 bits instead of 4 increases its MSE by 37x, but if that block has importance $\rho$ that is 37x lower than average, the contribution to total output error is the same. JANG's calibration identifies which blocks can tolerate 37x more MSE without degrading the model.
 
-### 6.6 Summary of Key Formulas for MXQ Implementation
+### 6.6 Summary of Key Formulas for JANG Implementation
 
-For quick reference, the essential formulas for the MXQ quantizer:
+For quick reference, the essential formulas for the JANG quantizer:
 
 **Quantize (per-block, symmetric):**
 $$s_k = \frac{\max_{i \in \text{block}_k}(|w_i|)}{2^{N_k - 1} - 1}$$

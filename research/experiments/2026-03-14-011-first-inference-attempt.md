@@ -1,4 +1,4 @@
-# Experiment 011: First MXQ Inference Attempt
+# Experiment 011: First JANG Inference Attempt
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
@@ -6,9 +6,9 @@
 
 ## Setup
 
-- **Model**: Qwen2.5-0.5B-MXQ-2.5bit (our quantized model)
+- **Model**: Qwen2.5-0.5B-JANG-2.5bit (our quantized model)
 - **Hardware**: Apple M4 Max, 107 GB unified memory
-- **Command**: `mxq run model/ --prompt "What is 2+2?" --max-tokens 10`
+- **Command**: `jang run model/ --prompt "What is 2+2?" --max-tokens 10`
 
 ## Results
 
@@ -35,7 +35,7 @@
 
 1. First attempt: `Error: Tensor not found: model.embed_tokens.weight`
    - Cause: loader tried to load embedding as float16, but it's quantized
-   - Fix: load embedding as MXQWeight instead of float16 tensor
+   - Fix: load embedding as JANGWeight instead of float16 tensor
 
 2. Second attempt: runs end-to-end, garbage output
    - Cause: embedding dequant placeholder returns zeros
@@ -43,15 +43,15 @@
 
 ## Next Steps
 
-1. Wire up `mxq_embedding_dequant` kernel in the inference engine
+1. Wire up `jang_embedding_dequant` kernel in the inference engine
 2. Verify dequant GEMV produces correct output on real weights
 3. Verify attention kernel handles GQA correctly
 4. Once embedding works, dequant quality becomes testable
 
 ## Significance
 
-This is the first time the full MXQ pipeline runs end-to-end:
-Python quantize → .mxq format → Swift loader → Metal kernels → token output
+This is the first time the full JANG pipeline runs end-to-end:
+Python quantize → .jang format → Swift loader → Metal kernels → token output
 
 The 0.06s model load time is excellent — mmap zero-copy on Apple Silicon
 unified memory means the weights go directly from disk to GPU-accessible

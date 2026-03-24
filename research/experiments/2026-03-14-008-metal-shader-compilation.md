@@ -8,31 +8,31 @@
 
 - **Xcode**: macOS Tahoe, Metal 3.0 target
 - **Metal Toolchain**: 17C7003j (704.6 MB, downloaded fresh)
-- **Shaders**: MXQDequant.metal, MXQCompute.metal
+- **Shaders**: JANGDequant.metal, JANGCompute.metal
 
 ## Results
 
 | Shader | Kernels | Warnings | Errors | Status |
 |--------|---------|----------|--------|--------|
-| MXQDequant.metal | 3 (dequant, gemv, gemm) | 0 | 0 | PASS |
-| MXQCompute.metal | 7 (rmsnorm, rope, softmax, silu, silu_mul, add, embedding) | 0 | 0 | PASS |
-| mxq.metallib | 10 total | 0 | 0 | 44,993 bytes |
+| JANGDequant.metal | 3 (dequant, gemv, gemm) | 0 | 0 | PASS |
+| JANGCompute.metal | 7 (rmsnorm, rope, softmax, silu, silu_mul, add, embedding) | 0 | 0 | PASS |
+| jang.metallib | 10 total | 0 | 0 | 44,993 bytes |
 
 ### Kernels Compiled
 
-**MXQDequant.metal:**
-1. `mxq_dequantize` — standalone dequant to float16 buffer
-2. `mxq_dequant_gemv` — fused dequant + matrix-vector multiply (token generation)
-3. `mxq_dequant_gemm` — fused dequant + matrix-matrix multiply (prefill)
+**JANGDequant.metal:**
+1. `jang_dequantize` — standalone dequant to float16 buffer
+2. `jang_dequant_gemv` — fused dequant + matrix-vector multiply (token generation)
+3. `jang_dequant_gemm` — fused dequant + matrix-matrix multiply (prefill)
 
-**MXQCompute.metal:**
-4. `mxq_rms_norm` — RMSNorm
-5. `mxq_rope` — Rotary Position Embeddings
-6. `mxq_softmax` — Numerically stable softmax
-7. `mxq_silu` — SiLU activation
-8. `mxq_silu_mul` — Fused SiLU + multiply (SwiGLU)
-9. `mxq_add` — Residual connection
-10. `mxq_embedding` — Token embedding lookup
+**JANGCompute.metal:**
+4. `jang_rms_norm` — RMSNorm
+5. `jang_rope` — Rotary Position Embeddings
+6. `jang_softmax` — Numerically stable softmax
+7. `jang_silu` — SiLU activation
+8. `jang_silu_mul` — Fused SiLU + multiply (SwiGLU)
+9. `jang_add` — Residual connection
+10. `jang_embedding` — Token embedding lookup
 
 ## Implementation Notes
 

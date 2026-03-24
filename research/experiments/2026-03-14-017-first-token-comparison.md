@@ -1,4 +1,4 @@
-# Experiment 017: First Token Comparison — MXQ vs Reference
+# Experiment 017: First Token Comparison — JANG vs Reference
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
@@ -11,7 +11,7 @@
 
 ## Results
 
-| | Reference (MLX bf16) | MLXQ Runtime |
+| | Reference (MLX bf16) | JANG Runtime |
 |---|---|---|
 | First token | `2` (id 17) | `pecting` (wrong) |
 | Top logit | 14.3125 | unknown |

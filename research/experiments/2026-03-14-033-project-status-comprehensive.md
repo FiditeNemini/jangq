@@ -3,25 +3,25 @@
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
 
-## What MLXQ Is
+## What JANG Is
 
-MLXQ (MLX Quantization) is an open-format, mixed-precision quantization
-system for Apple Silicon. Like GGUF is to llama.cpp, MLXQ is to MLX.
+JANG (MLX Quantization) is an open-format, mixed-precision quantization
+system for Apple Silicon. Like GGUF is to llama.cpp, JANG is to MLX.
 
-**Full name**: MLXQ — Mixed-Precision Layer Quantization for MLX
+**Full name**: JANG — Mixed-Precision Layer Quantization for MLX
 
 ## Architecture
 
 ```
-MLXQ System:
-  [Python Tooling]     →  [.mlxq Format]  →  [Swift+Metal Runtime]
+JANG System:
+  [Python Tooling]     →  [.jang Format]  →  [Swift+Metal Runtime]
   calibrate, quantize     safetensors-based    14 Metal GPU kernels
   AWQ, profiles           open standard         zero-copy mmap loading
 ```
 
 ## What's Built (Day 1)
 
-### Python Quantization Tooling (mxq-tools/)
+### Python Quantization Tooling (jang-tools/)
 - `calibrate.py` — weight-only and activation-aware calibration
 - `allocate.py` — greedy, DP, and profile-based bit allocation
 - `quantize.py` — vectorized RTN and MSE-optimal quantization
@@ -33,22 +33,22 @@ MLXQ System:
 - `format/` — reader, writer, validator, spec
 - 50 unit tests passing
 
-### Swift + Metal Runtime (mxq-runtime/)
+### Swift + Metal Runtime (jang-runtime/)
 - 14 Metal GPU kernels:
-  - `mxq_dequantize` — standalone dequant
-  - `mxq_dequant_gemv` — fused dequant+matmul (decode)
-  - `mxq_dequant_gemm` — fused dequant+matmul (prefill)
-  - `mxq_attention_decode` — GQA attention with KV cache
-  - `mxq_attention_prefill` — causal attention for prompt
-  - `mxq_embedding_dequant` — quantized embedding lookup
-  - `mxq_rms_norm`, `mxq_rope`, `mxq_softmax`
-  - `mxq_silu`, `mxq_silu_mul`, `mxq_add`, `mxq_embedding`
+  - `jang_dequantize` — standalone dequant
+  - `jang_dequant_gemv` — fused dequant+matmul (decode)
+  - `jang_dequant_gemm` — fused dequant+matmul (prefill)
+  - `jang_attention_decode` — GQA attention with KV cache
+  - `jang_attention_prefill` — causal attention for prompt
+  - `jang_embedding_dequant` — quantized embedding lookup
+  - `jang_rms_norm`, `jang_rope`, `jang_softmax`
+  - `jang_silu`, `jang_silu_mul`, `jang_add`, `jang_embedding`
 - Swift runtime: config, loader, tokenizer, sampler, inference engine
-- CLI: `mlxq run`, `mlxq info`, `mlxq debug`
+- CLI: `jang run`, `jang info`, `jang debug`
 - All compiles clean, builds in <2s
 
 ### Open Format Spec (FORMAT.md)
-- Safetensors-based with MXQ metadata
+- Safetensors-based with JANG metadata
 - Variable bit-width per block (2,3,4,5,6,8)
 - Per-block scale + zero + bit_map + block_offsets
 - Compatible with any safetensors reader
@@ -57,7 +57,7 @@ MLXQ System:
 
 | Finding | Confidence | Experiment |
 |---------|-----------|-----------|
-| 8-bit MLXQ matches bf16 reference | HIGH | #021, #022 |
+| 8-bit JANG matches bf16 reference | HIGH | #021, #022 |
 | All 14 Metal kernels correct | HIGH | #013, #016 |
 | Variable allocation beats uniform | HIGH | #028 |
 | AWQ scaling: 14% improvement | HIGH | #026 |
@@ -71,10 +71,10 @@ MLXQ System:
 | Method | Bits | Size | Load Time | Top Token | Quality |
 |--------|------|------|-----------|-----------|---------|
 | bf16 reference | 16 | 5.9 GB | — | 'The' ✓ | baseline |
-| MLXQ 8-bit | 8 | 3.6 GB | 0.63s | 'The' ✓ | matches ref |
+| JANG 8-bit | 8 | 3.6 GB | 0.63s | 'The' ✓ | matches ref |
 | MLX uniform 4-bit | 4.5 | ~1.5 GB | — | 'The' ✓ | MSE 11.31 |
-| MLXQ-3 profile | 3.32 | 1.19 GB | 0.33s | 'What' ✗ | needs MSE-opt |
-| MLXQ-2.5 profile | 2.53 | 0.91 GB | 0.27s | ' ' ✗ | too aggressive |
+| JANG-3 profile | 3.32 | 1.19 GB | 0.33s | 'What' ✗ | needs MSE-opt |
+| JANG-2.5 profile | 2.53 | 0.91 GB | 0.27s | ' ' ✗ | too aggressive |
 | MLX uniform 2-bit | 2.5 | ~0.95 GB | — | 'izu' ✗ | MSE 17.57 |
 
 ## Models Downloaded
@@ -92,17 +92,17 @@ MLXQ System:
 
 ## Immediate Next Steps
 
-1. **MSE-optimal quantization** running on 3B with mxq-3 profile
+1. **MSE-optimal quantization** running on 3B with jang-3 profile
    → if this fixes the L1 norm explosion, quality should improve
 2. **Speed benchmarking** — need to measure tokens/sec
-3. **Qwen 3.5 support** — adapt MLXQ for hybrid attention
+3. **Qwen 3.5 support** — adapt JANG for hybrid attention
 4. **AWQ + profile** combined — collect activations + smart allocation
-5. **7B+ model testing** — where MLXQ's advantage is largest
+5. **7B+ model testing** — where JANG's advantage is largest
 
 ## The Proven Strategy
 
 ```
-Layer Type    | % of Params | MLXQ Bits | Uniform Bits | Savings
+Layer Type    | % of Params | JANG Bits | Uniform Bits | Savings
 -------------|-------------|-----------|-------------|--------
 Attention Q/K | ~4%         | 6         | 4           | -50% (more bits)
 Attention V/O | ~4%         | 4         | 4           | 0%
@@ -119,11 +119,11 @@ Weighted avg: ~3.3 bits vs 4.0 bits = 18% less memory, equal quality
 Latest:
 ```
 2ef665c Qwen 3.5 architecture analysis
-6712cf5 MLXQ-2.5 test + Qwen 3.5 downloads + MSE-optimal quantizer
-849961d MLXQ-3 profile test: strategy proven but RTN quality bottleneck
-207e0f1 Rename: MXQ → MLXQ
+6712cf5 JANG-2.5 test + Qwen 3.5 downloads + MSE-optimal quantizer
+849961d JANG-3 profile test: strategy proven but RTN quality bottleneck
+207e0f1 Rename: JANG → JANG
 408206d PROVEN: Variable bit allocation beats uniform at fewer bits
 a09b11d AWQ integrated into pipeline + full quality baselines
 ...
-284d082 Initial commit: MXQ plan document
+284d082 Initial commit: JANG plan document
 ```

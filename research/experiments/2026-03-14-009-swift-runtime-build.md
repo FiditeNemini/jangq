@@ -2,7 +2,7 @@
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)
-**Status**: PASS — builds clean, CLI reads MXQ model
+**Status**: PASS — builds clean, CLI reads JANG model
 
 ## Setup
 
@@ -15,19 +15,19 @@
 | Component | Status |
 |-----------|--------|
 | Package.swift | Valid, resolves dependencies |
-| MXQMetal module (error types, Metal device) | Compiles |
-| MXQ module (config, safetensors reader, loader) | Compiles |
-| MXQCLI module (argument parser CLI) | Compiles |
+| JANGMetal module (error types, Metal device) | Compiles |
+| JANG module (config, safetensors reader, loader) | Compiles |
+| JANGCLI module (argument parser CLI) | Compiles |
 | `swift build` | Build complete (2.51s) |
-| `mxq info model/` | Correctly reads MXQ model config |
+| `jang info model/` | Correctly reads JANG model config |
 
 ### CLI Output (first successful run)
 
 ```
-MLXQ Model Info
+JANG Model Info
 ──────────────────────────────────
 Source: Qwen2.5-0.5B
-Format: MXQ v1.0
+Format: JANG v1.0
 Bits: 2.76 avg (2.5 target)
 Block size: 64
 Architecture: qwen2
@@ -42,16 +42,16 @@ Weights: 170 MB
 ## Architecture
 
 ```
-MXQRuntime (Swift Package)
-├── MXQMetal (Metal device, error types)
-│   ├── MXQMetalDevice.swift — GPU device, pipeline management, metallib loading
-│   └── MXQError.swift — error types
-├── MXQ (core library)
-│   ├── MXQConfig.swift — model + quantization config parsing
+JANGRuntime (Swift Package)
+├── JANGMetal (Metal device, error types)
+│   ├── JANGMetalDevice.swift — GPU device, pipeline management, metallib loading
+│   └── JANGError.swift — error types
+├── JANG (core library)
+│   ├── JANGConfig.swift — model + quantization config parsing
 │   ├── SafetensorsReader.swift — mmap-based safetensors file reader
-│   ├── MXQLoader.swift — model loading into Metal buffers
-│   └── MXQ.swift — re-exports MXQMetal
-└── MXQCLI (executable)
+│   ├── JANGLoader.swift — model loading into Metal buffers
+│   └── JANG.swift — re-exports JANGMetal
+└── JANGCLI (executable)
     └── main.swift — CLI with info subcommand
 ```
 
@@ -59,7 +59,7 @@ MXQRuntime (Swift Package)
 
 1. **Swift 6 Sendable**: MTLBuffer doesn't conform to Sendable — used `@unchecked Sendable`
 2. **Bundle.module**: Not available without SPM resources — rewrote metallib loading to search paths
-3. **Circular dependency**: MXQError needed by both modules — placed in MXQMetal (base module)
+3. **Circular dependency**: JANGError needed by both modules — placed in JANGMetal (base module)
 4. **Metal Toolchain**: Had to download 704MB Metal Toolchain for shader compilation
 
 ## Not Yet Implemented
@@ -69,4 +69,4 @@ MXQRuntime (Swift Package)
 - Tokenizer
 - KV cache
 - Sampling
-- `mxq run` command (inference)
+- `jang run` command (inference)

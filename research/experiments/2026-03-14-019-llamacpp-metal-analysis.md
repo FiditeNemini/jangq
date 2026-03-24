@@ -7,7 +7,7 @@
 ## Purpose
 
 Detailed analysis of how llama.cpp implements its Metal-based forward pass for
-transformer inference. This document serves as a reference for MXQ's own Metal
+transformer inference. This document serves as a reference for JANG's own Metal
 inference pipeline, identifying patterns to adopt and pitfalls to avoid.
 
 ---
@@ -277,7 +277,7 @@ llama.cpp's forward pass is built on the ggml library's computation graph
 - This is transparent to the operation encoding -- each operation just receives
   pointers to its input and output buffers
 
-**MXQ's current approach** (from MXQInference.swift):
+**JANG's current approach** (from JANGInference.swift):
 - Pre-allocated named buffers (hiddenBuffer, normBuffer, qBuffer, etc.)
 - Manual buffer reuse (normBuffer is reused as temp for O projection output)
 - No automatic lifetime analysis
@@ -376,15 +376,15 @@ Empirical findings from the llama.cpp community:
 
 ---
 
-## 6. Key Patterns MXQ Should Adopt
+## 6. Key Patterns JANG Should Adopt
 
 ### Pattern 1: Single Command Buffer for Entire Forward Pass
 
 **What llama.cpp does**: Encodes ALL operations (all layers, all ops) into one
 command buffer, then commits and waits once.
 
-**What MXQ currently does**: Creates a single command buffer per `forward()`
-call, which is correct. However, MXQ should verify it is not inadvertently
+**What JANG currently does**: Creates a single command buffer per `forward()`
+call, which is correct. However, JANG should verify it is not inadvertently
 creating multiple command buffers or calling `waitUntilCompleted` between layers.
 
 **Why it matters**: Each `commit` + `waitUntilCompleted` cycle has significant
@@ -397,7 +397,7 @@ allows the GPU to pipeline operations continuously.
 command encoder when operations have memory dependencies. Does NOT create a
 new encoder for each operation.
 
-**What MXQ should do**: Within the forward pass, when buffer reuse creates
+**What JANG should do**: Within the forward pass, when buffer reuse creates
 read-after-write hazards (e.g., normBuffer reused for O projection output),
 insert `memoryBarrier(scope: .buffers)` rather than ending and beginning a
 new encoder.
@@ -407,8 +407,8 @@ new encoder.
 **What llama.cpp does**: Separate `kernel_mul_mv` (decode) and `kernel_mul_mm`
 (prefill) kernels with different tiling strategies and thread dispatch configs.
 
-**What MXQ has**: `mxq_dequant_gemv` and `mxq_dequant_gemm` -- this is already
-the right split. But MXQ should ensure the GEMM kernel uses tiled shared-memory
+**What JANG has**: `jang_dequant_gemv` and `jang_dequant_gemm` -- this is already
+the right split. But JANG should ensure the GEMM kernel uses tiled shared-memory
 accumulation (as llama.cpp's `kernel_mul_mm` does) rather than naive per-thread
 accumulation.
 
@@ -417,13 +417,13 @@ accumulation.
 **What llama.cpp does**: Different N_R0 (rows per simdgroup) and N_SG
 (simdgroups per threadgroup) for each quant type, tuned for optimal occupancy.
 
-**What MXQ should do**: Since MXQ supports variable bit widths (2-8 bit),
+**What JANG should do**: Since JANG supports variable bit widths (2-8 bit),
 the GEMV kernel should tune its thread dispatch based on the bit width.
 Lower bit widths (2-3 bit) can process more rows per simdgroup because
 each weight uses fewer bytes. Higher bit widths (6-8 bit) should process
 fewer rows per simdgroup. Suggested starting configuration:
 
-| MXQ Bit Width | N_R0 | N_SG | Rationale |
+| JANG Bit Width | N_R0 | N_SG | Rationale |
 |---------------|------|------|-----------|
 | 2-3 bit | 4 | 2 | Small weights, more rows fit in registers |
 | 4 bit | 4 | 2 | Matches llama.cpp Q4_0 |
@@ -435,8 +435,8 @@ fewer rows per simdgroup. Suggested starting configuration:
 **What llama.cpp does**: Fused Flash Attention kernel that keeps attention
 scores in registers, never writing the N*N attention matrix to memory.
 
-**What MXQ currently does**: Based on experiment 014, the attention kernel
-is a primary suspect for correctness issues. MXQ should implement a tiled
+**What JANG currently does**: Based on experiment 014, the attention kernel
+is a primary suspect for correctness issues. JANG should implement a tiled
 Flash Attention kernel similar to llama.cpp's approach:
 
 1. Load a tile of Q (Br rows)
@@ -459,7 +459,7 @@ Critical details:
 double-quantization (scales are themselves quantized), giving better
 compression without proportional accuracy loss.
 
-**What MXQ should consider**: MXQ's per-block (64 values) scale/zero is
+**What JANG should consider**: JANG's per-block (64 values) scale/zero is
 simpler. If quality issues arise at low bit widths, consider a hierarchical
 approach where blocks share a higher-precision super-scale, similar to K-quants.
 
@@ -469,13 +469,13 @@ approach where blocks share a higher-precision super-scale, similar to K-quants.
 calibration forward passes, then uses these to weight the quantization
 optimization per channel.
 
-**What MXQ should do**: Implement an imatrix collection pass:
+**What JANG should do**: Implement an imatrix collection pass:
 1. Run the FP16 model on calibration data
 2. At each linear layer, accumulate `sum(activation[j]^2)` per input channel
 3. During quantization, use these weights to prioritize high-activation channels
    when computing optimal scales/zeros for each block
 
-This is especially important for MXQ because variable-bit-width assignment
+This is especially important for JANG because variable-bit-width assignment
 could use the imatrix to determine which layers/blocks get more bits:
 - High-importance blocks (large sum of squared activations) get more bits
 - Low-importance blocks get fewer bits
@@ -486,10 +486,10 @@ could use the imatrix to determine which layers/blocks get more bits:
 **What llama.cpp does**: Uses `MTLResourceStorageModePrivate` for large
 weight tensors (GPU-only, no CPU access needed after initial upload).
 
-**What MXQ currently does**: Uses `MTLResourceStorageModeShared` for
-everything (from MXQMetalDevice.swift).
+**What JANG currently does**: Uses `MTLResourceStorageModeShared` for
+everything (from JANGMetalDevice.swift).
 
-**What MXQ should do**: After loading quantized weights via mmap, copy them
+**What JANG should do**: After loading quantized weights via mmap, copy them
 to Private-mode buffers for GPU inference. This gives the Metal driver more
 freedom to optimize memory placement and can improve bandwidth.
 
@@ -498,7 +498,7 @@ freedom to optimize memory placement and can improve bandwidth.
 **What llama.cpp does**: On macOS 15+, uses `MTLResidencySet` to prevent
 the OS from paging GPU memory during inference.
 
-**What MXQ should do**: For large models that consume most of GPU memory,
+**What JANG should do**: For large models that consume most of GPU memory,
 adopt the residency set pattern to prevent memory pressure from evicting
 weight buffers mid-inference.
 

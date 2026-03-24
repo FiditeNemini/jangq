@@ -9,7 +9,7 @@
 - 3 models: Qwen2.5-3B, Mistral-7B, Qwen2.5-7B
 - 8 diverse prompts (math, knowledge, translation, science, creativity)
 - 9 quantization configs: Uniform 2/3/4 vs MQ2S/MQ2M/MQ3M/MQ3L/MQ4S/MQ4L
-- All using MLX's own quantizer (no MLXQ implementation artifacts)
+- All using MLX's own quantizer (no JANG implementation artifacts)
 
 ## Every Win Found
 
@@ -83,14 +83,14 @@ MQ2M (2.7b):      "What color do you get when you mix red..."              ← a
 
 ## Pattern Analysis
 
-1. **Mistral-7B is most sensitive** to uniform quantization — 6 wins for MLXQ.
+1. **Mistral-7B is most sensitive** to uniform quantization — 6 wins for JANG.
    This is because Mistral uses GQA 32/8 (4:1 ratio), making each KV head
    critical. Giving attention more bits prevents the most degradation.
 
 2. **Wins are strongest at the boundary** — right where uniform breaks
-   (repetition loops, number garbage), MLXQ still produces coherent answers.
+   (repetition loops, number garbage), JANG still produces coherent answers.
 
-3. **Even at 2-bit**, MLXQ produces recognizable English answers where
+3. **Even at 2-bit**, JANG produces recognizable English answers where
    uniform produces complete garbage. "The Pacific Ocean" vs "##100000..."
 
 4. **The improvement costs almost nothing** — MQ4S is 4.1 bits vs
@@ -103,7 +103,7 @@ MQ2M (2.7b):      "What color do you get when you mix red..."              ← a
 ```
 Q: "What is photosynthesis?"
 Uniform 3-bit (3.5b): "1000000000000000000000000000000000..."
-MLXQ MQ3L (3.6b):     "Photosynthesis is the process by which plants
+JANG MQ3L (3.6b):     "Photosynthesis is the process by which plants
                         and other autotrophs convert light energy..."
 ```
 Same effective size. Complete garbage vs correct scientific answer.
@@ -112,7 +112,7 @@ Same effective size. Complete garbage vs correct scientific answer.
 ```
 Q: "How many legs does a spider have?"
 Uniform 3-bit (3.5b): "TDM 10000000000000000000000..."
-MLXQ MQ3L (3.6b):     "Spiders have eight legs."
+JANG MQ3L (3.6b):     "Spiders have eight legs."
 ```
 Same effective size. Garbage vs one-sentence correct answer.
 
@@ -120,7 +120,7 @@ Same effective size. Garbage vs one-sentence correct answer.
 ```
 Q: "What is the largest ocean on Earth?"
 Uniform 2-bit (2.5b): "## 1000000000000000000000000..."
-MLXQ MQ2M (2.7b):     "The Pacific Ocean, The Atlantic Ocean,
+JANG MQ2M (2.7b):     "The Pacific Ocean, The Atlantic Ocean,
                         The Indian Ocean..."
 ```
 8% more bits. Complete garbage vs correct factual list.

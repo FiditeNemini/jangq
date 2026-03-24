@@ -6,7 +6,7 @@
 
 ## Purpose
 
-Test the full MXQ approach (AWQ scaling + variable bit allocation) on
+Test the full JANG approach (AWQ scaling + variable bit allocation) on
 real Qwen2.5-3B layer 0 q_proj weights and compare with uniform RTN.
 
 ## Setup
@@ -21,7 +21,7 @@ real Qwen2.5-3B layer 0 q_proj weights and compare with uniform RTN.
 | Method | Avg Bits | Output MSE | vs Uniform 4-bit |
 |--------|----------|-----------|-----------------|
 | Uniform 4-bit | 4.00 | 0.00339 | baseline |
-| **MXQ-AWQ 4-bit** | **4.00** | **0.00297** | **1.14x better** |
+| **JANG-AWQ 4-bit** | **4.00** | **0.00297** | **1.14x better** |
 | Uniform 2-bit | 2.00 | 0.08201 | 0.04x (24x worse) |
 
 ## Analysis
@@ -42,7 +42,7 @@ Q(W_scaled) → W_approx = dequant(Q(W_scaled)) / diag(s)
 
 ### Variable Bit Allocation Issue
 
-The MXQ 3-bit and 2.5-bit targets produced the same MSE as 4-bit.
+The JANG 3-bit and 2.5-bit targets produced the same MSE as 4-bit.
 Root cause: the q_proj layer has min_bits=3 in our layer priors,
 so the allocator can't go below 3-bit. And with importance-based
 allocation, all blocks end up at 4-bit because the target can't be
@@ -63,7 +63,7 @@ The diagonal Hessian approximation (used by AWQ and imatrix) is the
 correct approach for practical systems. Full GPTQ would require
 thousands of calibration samples per layer.
 
-### Key Insight for MXQ Strategy
+### Key Insight for JANG Strategy
 
 The improvement should come from three sources combined:
 1. **AWQ scaling** (per-channel): ~14% at 4-bit — VERIFIED
@@ -71,7 +71,7 @@ The improvement should come from three sources combined:
 3. **GPTQ error compensation** (with enough calibration data): additional 10-20%
 
 For the paper, the correct claim is:
-"MXQ at 2.5-bit average (some layers 4-bit, MLP layers 2-bit) approaches
+"JANG at 2.5-bit average (some layers 4-bit, MLP layers 2-bit) approaches
 uniform 4-bit quality through AWQ scaling + importance-based inter-layer
 bit allocation"
 
@@ -96,4 +96,4 @@ optimum (alpha=1/3 ≈ 0.33).
 1. Fix bit allocation to work ACROSS layers (not within single layer)
 2. Test full-model quantization with AWQ on all layers
 3. Measure end-to-end quality (logit MSE, KL divergence)
-4. Compare MXQ-AWQ at average 2.5-bit vs MLX uniform 4-bit
+4. Compare JANG-AWQ at average 2.5-bit vs MLX uniform 4-bit
