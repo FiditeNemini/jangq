@@ -18,7 +18,7 @@ Quick start:
     profile = profile_for_bits(2)  # → "JANG_2S"
 """
 
-__version__ = "2.1.5"
+__version__ = "2.3.0"
 __author__ = "Jinho Jang"
 __email__ = "eric@jangq.ai"
 
@@ -62,6 +62,13 @@ except ImportError:
     load_jang_vlm_model = None
     upgrade_v1_to_v2 = None
 
+# TurboQuant KV cache compression (requires mlx — Apple Silicon only)
+try:
+    from .turboquant import TurboQuantKVCache, TurboQuantConfig
+except ImportError:
+    TurboQuantKVCache = None
+    TurboQuantConfig = None
+
 __all__ = [
     # Conversion
     "convert_model",
@@ -97,4 +104,7 @@ __all__ = [
     "load_for_inference",
     "load_jang_vlm_model",
     "upgrade_v1_to_v2",
+    # TurboQuant (None if mlx not installed)
+    "TurboQuantKVCache",
+    "TurboQuantConfig",
 ]

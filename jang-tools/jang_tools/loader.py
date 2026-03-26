@@ -143,8 +143,12 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
             for k, v in weights.items():
                 new_k = k
                 # Collect MoE ROUTER gate scales/biases for dequantization
-                # Must match mlp.gate.scales but NOT gate_proj.scales or switch_mlp.gate_proj
-                if ".mlp.gate." in k and "gate_proj" not in k and (k.endswith(".scales") or k.endswith(".biases")):
+                # Matches: .mlp.gate. (Mistral 4) and .mixer.gate. (Nemotron-H)
+                # Must NOT match gate_proj or switch_mlp.gate_proj
+                _is_gate_meta = ((".mlp.gate." in k or ".mixer.gate." in k)
+                                 and "gate_proj" not in k
+                                 and (k.endswith(".scales") or k.endswith(".biases")))
+                if _is_gate_meta:
                     prefix = k.rsplit(".", 1)[0]
                     gate_parts.setdefault(prefix, {})[k.rsplit(".", 1)[1]] = v
                     continue
@@ -174,8 +178,12 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
                             try:
                                 dq = mx.dequantize(qw, scales, biases, gs, bits)
                                 mx.eval(dq)
-                                renamed[wkey] = dq.astype(mx.bfloat16)
-                                logger.info(f"  Dequantized gate: {wkey} bits={bits} gs={gs} → {dq.shape}")
+                                # Keep float32 for maximum routing precision.
+                                # bfloat16 loses 3 mantissa bits → breaks MoE expert selection.
+                                # float16 also breaks on some models.
+                                # float32 is safe at cost of some speed (float32 promotion).
+                                renamed[wkey] = dq
+                                logger.info(f"  Dequantized gate: {wkey} bits={bits} gs={gs} → {dq.shape} (f32)")
                                 break
                             except Exception:
                                 continue
@@ -214,6 +222,63 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
         logger.info(f"  bfloat16 enabled: MLA model with bf16 gate (speed optimization)")
 
     mx.eval(model.parameters())
+
+    # ── TurboQuant KV cache (JANG-exclusive) ──────────────────
+    _tq_cfg = jang_cfg.get("turboquant")
+    if _tq_cfg and _tq_cfg.get("enabled", False):
+        try:
+            from .turboquant.config import TurboQuantConfig, make_turboquant_cache
+            n_layers = len(model.layers)
+            tq_config = TurboQuantConfig.from_jang_config(jang_cfg, n_layers)
+            if tq_config:
+                _key_dim = _text_cfg.get("head_dim", 128)
+                _val_dim = _text_cfg.get("head_dim", 128)
+                if _text_cfg.get("kv_lora_rank", 0) > 0:
+                    _key_dim = _text_cfg.get("qk_nope_head_dim", 128) + _text_cfg.get("qk_rope_head_dim", 64)
+                    _val_dim = _text_cfg.get("v_head_dim", 128)
+                # Detect hybrid layer types from config
+                _layer_type_list = _text_cfg.get("layer_types", [])
+                _hybrid_pattern = _text_cfg.get("hybrid_override_pattern",
+                                    _model_cfg.get("hybrid_override_pattern", ""))
+                if _layer_type_list:
+                    # Qwen3.5 style: explicit layer_types list
+                    _layer_types = [
+                        "attention" if lt == "full_attention" else "ssm"
+                        for lt in _layer_type_list[:n_layers]
+                    ]
+                    while len(_layer_types) < n_layers:
+                        _layer_types.append("attention")
+                elif _hybrid_pattern:
+                    # Nemotron pattern: M=Mamba(SSM), *=attention, E=MoE(MLP), -=MLP
+                    # Only M and * get cache entries. E and - are pure MLP (no cache).
+                    # Must match model's make_cache() which skips E/- layers.
+                    _layer_types = []
+                    for ch in _hybrid_pattern[:n_layers]:
+                        if ch == "M":
+                            _layer_types.append("ssm")
+                        elif ch == "*":
+                            _layer_types.append("attention")
+                        # E and - layers: no cache entry (skip)
+                else:
+                    _layer_types = ["attention"] * n_layers
+                _n_attn = sum(1 for t in _layer_types if t == "attention")
+                _n_ssm = sum(1 for t in _layer_types if t == "ssm")
+                _n_cache = len(_layer_types)  # may be < n_layers for Nemotron
+                _n_skip = n_layers - _n_cache
+                if _n_ssm > 0 or _n_skip > 0:
+                    logger.info(f"  Hybrid model: {_n_attn} attention + {_n_ssm} SSM"
+                                + (f" + {_n_skip} no-cache" if _n_skip else "") + " layers")
+                def _turboquant_make_cache(
+                    _cfg=tq_config, _n=_n_cache, _kd=_key_dim, _vd=_val_dim, _lt=_layer_types
+                ):
+                    return make_turboquant_cache(_cfg, _n, [_kd]*_n, [_vd]*_n, _lt)
+                model.make_cache = _turboquant_make_cache
+                logger.info(f"  TurboQuant enabled: {tq_config.default_key_bits}-bit keys, "
+                            f"{tq_config.default_value_bits}-bit values, "
+                            f"{len(tq_config.critical_layers)} critical layers")
+        except ImportError:
+            logger.warning("  TurboQuant config found but turboquant module not available")
+
     elapsed = time.perf_counter() - start
 
     actual_bits = jang_cfg.get("quantization", {}).get("actual_bits", 0)
