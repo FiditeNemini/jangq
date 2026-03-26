@@ -90,6 +90,7 @@ def make_turboquant_cache(
                 key_bits=config.key_bits_for_layer(i),
                 value_bits=config.value_bits_for_layer(i),
                 seed=config.seed + i,
+                sink_tokens=config.sink_tokens,
             ))
         else:
             # SSM layer: use ArraysCache or KVCache as placeholder

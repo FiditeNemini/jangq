@@ -437,6 +437,31 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
         logger.info(f"  bfloat16 enabled: {_n_experts} experts, hidden={_hidden}")
 
     mx.eval(model.parameters())
+    # ── TurboQuant for VLM (patch language_model, not top-level model) ──
+    _tq_cfg_vlm = jang_cfg.get("turboquant")
+    if _tq_cfg_vlm and _tq_cfg_vlm.get("enabled", False):
+        try:
+            from .turboquant.config import TurboQuantConfig, make_turboquant_cache
+            _lang_model = getattr(model, "language_model", None)
+            if _lang_model is not None and hasattr(_lang_model, "layers"):
+                _vlm_n_layers = len(_lang_model.layers)
+                _vlm_tq = TurboQuantConfig.from_jang_config(jang_cfg, _vlm_n_layers)
+                if _vlm_tq:
+                    _vlm_model_cfg = json.loads((path / "config.json").read_text())
+                    _vlm_text_cfg = _vlm_model_cfg.get("text_config", _vlm_model_cfg)
+                    _vlm_kd = _vlm_text_cfg.get("head_dim", 128)
+                    _vlm_vd = _vlm_text_cfg.get("head_dim", 128)
+                    if _vlm_text_cfg.get("kv_lora_rank", 0) > 0:
+                        _vlm_kd = _vlm_text_cfg.get("qk_nope_head_dim", 128) + _vlm_text_cfg.get("qk_rope_head_dim", 64)
+                        _vlm_vd = _vlm_text_cfg.get("v_head_dim", 128)
+                    _vlm_lt = ["attention"] * _vlm_n_layers
+                    def _vlm_tq_make_cache(_c=_vlm_tq, _n=_vlm_n_layers, _k=_vlm_kd, _v=_vlm_vd, _t=_vlm_lt):
+                        return make_turboquant_cache(_c, _n, [_k]*_n, [_v]*_n, _t)
+                    _lang_model.make_cache = _vlm_tq_make_cache
+                    logger.info(f"  TurboQuant VLM enabled: {_vlm_tq.default_key_bits}-bit keys")
+        except ImportError:
+            pass
+
     elapsed = time.perf_counter() - start
     logger.info(f"JANG v2 VLM loaded in {elapsed:.1f}s")
 

@@ -17,6 +17,10 @@ import math
 from functools import lru_cache
 
 import mlx.core as mx
+
+# NumPy 2.0 renamed np.trapz → _trapezoid
+import numpy as np
+_trapezoid = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
 import numpy as np
 
 
@@ -61,7 +65,7 @@ def compute_codebook(dim: int, bits: int, n_iter: int = 200) -> list[float]:
     grid = np.linspace(-1.0, 1.0, n_grid)
     pdf = _beta_pdf(grid, dim)
     # Normalize
-    total = np.trapezoid(pdf, grid)
+    total = _trapezoid(pdf, grid)
     if total > 0:
         pdf = pdf / total
 
@@ -86,8 +90,8 @@ def compute_codebook(dim: int, bits: int, n_iter: int = 200) -> list[float]:
             if mask.sum() <= 1:
                 new_centroids[i] = centroids[i]  # keep old if region is empty
                 continue
-            mass = np.trapezoid(pdf[mask], grid[mask])
-            moment = np.trapezoid(grid[mask] * pdf[mask], grid[mask])
+            mass = _trapezoid(pdf[mask], grid[mask])
+            moment = _trapezoid(grid[mask] * pdf[mask], grid[mask])
             new_centroids[i] = moment / max(mass, 1e-10)
 
         if np.allclose(centroids, new_centroids, atol=1e-10):
