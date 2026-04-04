@@ -206,9 +206,9 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
     # See research/397B-BFLOAT16-FIX.md for full analysis.
     _model_cfg = json.loads((path / "config.json").read_text())
     _text_cfg = _model_cfg.get("text_config", _model_cfg)
-    _n_experts = _text_cfg.get("num_experts",
-                    _text_cfg.get("num_local_experts",
-                    _text_cfg.get("n_routed_experts", 0)))
+    _n_experts = (_text_cfg.get("num_experts") or
+                    _text_cfg.get("num_local_experts") or
+                    _text_cfg.get("n_routed_experts") or 0)
     _hidden = _text_cfg.get("hidden_size", 0)
     if _n_experts >= 512 and _hidden >= 4096:
         model.set_dtype(mx.bfloat16)
@@ -279,6 +279,17 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
         except ImportError:
             logger.warning("  TurboQuant config found but turboquant module not available")
 
+    # ── Hadamard rotation (input pre-rotation for rotated weights) ──
+    # If model was converted with --hadamard, weight rows are Hadamard-rotated.
+    # At inference, we must pre-rotate each linear layer's input with the same
+    # transform. Math: y = hadamard_rotate(x, signs) @ W_rot^T = x @ W^T (exact)
+    # The rotation cancels (signs^2 = 1), but quantization error is smaller
+    # because the rotated weights have fewer outliers.
+    _has_hadamard = jang_cfg.get("quantization", {}).get("hadamard_rotation", False)
+    if _has_hadamard:
+        _patch_hadamard_rotation(model)
+        logger.info("  Hadamard rotation enabled: input pre-rotation on quantized layers")
+
     elapsed = time.perf_counter() - start
 
     actual_bits = jang_cfg.get("quantization", {}).get("actual_bits", 0)
@@ -346,6 +357,20 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
         # because it tries to split gate_up_proj which is already split.
         # On failure, apply a minimal sanitize (rename + transpose + norm fix)
         # that skips the gate_up splitting.
+        # JANG MoE expert remap: switch_mlp.* → experts.switch_glu.*
+        # JANG v2 stores expert weights as switch_mlp.{gate,up,down}_proj but
+        # mlx-vlm's Gemma 4 model expects experts.switch_glu.*. Upstream mlx-vlm
+        # (0.4.x) doesn't have this remap, causing expert weights to silently
+        # fail to load → garbage output. Apply BEFORE sanitize so it works with
+        # any mlx-vlm version.
+        remapped = {}
+        for k, v in shard_weights.items():
+            if ".switch_mlp." in k:
+                remapped[k.replace(".switch_mlp.", ".experts.switch_glu.")] = v
+            else:
+                remapped[k] = v
+        shard_weights = remapped
+
         sanitize_ok = False
         if hasattr(model, "sanitize"):
             try:
@@ -428,9 +453,9 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
     # ── bfloat16 for 512+ expert models (same as text loader) ──
     _model_cfg = json.loads((path / "config.json").read_text())
     _text_cfg = _model_cfg.get("text_config", _model_cfg)
-    _n_experts = _text_cfg.get("num_experts",
-                    _text_cfg.get("num_local_experts",
-                    _text_cfg.get("n_routed_experts", 0)))
+    _n_experts = (_text_cfg.get("num_experts") or
+                    _text_cfg.get("num_local_experts") or
+                    _text_cfg.get("n_routed_experts") or 0)
     _hidden = _text_cfg.get("hidden_size", 0)
     if _n_experts >= 512 and _hidden >= 4096:
         model.set_dtype(mx.bfloat16)
@@ -569,7 +594,20 @@ def load_jang_model(model_path: str | Path):
     # v2: instant load via mmap
     if _is_v2_model(path):
         logger.info(f"JANG v2 detected — loading via mmap (instant)")
-        return _load_jang_v2(path, jang_cfg)
+        if _is_vlm_config(path):
+            logger.info(f"  VLM model detected — using mlx_vlm loader")
+            model, processor = _load_jang_v2_vlm(path, jang_cfg)
+            tokenizer = getattr(processor, 'tokenizer', processor)
+            return model, tokenizer
+        try:
+            return _load_jang_v2(path, jang_cfg)
+        except ValueError as e:
+            if "not supported" in str(e).lower():
+                logger.info(f"  mlx_lm failed ({e}), trying mlx_vlm loader")
+                model, processor = _load_jang_v2_vlm(path, jang_cfg)
+                tokenizer = getattr(processor, 'tokenizer', processor)
+                return model, tokenizer
+            raise
 
     # v1: repack path (legacy)
     logger.info(f"JANG v1 detected — repacking to MLX format (this may take a few minutes)")
@@ -1156,6 +1194,73 @@ def _stack_per_expert_weights(weights, config):
 
     if expert_groups:
         logger.info(f"  Stacked {len(expert_groups)} expert groups into QuantizedSwitchLinear format")
+
+
+def _patch_hadamard_rotation(model):
+    """
+    Wrap quantized linear layers with Hadamard input pre-rotation.
+
+    For models converted with --hadamard, the weight rows were rotated before
+    quantization. At inference, we pre-rotate the input with the same Hadamard
+    transform so the rotation cancels and the output is correct — but with
+    less quantization error because the rotated weights have fewer outliers.
+
+    Math: y = hadamard_rotate(x, signs) @ W_rot^T = x @ W^T
+    The signs^2 cancel (±1² = 1), giving the exact identity.
+    """
+    import mlx.nn as nn
+    from .turboquant.rotation import generate_random_signs, hadamard_rotate
+
+    # Cache signs by dimension (deterministic from seed=42)
+    _signs_cache = {}
+
+    def _get_signs(dim):
+        if dim not in _signs_cache:
+            _signs_cache[dim] = generate_random_signs(dim, seed=42)
+        return _signs_cache[dim]
+
+    def _wrap_linear(module, name_path):
+        """Recursively find and wrap QuantizedLinear layers."""
+        for attr_name in dir(module):
+            if attr_name.startswith("_"):
+                continue
+            try:
+                child = getattr(module, attr_name)
+            except (AttributeError, TypeError):
+                continue
+
+            child_path = f"{name_path}.{attr_name}" if name_path else attr_name
+
+            # Skip: embeddings, norms, gates (not rotated during conversion)
+            if any(skip in child_path.lower() for skip in
+                   ["embed", "lm_head", "norm", ".gate."]):
+                continue
+
+            if isinstance(child, nn.QuantizedLinear):
+                # Only rotate 3-bit+ layers (2-bit has too few levels to benefit)
+                if child.bits < 3:
+                    continue
+                in_dim = child.weight.shape[-1] * (32 // child.bits)
+                signs = _get_signs(in_dim)
+                original_call = child.__call__
+
+                def make_rotated_call(orig, s):
+                    def rotated_call(x):
+                        return orig(hadamard_rotate(x, s))
+                    return rotated_call
+
+                child.__call__ = make_rotated_call(original_call, signs)
+            elif hasattr(child, '__dict__') and not callable(child):
+                # Recurse into submodules
+                _wrap_linear(child, child_path)
+
+    # Walk model tree
+    layers = model.model.layers if hasattr(model, "model") else getattr(model, "layers", [])
+    for i, layer in enumerate(layers):
+        if layer is not None:
+            _wrap_linear(layer, f"layers.{i}")
+
+    logger.info(f"  Hadamard signs cached for dims: {sorted(_signs_cache.keys())}")
 
 
 def _upgrade_switch_to_quantized(model, bits, group_size):

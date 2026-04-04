@@ -100,6 +100,7 @@ def convert_model(
     use_awq: bool = False,
     awq_alpha: float = 0.25,
     profile: Optional[str] = None,
+    hadamard: bool = False,
 ) -> dict:
     """
     Convert a HuggingFace model to JANG v2 format.
@@ -135,6 +136,7 @@ def convert_model(
     print(f"  Quantization: {quantization_method}")
     print(f"  Format: v2 (MLX-native, instant load)")
     print(f"  AWQ scaling: {'yes (alpha=' + str(awq_alpha) + ')' if use_awq else 'no'}")
+    print(f"  Hadamard rotation: {'yes' if hadamard else 'no'}")
     print(f"{'='*60}\n")
 
     # Check source model exists
@@ -157,6 +159,9 @@ def convert_model(
     # due to gather_qmm kernel cache pressure. group_size=128 eliminates this.
     # Discovered via CRACK abliteration research (Mar 5 2026).
     num_experts = getattr(arch_config, 'num_experts', 0)
+    has_shared_mlp = getattr(arch_config, 'has_shared_mlp', False)
+    if has_shared_mlp:
+        print(f"  Shared MLP: parallel dense MLP alongside MoE → classified as CRITICAL")
     if block_size == DEFAULT_BLOCK_SIZE and arch_config.has_moe_layers:
         if num_experts >= 150:
             block_size = 128
@@ -235,9 +240,14 @@ def convert_model(
                     continue
                 if "activation_scale" in tensor_name:
                     continue
+                # Gemma 4: tiny scalar/norm tensors that must stay full precision
+                if tensor_name.endswith(".layer_scalar"):
+                    continue
+                if "q_norm" in tensor_name or "k_norm" in tensor_name:
+                    continue
                 if "lm_head" in tensor_name and _tie_embeddings:
                     continue
-                if ".visual." in tensor_name or "vision_tower" in tensor_name or "vision_model" in tensor_name or "vision_encoder" in tensor_name:
+                if ".visual." in tensor_name or "vision_tower" in tensor_name or "vision_model" in tensor_name or "vision_encoder" in tensor_name or "embed_vision" in tensor_name:
                     continue
 
                 shape = f.get_slice(tensor_name).get_shape()
@@ -286,19 +296,19 @@ def convert_model(
         print(f"  Using K-quant: {profile} (target: {k_target} avg bits)")
         global_bit_alloc = allocate_bits_budget(
             all_tensor_names_for_alloc, target_bits=k_target,
-            num_experts=num_experts,
+            num_experts=num_experts, has_shared_mlp=has_shared_mlp,
         )
     elif profile:
         print(f"  Using profile: {profile}")
         global_bit_alloc = allocate_bits_profile(
             all_tensor_names_for_alloc, profile,
-            num_experts=num_experts,
+            num_experts=num_experts, has_shared_mlp=has_shared_mlp,
         )
     elif target_bits in (2.0, 3.0, 4.0, 5.0, 6.0, 8.0):
         print(f"  Using K-quant allocation (target: {target_bits} avg bits)")
         global_bit_alloc = allocate_bits_budget(
             all_tensor_names_for_alloc, target_bits=target_bits,
-            num_experts=num_experts,
+            num_experts=num_experts, has_shared_mlp=has_shared_mlp,
         )
     else:
         global_bit_alloc = allocate_bits_greedy(
@@ -459,6 +469,30 @@ def convert_model(
 
             if is_3d:
                 weights = weights.reshape(-1, weights.shape[-1])
+
+            # Hadamard rotation: rotate weight rows before quantization.
+            # Spreads outliers across dimensions → more uniform distribution →
+            # less quantization error at the same bit width.
+            # At inference, input is rotated with the same transform: signs cancel.
+            # Math: y = hadamard_rotate(x, signs) @ W_rot^T = x @ W^T (exact)
+            # Skip: MoE gates (float16 passthrough), norms, embeddings, lm_head
+            if hadamard and bits >= 3:
+                from .turboquant.rotation import generate_random_signs, hadamard_rotate
+                in_dim = weights.shape[-1]
+                _tn_lower_h = tensor_name.lower()
+                _skip_rotation = (
+                    "embed" in _tn_lower_h
+                    or "lm_head" in _tn_lower_h
+                    or "norm" in _tn_lower_h
+                    or ".gate." in _tn_lower_h
+                )
+                if not _skip_rotation:
+                    signs = generate_random_signs(in_dim, seed=42)
+                    w_mx_pre = mx.array(weights.astype(np.float32))
+                    w_rotated = hadamard_rotate(w_mx_pre, signs)
+                    weights = np.array(w_rotated, dtype=np.float32)
+                    del w_mx_pre, w_rotated
+                    mx.clear_cache()
 
             n_elements = weights.shape[0] * weights.shape[1]
             if n_elements > 100_000_000:
@@ -631,7 +665,8 @@ def convert_model(
                 is_norm = ("norm" in tensor_name.lower())
                 is_bias = tensor_name.endswith(".bias")
                 is_vision = (".visual." in tensor_name or "vision_tower" in tensor_name
-                             or "vision_model" in tensor_name)
+                             or "vision_model" in tensor_name or "vision_encoder" in tensor_name
+                             or "embed_vision" in tensor_name)
                 shape = f.get_slice(tensor_name).get_shape()
                 is_small = len(shape) == 1
                 n_el = 1
@@ -684,6 +719,7 @@ def convert_model(
             "bit_widths_used": bit_widths_used,
             "quantization_scheme": "asymmetric",
             "quantization_backend": "mx.quantize",
+            "hadamard_rotation": hadamard,
         },
         "source_model": {
             "name": model_path.name,
@@ -824,7 +860,7 @@ def _count_params_str(config: dict) -> str:
     n_layers = _get("num_hidden_layers")
     intermediate = _get("intermediate_size")
     vocab = _get("vocab_size")
-    num_experts = _get("num_local_experts", _get("num_experts"))
+    num_experts = _get("num_local_experts", _get("num_experts")) or 0
 
     attn_params = 4 * hidden * hidden
     mlp_params = 3 * hidden * intermediate

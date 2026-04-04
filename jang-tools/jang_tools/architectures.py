@@ -66,6 +66,7 @@ class ArchConfig:
     has_vision_encoder: bool = False
     has_ssm_layers: bool = False
     has_moe_layers: bool = False
+    has_shared_mlp: bool = False  # Parallel dense MLP alongside MoE experts (Gemma 4)
     num_experts: int = 0
     num_experts_per_tok: int = 0
 
@@ -410,7 +411,7 @@ def _classify_architecture(
         )
 
     # --- Mixture of Experts ---
-    num_experts = _cfg("num_local_experts", _cfg("num_experts", _cfg("n_routed_experts", 0)))
+    num_experts = _cfg("num_local_experts", _cfg("num_experts", _cfg("n_routed_experts", 0))) or 0
     if num_experts > 1:
         layers = {**TRANSFORMER_LAYER_CONFIGS, **MOE_LAYER_CONFIGS}
 
@@ -423,6 +424,15 @@ def _classify_architecture(
         if has_vision:
             layers.update(VISION_LAYER_CONFIGS)
 
+        # Detect shared/parallel MLP alongside MoE experts (Gemma 4 pattern).
+        # Gemma 4 has both mlp.{gate,up,down}_proj AND experts.{gate_up,down}_proj
+        # per layer. The mlp is always-active (shared expert equivalent) and must
+        # be quantized at CRITICAL tier, not COMPRESS.
+        _has_shared_mlp = _cfg("enable_moe_block", False) and _cfg("intermediate_size", 0) > 0
+
+        # num_experts_per_tok: check both standard and Gemma 4 naming
+        _experts_per_tok = _cfg("num_experts_per_tok", _cfg("top_k_experts", 2))
+
         return ArchConfig(
             arch_type=ArchType.MOE,
             attention_type=AttentionType.MLA if _has_mla else AttentionType.GQA,
@@ -430,8 +440,9 @@ def _classify_architecture(
             layer_configs=layers,
             has_vision_encoder=has_vision,
             has_moe_layers=True,
+            has_shared_mlp=_has_shared_mlp,
             num_experts=num_experts,
-            num_experts_per_tok=_cfg("num_experts_per_tok", 2),
+            num_experts_per_tok=_experts_per_tok,
         )
 
     # --- Standard Transformer (Llama, Qwen, Gemma, Phi, Mistral, etc.) ---

@@ -121,6 +121,23 @@ def cmd_upgrade(args):
     upgrade_v1_to_v2(path)
 
 
+def cmd_profile(args):
+    """Collect expert routing profile for TurboSmelt SSD inference."""
+    from .routing_profile import collect_routing_profile
+
+    result = collect_routing_profile(
+        model_path=args.model,
+        output_path=args.output,
+        n_samples=args.samples,
+        seq_len=args.seq_len,
+    )
+
+    print(f"\n  Routing profile saved: {result['file']}")
+    print(f"  Size: {result['size_mb']} MB")
+    print(f"  Tokens profiled: {result['n_calibration_tokens']:,}")
+    print(f"  MoE layers: {result['n_moe_layers']}")
+
+
 def cmd_convert(args):
     """Convert a HuggingFace model to JANG format."""
     from .convert import convert_model
@@ -169,6 +186,7 @@ def cmd_convert(args):
         target_bits=target_bits,
         profile=profile,
         quantization_method=args.method,
+        hadamard=args.hadamard,
     )
 
     print(f"\n  Profile: {profile}")
@@ -208,7 +226,20 @@ def main():
                           help="JANG profile (e.g., JANG_2L, JANG_3M) or number 1-8 (default: 2)")
     p_convert.add_argument("-m", "--method", default="mse", choices=["mse", "rtn", "mse-all"],
                           help="Quantization method (default: mse)")
+    p_convert.add_argument("--hadamard", action="store_true",
+                          help="Apply Hadamard rotation before quantization (QuIP# style, ~0.5-1 bit quality gain)")
     p_convert.set_defaults(func=cmd_convert)
+
+    # profile
+    p_profile = subparsers.add_parser("profile",
+        help="Collect expert routing profile for TurboSmelt SSD inference")
+    p_profile.add_argument("model", help="Path to JANG or MLX MoE model directory")
+    p_profile.add_argument("-o", "--output", help="Output directory (default: model dir)")
+    p_profile.add_argument("-n", "--samples", type=int, default=256,
+                          help="Number of calibration samples (default: 256)")
+    p_profile.add_argument("--seq-len", type=int, default=512,
+                          help="Max sequence length per sample (default: 512)")
+    p_profile.set_defaults(func=cmd_profile)
 
     # upgrade
     p_upgrade = subparsers.add_parser("upgrade",

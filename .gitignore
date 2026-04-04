@@ -17,3 +17,10 @@ scripts/
 mmlu_results*
 JANG-ISSUES.md
 JANG-PLAN.md
+research/
+eval_*.py
+.pypirc
+.env
+*.whl
+*.tar.gz
+.playwright-mcp/

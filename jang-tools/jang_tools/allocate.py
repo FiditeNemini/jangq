@@ -175,6 +175,10 @@ TIER_RULES = [
     ("x_proj", Tier.IMPORTANT),
     ("conv1d", Tier.COMPRESS),
 
+    # ── MoE Router (Gemma 4 uses "router.proj" instead of "gate") ────
+    ("router.proj", Tier.CRITICAL),
+    ("router", Tier.CRITICAL),
+
     # ── MoE Expert MLP (fused) ───────────────────────────────
     # Must come before generic gate/up/down to catch fused variants
     ("gate_up_proj", Tier.COMPRESS),
@@ -222,7 +226,7 @@ TIER_RULES = [
 # We handle it in classify_tensor() directly
 
 
-def classify_tensor(tensor_name: str, num_experts: int = 0) -> Tier:
+def classify_tensor(tensor_name: str, num_experts: int = 0, has_shared_mlp: bool = False) -> Tier:
     """
     Classify a tensor into a sensitivity tier based on its name.
 
@@ -236,11 +240,23 @@ def classify_tensor(tensor_name: str, num_experts: int = 0) -> Tier:
     Args:
         tensor_name: full tensor name (e.g., "model.layers.5.self_attn.q_proj.weight")
         num_experts: number of MoE experts (0 for dense, passed for future use)
+        has_shared_mlp: True if model has parallel dense MLP alongside MoE experts
+            (Gemma 4 pattern). When True, mlp.* tensors that are NOT inside
+            experts.* are classified as CRITICAL (shared expert equivalent).
 
     Returns:
         Tier enum value
     """
     name_lower = tensor_name.lower()
+
+    # Gemma 4 shared MLP: mlp.{gate,up,down}_proj alongside experts.* per layer.
+    # The dense MLP is always-active (shared expert equivalent). Quantization errors
+    # compound through every layer. Must be CRITICAL, not COMPRESS.
+    if has_shared_mlp and "experts" not in name_lower:
+        for mlp_pat in ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
+                        "mlp.fc1", "mlp.fc2"):
+            if mlp_pat in name_lower:
+                return Tier.CRITICAL
 
     for pattern, tier in TIER_RULES:
         if pattern in name_lower:
@@ -475,6 +491,7 @@ def allocate_bits_budget(
     tensor_names: list[str],
     target_bits: float = 4.0,
     num_experts: int = 0,
+    has_shared_mlp: bool = False,
 ) -> np.ndarray:
     """
     Budget-neutral bit allocation — same total bits as uniform, smarter distribution.
@@ -500,7 +517,7 @@ def allocate_bits_budget(
     for i, name in enumerate(tensor_names):
         if name not in unique_tensors:
             unique_tensors[name] = {
-                "tier": classify_tensor(name, num_experts),
+                "tier": classify_tensor(name, num_experts, has_shared_mlp),
                 "params": 0,
                 "indices": [],
             }
@@ -609,6 +626,7 @@ def allocate_bits_profile(
     tensor_names: list[str],
     profile: str = "JANG_3M",
     num_experts: int = 0,
+    has_shared_mlp: bool = False,
 ) -> np.ndarray:
     """
     Tier-based bit allocation — classifies each tensor into a sensitivity
@@ -659,7 +677,7 @@ def allocate_bits_profile(
             if prev_name is not None:
                 runs.append((cache[prev_name], run_count))
             if name not in cache:
-                assigned = tier_to_bits[classify_tensor(name, num_experts)]
+                assigned = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
                 assigned = _apply_mlp_asymmetry_floor(name, assigned, num_experts)
                 cache[name] = assigned
             prev_name = name
