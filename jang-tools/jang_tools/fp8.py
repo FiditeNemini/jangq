@@ -85,11 +85,13 @@ def load_fp8_tensor(
             # Per-expert scale (128, 1, 1) for pre-stacked 3D expert tensors
             result *= scale_inv
         elif len(shape) == 2:
-            # Block scaling: scale_inv is [rows/B, cols/B], each covers BxB block
+            # Block scaling: scale_inv is [ceil(rows/B), ceil(cols/B)], each covers BxB block
             sh, sw = scale_inv.shape
-            bh = shape[0] // sh
-            bw = shape[1] // sw
+            bh = (shape[0] + sh - 1) // sh  # ceiling division
+            bw = (shape[1] + sw - 1) // sw
             scale_full = np.repeat(np.repeat(scale_inv, bh, axis=0), bw, axis=1)
+            # Trim to actual shape (last block may be partial)
+            scale_full = scale_full[:shape[0], :shape[1]]
             result *= scale_full
 
     return result
