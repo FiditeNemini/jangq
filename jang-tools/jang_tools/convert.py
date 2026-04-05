@@ -371,6 +371,22 @@ def convert_model(
         print(f"    This may cause float16 overflow (NaN) on large models.")
         print(f"    Consider using a higher-bit profile or reclassifying these tensors.\n")
 
+    # Build compact per-tensor bit lookup and FREE the giant allocation arrays.
+    # For 744B models, all_tensor_names_for_alloc holds ~5.8B string pointers (~46 GB)
+    # and global_bit_alloc holds ~5.8B uint8 entries (~5.8 GB). These are only needed
+    # to build the per-tensor mapping, then can be freed.
+    _tensor_bits = {}  # tensor_name → bits (compact: ~60K entries vs 5.8B)
+    _offset = 0
+    for tensor_name, shape, n_blocks, sf_path in all_tensors_info:
+        bits_val = int(global_bit_alloc[_offset])
+        _tensor_bits[tensor_name] = bits_val
+        _offset += n_blocks
+
+    # Free the giant arrays — recovers ~52 GB on 744B models
+    del all_tensor_names_for_alloc, global_bit_alloc, all_importance, global_importance
+    import gc; gc.collect()
+    print(f"  Freed allocation arrays ({len(_tensor_bits)} tensor bit assignments retained)")
+
     # Step 4: Quantize and build MLX-native tensors
     print(f"\n  [4/5] Quantizing to MLX-native format ({quantization_method})...")
 
@@ -379,7 +395,6 @@ def convert_model(
     # Buffer for per-expert 2D tensors that need stacking
     expert_buffer = {}  # (layer_prefix, wtype) → {expert_id: {weight, scales, biases}}
     passthrough = {}
-    offset = 0
 
     for tensor_name, shape, n_blocks, sf_path in tqdm(all_tensors_info, desc="  Quantizing"):
         # Skip vision conv weights — Conv3d/Conv2d needs float, not uint32.
@@ -396,7 +411,6 @@ def convert_model(
                 if len(w_out.shape) == 4:
                     w_out = np.transpose(w_out, (0, 2, 3, 1))
                 passthrough[tensor_name] = w_out
-            offset += n_blocks
             continue
 
         with safe_open(str(sf_path), framework="numpy") as f:
@@ -417,9 +431,6 @@ def convert_model(
                     weights = load_fp8_tensor(sf_path, tensor_name, shape, scale_inv)
                 except Exception:
                     weights = _load_bf16_tensor(sf_path, tensor_name, shape)
-
-        bit_alloc = global_bit_alloc[offset:offset + n_blocks]
-        offset += n_blocks
 
         # AWQ scaling
         awq_scales = None
@@ -456,7 +467,7 @@ def convert_model(
             print(f"    Gate passthrough (f16): {tensor_name} → {weights.shape}")
             continue
 
-        bits = int(bit_alloc[0])
+        bits = _tensor_bits[tensor_name]
         w_shape = weights.shape
         is_3d = len(w_shape) >= 3
 
@@ -531,8 +542,9 @@ def convert_model(
                 print(f"  WARNING: mlx not available for {tensor_name}, using RTN fallback (lower quality)")
                 print(f"           Install mlx for best results: pip install 'jang[mlx]'")
             from .quantize import quantize_tensor
+            _fallback_alloc = np.full(n_blocks, bits, dtype=np.uint8)
             qt = quantize_tensor(weights.reshape(-1, weights.shape[-1]) if is_3d else weights,
-                                 bit_alloc, tensor_gs, method="rtn")
+                                 _fallback_alloc, tensor_gs, method="rtn")
             out_dim = weights.reshape(-1, weights.shape[-1]).shape[0] if is_3d else weights.shape[0]
             in_dim = weights.shape[-1]
             packed_per_row = (in_dim * bits + 31) // 32
@@ -726,7 +738,7 @@ def convert_model(
         print(f"  {_preflushed_idx} shards pre-flushed ({len(_preflushed_map)} tensors on disk)")
 
     model_config = json.loads((model_path / "config.json").read_text())
-    bit_widths_used = sorted(set(int(b) for b in global_bit_alloc))
+    bit_widths_used = sorted(set(_tensor_bits.values()))
     total_weight_bytes = sum(
         arr.nbytes for name, arr in v2_tensors.items()
         if name.endswith(".weight") and arr.dtype == np.uint32
