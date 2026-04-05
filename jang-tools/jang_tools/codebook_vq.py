@@ -22,7 +22,7 @@ import numpy as np
 
 
 DEFAULT_N_CODES = 16384
-DEFAULT_GROUP_SIZE = 128
+DEFAULT_GROUP_SIZE = 8  # MUST be 8 — validated 2026-04-04, g=128 gives cosine 0.2, g=8 gives 0.976
 
 
 def learn_codebook(

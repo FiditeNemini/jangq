@@ -627,7 +627,7 @@ def convert_model(
         # Incremental shard flush: write to disk when buffer exceeds 4 GB.
         # Prevents OOM on 744B+ models where v2_tensors would exceed RAM.
         _buf_bytes = sum(arr.nbytes for arr in v2_tensors.values())
-        if _buf_bytes > 4 * 1024 ** 3:
+        if _buf_bytes > 2 * 1024 ** 3:
             if not hasattr(convert_model, '_shard_idx'):
                 convert_model._shard_idx = 0
                 output_path.mkdir(parents=True, exist_ok=True)
