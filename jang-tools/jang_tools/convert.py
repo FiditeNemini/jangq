@@ -624,6 +624,26 @@ def convert_model(
 
         del weights
 
+        # Incremental shard flush: write to disk when buffer exceeds 4 GB.
+        # Prevents OOM on 744B+ models where v2_tensors would exceed RAM.
+        _buf_bytes = sum(arr.nbytes for arr in v2_tensors.values())
+        if _buf_bytes > 4 * 1024 ** 3:
+            if not hasattr(convert_model, '_shard_idx'):
+                convert_model._shard_idx = 0
+                output_path.mkdir(parents=True, exist_ok=True)
+            convert_model._shard_idx += 1
+            _shard_name = f"model-{convert_model._shard_idx:05d}-of-NNNNN.safetensors"
+            _shard_path = output_path / _shard_name
+            from safetensors.numpy import save_file as _save_shard
+            _save_shard(v2_tensors, str(_shard_path))
+            if not hasattr(convert_model, '_shard_map'):
+                convert_model._shard_map = {}
+            for _k in v2_tensors:
+                convert_model._shard_map[_k] = _shard_name
+            print(f"    Flushed shard {convert_model._shard_idx}: {len(v2_tensors)} tensors, {_buf_bytes / 1e9:.1f} GB")
+            v2_tensors.clear()
+            import gc; gc.collect()
+
     # --- Stack per-expert 2D weights into 3D QuantizedSwitchLinear format ---
     if expert_buffer:
         print(f"  Stacking {len(expert_buffer)} expert groups into 3D...")
@@ -698,6 +718,12 @@ def convert_model(
 
     # Step 5: Write JANG v2 model
     print(f"\n  [5/5] Writing JANG v2 model (MLX-native)...")
+
+    # Account for pre-flushed shards (incremental shard flush for large models)
+    _preflushed_map = getattr(convert_model, '_shard_map', {})
+    _preflushed_idx = getattr(convert_model, '_shard_idx', 0)
+    if _preflushed_map:
+        print(f"  {_preflushed_idx} shards pre-flushed ({len(_preflushed_map)} tensors on disk)")
 
     model_config = json.loads((model_path / "config.json").read_text())
     bit_widths_used = sorted(set(int(b) for b in global_bit_alloc))
@@ -825,7 +851,14 @@ def convert_model(
         jang_config=jang_config,
         tokenizer_files=tokenizer_files,
         importance_data=importance_data,
+        preflushed_map=_preflushed_map,
     )
+
+    # Clean up incremental flush state
+    if hasattr(convert_model, '_shard_idx'):
+        del convert_model._shard_idx
+    if hasattr(convert_model, '_shard_map'):
+        del convert_model._shard_map
 
     results = {
         "source_model": str(model_path),

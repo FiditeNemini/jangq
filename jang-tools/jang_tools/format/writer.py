@@ -34,6 +34,7 @@ def write_jang_v2_model(
     tokenizer_files: dict[str, str | dict] | None = None,
     importance_data: dict[str, np.ndarray] | None = None,
     max_shard_bytes: int = 5 * 1024 ** 3,  # 5 GB per shard
+    preflushed_map: dict[str, str] | None = None,
 ) -> None:
     """
     Write a JANG v2 model — MLX-native safetensors format.
@@ -85,14 +86,21 @@ def write_jang_v2_model(
             else:
                 (output_dir / filename).write_text(content)
 
-    # Shard tensors into files — standard safetensors naming
-    shards = _shard_tensors(tensors, max_shard_bytes)
+    # Include pre-flushed shards in the weight map (incremental flush for large models)
     weight_map = {}
     total_size = 0
+    preflushed_count = 0
+    if preflushed_map:
+        weight_map.update(preflushed_map)
+        preflushed_count = len(set(preflushed_map.values()))
+
+    # Shard remaining tensors into files — standard safetensors naming
+    shards = _shard_tensors(tensors, max_shard_bytes)
 
     for shard_idx, shard_tensor_names in enumerate(shards):
-        n_shards = len(shards)
-        shard_name = f"model-{shard_idx + 1:05d}-of-{n_shards:05d}.safetensors"
+        shard_num = preflushed_count + shard_idx + 1
+        # Use placeholder total — will rename after all shards written
+        shard_name = f"model-{shard_num:05d}-of-NNNNN.safetensors"
         shard_path = output_dir / shard_name
 
         shard_data = {}
@@ -106,6 +114,17 @@ def write_jang_v2_model(
         # loader path. Without this, speed drops 67% (50→15 tok/s).
         # Discovered via CRACK abliteration research (Mar 4 2026).
         save_file(shard_data, str(shard_path), metadata={"format": "mlx"})
+
+    # Rename all shard files with correct total count
+    n_total_shards = preflushed_count + len(shards)
+    for old_path in sorted(output_dir.glob("model-*-of-NNNNN.safetensors")):
+        new_name = old_path.name.replace("NNNNN", f"{n_total_shards:05d}")
+        new_path = old_path.parent / new_name
+        old_path.rename(new_path)
+        # Update weight_map references
+        for k, v in weight_map.items():
+            if v == old_path.name:
+                weight_map[k] = new_name
 
     # Write standard safetensors index (model.safetensors.index.json)
     index = {
