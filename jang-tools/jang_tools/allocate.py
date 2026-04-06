@@ -886,3 +886,166 @@ def summarize_allocation(
                 }
 
     return result
+
+
+# ============================================================
+# Compact Allocation — Per-Tensor (no per-block arrays)
+# ============================================================
+#
+# For profile and budget allocation, every block in a tensor gets the
+# same bit width. The per-block arrays are redundant and catastrophically
+# expensive on large models: GLM-5 (256 experts × 78 layers) generates
+# 5.89 billion blocks → 100 GB of allocation arrays.
+#
+# These compact functions classify each TENSOR once and return a dict
+# of tensor_name → bits. Memory: ~10 MB instead of ~100 GB.
+
+
+def allocate_bits_profile_compact(
+    tensor_info: list[tuple[str, int]],
+    profile: str = "JANG_3M",
+    num_experts: int = 0,
+    has_shared_mlp: bool = False,
+) -> dict[str, int]:
+    """Per-tensor profile allocation. Returns tensor_name → bits.
+
+    Equivalent to allocate_bits_profile() but without per-block arrays.
+    """
+    profile = profile.upper()
+    if profile not in JANG_PROFILES:
+        raise ValueError(f"Unknown profile '{profile}'. Available: {list(JANG_PROFILES.keys())}")
+
+    critical_bits, important_bits, compress_bits = JANG_PROFILES[profile]
+    tier_to_bits = {
+        Tier.CRITICAL: critical_bits,
+        Tier.IMPORTANT: important_bits,
+        Tier.COMPRESS: compress_bits,
+    }
+
+    result = {}
+    for name, n_blocks in tensor_info:
+        bits = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
+        bits = _apply_mlp_asymmetry_floor(name, bits, num_experts)
+        result[name] = bits
+    return result
+
+
+def allocate_bits_budget_compact(
+    tensor_info: list[tuple[str, int]],
+    target_bits: float = 4.0,
+    num_experts: int = 0,
+    has_shared_mlp: bool = False,
+) -> dict[str, int]:
+    """Per-tensor budget-neutral allocation. Returns tensor_name → bits.
+
+    Equivalent to allocate_bits_budget() but without per-block arrays.
+    Same logic: boost CRITICAL, first/last layer bonus, compensate by
+    downgrading COMPRESS tensors.
+    """
+    total_blocks = sum(n for _, n in tensor_info)
+    target_total = target_bits * total_blocks
+
+    # Classify each tensor
+    classified = {}
+    for name, n_blocks in tensor_info:
+        tier = classify_tensor(name, num_experts, has_shared_mlp)
+        classified[name] = {"tier": tier, "n_blocks": n_blocks}
+
+    # Start at base bits
+    base_bits = max(b for b in BIT_UPGRADE_PATH if b <= target_bits) if target_bits >= 2 else 2
+    tensor_bits = {name: base_bits for name, _ in tensor_info}
+
+    # Boost CRITICAL
+    critical_blocks = sum(info["n_blocks"] for info in classified.values()
+                          if info["tier"] == Tier.CRITICAL)
+    critical_pct = critical_blocks / total_blocks if total_blocks > 0 else 0
+    max_boost = 4 if critical_pct < 0.05 else 2
+
+    for name, info in classified.items():
+        if info["tier"] == Tier.CRITICAL:
+            boosted = base_bits
+            for _ in range(max_boost):
+                nxt = _next_bit_width(boosted)
+                if nxt is None:
+                    break
+                tensor_bits[name] = nxt
+                boosted = nxt
+
+    # First/last layer bonus (+1 step for first/last 2 layers)
+    tensor_layer_idx = {}
+    all_layer_ids = set()
+    for name, _ in tensor_info:
+        parts = name.split(".")
+        for i, part in enumerate(parts):
+            if part == "layers" and i + 1 < len(parts):
+                try:
+                    lid = int(parts[i + 1])
+                    tensor_layer_idx[name] = lid
+                    all_layer_ids.add(lid)
+                except ValueError:
+                    pass
+                break
+    n_layers = max(all_layer_ids) + 1 if all_layer_ids else 1
+
+    for name, layer_idx in tensor_layer_idx.items():
+        if layer_idx < 2 or layer_idx >= n_layers - 2:
+            current = tensor_bits[name]
+            nxt = _next_bit_width(current)
+            if nxt is not None and nxt <= 8:
+                tensor_bits[name] = nxt
+
+    # Compensate overspend by downgrading COMPRESS tensors
+    current_total = sum(tensor_bits[name] * classified[name]["n_blocks"]
+                        for name in classified)
+    overspend = current_total - target_total
+
+    if overspend > 0:
+        compress_tensors = [
+            (name, classified[name]["n_blocks"])
+            for name in classified
+            if classified[name]["tier"] == Tier.COMPRESS
+        ]
+        compress_tensors.sort(key=lambda x: x[1])  # smallest first
+
+        lower_bits = _prev_bit_width(base_bits)
+        if lower_bits:
+            remaining = overspend
+            for name, n_blocks in compress_tensors:
+                if remaining <= 0:
+                    break
+                floor = _apply_mlp_asymmetry_floor(name, lower_bits, num_experts)
+                if floor > lower_bits:
+                    continue
+                savings = (base_bits - lower_bits) * n_blocks
+                tensor_bits[name] = lower_bits
+                remaining -= savings
+
+    return tensor_bits
+
+
+def summarize_allocation_compact(
+    tensor_bits: dict[str, int],
+    tensor_info: list[tuple[str, int]],
+    num_experts: int = 0,
+) -> dict:
+    """Compute allocation statistics from per-tensor bit assignments."""
+    total_blocks = sum(n for _, n in tensor_info)
+    total_bits_sum = sum(tensor_bits[name] * n for name, n in tensor_info)
+    avg = total_bits_sum / total_blocks if total_blocks else 0
+
+    histogram = {}
+    for name, n_blocks in tensor_info:
+        bw = tensor_bits[name]
+        key = f"{bw}-bit"
+        if key not in histogram:
+            histogram[key] = {"count": 0, "percent": 0}
+        histogram[key]["count"] += n_blocks
+
+    for key in histogram:
+        histogram[key]["percent"] = round(100 * histogram[key]["count"] / total_blocks, 1)
+
+    return {
+        "average_bits": avg,
+        "total_blocks": total_blocks,
+        "histogram": dict(sorted(histogram.items())),
+    }

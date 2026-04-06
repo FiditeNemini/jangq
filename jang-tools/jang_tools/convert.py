@@ -223,9 +223,18 @@ def convert_model(
     weight_files = sorted(model_path.glob("*.safetensors"))
 
     # Collect all weight tensor info
-    all_tensors_info = []  # (name, shape, n_blocks)
-    all_importance = []
-    all_tensor_names_for_alloc = []
+    all_tensors_info = []  # (name, shape, n_blocks, sf_path)
+
+    # Compact allocation: per-tensor classification saves 100+ GB on large models.
+    # Profile/budget allocation assigns bits per-tensor, not per-block.
+    # GLM-5 (256 experts × 78 layers) has 5.89B blocks → 100 GB in per-block arrays.
+    use_compact = (
+        (profile and (profile.upper() in JANG_PROFILES or is_k_quant(profile.upper())))
+        or target_bits in (2.0, 3.0, 4.0, 5.0, 6.0, 8.0)
+    )
+    if not use_compact:
+        all_importance = []
+        all_tensor_names_for_alloc = []
 
     for sf_path in weight_files:
         with safe_open(str(sf_path), framework="numpy") as f:
@@ -262,63 +271,110 @@ def convert_model(
 
                 n_blocks = (n_weights + block_size - 1) // block_size
 
-                base_name = tensor_name
-                if base_name.endswith(".weight"):
-                    base_name = base_name[:-7]
-
-                imp_key = f"{base_name}.importance"
-                if imp_key in importance_data:
-                    imp = importance_data[imp_key]
-                else:
-                    imp = np.ones(n_blocks, dtype=np.float32) * 0.5
-
                 all_tensors_info.append((tensor_name, shape, n_blocks, sf_path))
-                all_importance.append(imp)
-                all_tensor_names_for_alloc.extend([tensor_name] * n_blocks)
+                if not use_compact:
+                    base_name = tensor_name
+                    if base_name.endswith(".weight"):
+                        base_name = base_name[:-7]
+                    imp_key = f"{base_name}.importance"
+                    if imp_key in importance_data:
+                        imp = importance_data[imp_key]
+                    else:
+                        imp = np.ones(n_blocks, dtype=np.float32) * 0.5
+                    all_importance.append(imp)
+                    all_tensor_names_for_alloc.extend([tensor_name] * n_blocks)
 
-    global_importance = np.concatenate(all_importance)
+    # Run bit allocation → produces _tensor_bits dict (tensor_name → bits)
+    if use_compact:
+        # Compact path: classify each tensor once, no per-block arrays.
+        # Reduces allocation memory from ~100 GB to <100 MB on 744B+ models.
+        from .allocate import (
+            allocate_bits_profile_compact, allocate_bits_budget_compact,
+            summarize_allocation_compact, k_quant_target,
+        )
+        tensor_info = [(name, n_blocks) for name, _, n_blocks, _ in all_tensors_info]
 
-    layer_indices = set()
-    for name in all_tensor_names_for_alloc:
-        parts = name.split(".")
-        for i, part in enumerate(parts):
-            if part == "layers" and i + 1 < len(parts):
-                try:
-                    layer_indices.add(int(parts[i + 1]))
-                except ValueError:
-                    pass
-    n_layers = max(layer_indices) + 1 if layer_indices else 1
+        if profile and is_k_quant(profile.upper()):
+            k_target = k_quant_target(profile.upper())
+            print(f"  Using K-quant: {profile} (target: {k_target} avg bits)")
+            _tensor_bits = allocate_bits_budget_compact(
+                tensor_info, target_bits=k_target,
+                num_experts=num_experts, has_shared_mlp=has_shared_mlp,
+            )
+        elif profile:
+            print(f"  Using profile: {profile}")
+            _tensor_bits = allocate_bits_profile_compact(
+                tensor_info, profile,
+                num_experts=num_experts, has_shared_mlp=has_shared_mlp,
+            )
+        else:
+            print(f"  Using K-quant allocation (target: {target_bits} avg bits)")
+            _tensor_bits = allocate_bits_budget_compact(
+                tensor_info, target_bits=target_bits,
+                num_experts=num_experts, has_shared_mlp=has_shared_mlp,
+            )
 
-    # Run bit allocation
-    from .allocate import is_k_quant, k_quant_target, allocate_bits_budget
-    if profile and is_k_quant(profile):
-        k_target = k_quant_target(profile)
-        print(f"  Using K-quant: {profile} (target: {k_target} avg bits)")
-        global_bit_alloc = allocate_bits_budget(
-            all_tensor_names_for_alloc, target_bits=k_target,
-            num_experts=num_experts, has_shared_mlp=has_shared_mlp,
-        )
-    elif profile:
-        print(f"  Using profile: {profile}")
-        global_bit_alloc = allocate_bits_profile(
-            all_tensor_names_for_alloc, profile,
-            num_experts=num_experts, has_shared_mlp=has_shared_mlp,
-        )
-    elif target_bits in (2.0, 3.0, 4.0, 5.0, 6.0, 8.0):
-        print(f"  Using K-quant allocation (target: {target_bits} avg bits)")
-        global_bit_alloc = allocate_bits_budget(
-            all_tensor_names_for_alloc, target_bits=target_bits,
-            num_experts=num_experts, has_shared_mlp=has_shared_mlp,
-        )
+        alloc_summary = summarize_allocation_compact(_tensor_bits, tensor_info, num_experts)
+        actual_bits = alloc_summary["average_bits"]
+        print(f"  Compact allocation: {len(all_tensors_info)} tensors classified directly")
+
     else:
-        global_bit_alloc = allocate_bits_greedy(
-            global_importance, target_bits, all_tensor_names_for_alloc,
-            n_layers=n_layers, block_size=block_size,
-        )
+        # Original per-block path (greedy/DP allocation)
+        global_importance = np.concatenate(all_importance)
 
-    alloc_summary = summarize_allocation(global_bit_alloc, all_tensor_names_for_alloc, num_experts)
-    actual_bits = alloc_summary["average_bits"]
+        layer_indices = set()
+        for name in all_tensor_names_for_alloc:
+            parts = name.split(".")
+            for i, part in enumerate(parts):
+                if part == "layers" and i + 1 < len(parts):
+                    try:
+                        layer_indices.add(int(parts[i + 1]))
+                    except ValueError:
+                        pass
+        n_layers = max(layer_indices) + 1 if layer_indices else 1
 
+        from .allocate import k_quant_target, allocate_bits_budget
+        if profile and is_k_quant(profile):
+            k_target = k_quant_target(profile)
+            print(f"  Using K-quant: {profile} (target: {k_target} avg bits)")
+            global_bit_alloc = allocate_bits_budget(
+                all_tensor_names_for_alloc, target_bits=k_target,
+                num_experts=num_experts, has_shared_mlp=has_shared_mlp,
+            )
+        elif profile:
+            print(f"  Using profile: {profile}")
+            global_bit_alloc = allocate_bits_profile(
+                all_tensor_names_for_alloc, profile,
+                num_experts=num_experts, has_shared_mlp=has_shared_mlp,
+            )
+        elif target_bits in (2.0, 3.0, 4.0, 5.0, 6.0, 8.0):
+            print(f"  Using K-quant allocation (target: {target_bits} avg bits)")
+            global_bit_alloc = allocate_bits_budget(
+                all_tensor_names_for_alloc, target_bits=target_bits,
+                num_experts=num_experts, has_shared_mlp=has_shared_mlp,
+            )
+        else:
+            global_bit_alloc = allocate_bits_greedy(
+                global_importance, target_bits, all_tensor_names_for_alloc,
+                n_layers=n_layers, block_size=block_size,
+            )
+
+        alloc_summary = summarize_allocation(global_bit_alloc, all_tensor_names_for_alloc, num_experts)
+        actual_bits = alloc_summary["average_bits"]
+
+        # Build _tensor_bits from per-block allocation
+        _tensor_bits = {}
+        _offset = 0
+        for tensor_name, shape, n_blocks, sf_path in all_tensors_info:
+            _tensor_bits[tensor_name] = int(global_bit_alloc[_offset])
+            _offset += n_blocks
+
+        # Free the giant arrays — recovers ~100 GB on 744B models
+        del all_tensor_names_for_alloc, global_bit_alloc, all_importance, global_importance
+        import gc; gc.collect()
+        print(f"  Freed allocation arrays ({len(_tensor_bits)} tensor bit assignments retained)")
+
+    # Print summary (common for both paths)
     print(f"  Target bits: {target_bits}")
     print(f"  Actual bits: {actual_bits:.2f}")
     print(f"  Total blocks: {alloc_summary['total_blocks']:,}")
@@ -326,20 +382,12 @@ def convert_model(
         print(f"    {bw}: {info['count']:,} blocks ({info['percent']}%)")
 
     # ── Safety check: precision floor warnings ──────────────────────
-    # Detect dangerous combinations that cause NaN/overflow.
-    # Proven empirically: shared_expert at <4-bit + hidden_size>=4096 → float16 inf.
-    # Routed experts at 2-bit + 512+ experts → NaN on 397B.
     from .allocate import classify_tensor, Tier
     _cfg = json.loads((model_path / "config.json").read_text())
     hidden_size = _cfg.get("hidden_size",
                     _cfg.get("text_config", {}).get("hidden_size", 0))
-    # Vectorized safety check — classify unique tensor names only (not billions of blocks)
     danger_tensors = {}
-    unique_tensor_bits = {}
-    for i, tname in enumerate(all_tensor_names_for_alloc):
-        if tname not in unique_tensor_bits:
-            unique_tensor_bits[tname] = int(global_bit_alloc[i])
-    for tname, bits in unique_tensor_bits.items():
+    for tname, bits in _tensor_bits.items():
         tier = classify_tensor(tname, num_experts)
         if "shared_expert" in tname and "gate" not in tname and bits < 4 and hidden_size >= 4096:
             danger_tensors.setdefault(tname, bits)
@@ -358,7 +406,6 @@ def convert_model(
         print(f"\n  ⚠ PRECISION WARNING: {len(set(danger_tensors.values()))} tensor types below safe floor")
         shown = set()
         for tname, bits in danger_tensors.items():
-            # Show one example per unique type
             base = tname.split(".")[-1] if "." in tname else tname
             if base not in shown:
                 print(f"    {tname}: {bits}-bit (min recommended: 4-bit)")
@@ -370,22 +417,6 @@ def convert_model(
             print(f"    gate_proj needs 4-bit min (SiLU amplifier), down_proj needs 3-bit min.")
         print(f"    This may cause float16 overflow (NaN) on large models.")
         print(f"    Consider using a higher-bit profile or reclassifying these tensors.\n")
-
-    # Build compact per-tensor bit lookup and FREE the giant allocation arrays.
-    # For 744B models, all_tensor_names_for_alloc holds ~5.8B string pointers (~46 GB)
-    # and global_bit_alloc holds ~5.8B uint8 entries (~5.8 GB). These are only needed
-    # to build the per-tensor mapping, then can be freed.
-    _tensor_bits = {}  # tensor_name → bits (compact: ~60K entries vs 5.8B)
-    _offset = 0
-    for tensor_name, shape, n_blocks, sf_path in all_tensors_info:
-        bits_val = int(global_bit_alloc[_offset])
-        _tensor_bits[tensor_name] = bits_val
-        _offset += n_blocks
-
-    # Free the giant arrays — recovers ~52 GB on 744B models
-    del all_tensor_names_for_alloc, global_bit_alloc, all_importance, global_importance
-    import gc; gc.collect()
-    print(f"  Freed allocation arrays ({len(_tensor_bits)} tensor bit assignments retained)")
 
     # Step 4: Quantize and build MLX-native tensors
     print(f"\n  [4/5] Quantizing to MLX-native format ({quantization_method})...")
@@ -664,7 +695,7 @@ def convert_model(
             _shard_name = f"model-{convert_model._shard_idx:05d}-of-NNNNN.safetensors"
             _shard_path = output_path / _shard_name
             from safetensors.numpy import save_file as _save_shard
-            _save_shard(v2_tensors, str(_shard_path))
+            _save_shard(v2_tensors, str(_shard_path), metadata={"format": "mlx"})
             if not hasattr(convert_model, '_shard_map'):
                 convert_model._shard_map = {}
             for _k in v2_tensors:
@@ -692,11 +723,14 @@ def convert_model(
     # Step 4b: Collect non-quantized tensors (norms, biases, vision)
     print("  Collecting non-quantized tensors...")
     quantized_bases = set()
-    for key in v2_tensors:
+    # Include current v2_tensors AND pre-flushed shard tensors
+    _all_quant_keys = list(v2_tensors.keys())
+    _all_quant_keys.extend(getattr(convert_model, '_shard_map', {}).keys())
+    for key in _all_quant_keys:
         if key.endswith(".weight"):
             quantized_bases.add(key[:-7])
         elif key.endswith(".scales") or key.endswith(".biases"):
-            quantized_bases.add(key[:-7] if key.endswith(".scales") else key[:-7])
+            quantized_bases.add(key[:-7])
 
     for sf_path in weight_files:
         # Skip imatrix files (calibration-only, not model weights)
