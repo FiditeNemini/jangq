@@ -164,8 +164,15 @@ def convert_model(
         print(f"  Shared MLP: parallel dense MLP alongside MoE → classified as CRITICAL")
     if block_size == DEFAULT_BLOCK_SIZE and arch_config.has_moe_layers:
         if num_experts >= 150:
-            block_size = 128
-            print(f"  Auto group_size: {num_experts} experts detected → group_size=128 (speed fix)")
+            # Check MLA dim compatibility: sanitize reshapes kv_b_proj to (..., qk_nope_head_dim).
+            # If qk_nope_head_dim isn't divisible by 128, must use 64 or loading crashes.
+            _qk_nope = _raw_config.get("qk_nope_head_dim", _raw_config.get("text_config", {}).get("qk_nope_head_dim", 0))
+            if _qk_nope > 0 and _qk_nope % 128 != 0:
+                block_size = 64
+                print(f"  Auto group_size: {num_experts} experts + qk_nope_head_dim={_qk_nope} (not ÷128) → group_size=64")
+            else:
+                block_size = 128
+                print(f"  Auto group_size: {num_experts} experts detected → group_size=128 (speed fix)")
         elif num_experts >= 64:
             # 64-149 experts: warn but keep 64 (quality vs speed tradeoff)
             print(f"  Note: {num_experts} experts. Consider -b 128 if speed is priority.")
