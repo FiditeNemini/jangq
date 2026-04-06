@@ -613,7 +613,10 @@ def convert_model(
             v2_tensors[f"{sw_base}.scales"] = mlx_scales
             v2_tensors[f"{sw_base}.biases"] = mlx_biases
 
-        # Handle per-expert 2D tensors (MiniMax/Mixtral: experts.N.w1)
+        # Handle per-expert 2D tensors (MiniMax/Mixtral/GLM-5: experts.N.w1)
+        # Stack into 3D as soon as all experts for a group are collected,
+        # then move to v2_tensors for flushing. Prevents OOM from accumulating
+        # 228 groups × 256 experts (~200 GB) in expert_buffer.
         elif _PER_EXPERT_PATTERN.match(tensor_name):
             m = _PER_EXPERT_PATTERN.match(tensor_name)
             prefix = m.group(1)
@@ -627,6 +630,20 @@ def convert_model(
                 "scales": mlx_scales,
                 "biases": mlx_biases,
             }
+            # Stack and flush as soon as all experts for this group are collected
+            if not hasattr(convert_model, '_n_experts_expected'):
+                convert_model._n_experts_expected = num_experts
+            if len(expert_buffer[group_key]) >= convert_model._n_experts_expected:
+                new_name = _EXPERT_NAME_MAP.get(wtype, wtype)
+                sw_key = f"{prefix}.switch_mlp.{new_name}"
+                n_exp = max(expert_buffer[group_key].keys()) + 1
+                v2_tensors[f"{sw_key}.weight"] = np.stack(
+                    [expert_buffer[group_key][e]["weight"] for e in range(n_exp)])
+                v2_tensors[f"{sw_key}.scales"] = np.stack(
+                    [expert_buffer[group_key][e]["scales"] for e in range(n_exp)])
+                v2_tensors[f"{sw_key}.biases"] = np.stack(
+                    [expert_buffer[group_key][e]["biases"] for e in range(n_exp)])
+                del expert_buffer[group_key]
 
         # Standard tensor — store directly
         else:
