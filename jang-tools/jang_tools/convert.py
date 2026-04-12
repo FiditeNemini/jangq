@@ -101,6 +101,7 @@ def convert_model(
     awq_alpha: float = 0.25,
     profile: Optional[str] = None,
     hadamard: bool = False,
+    gptq_hessian_dir: Optional[str | Path] = None,
 ) -> dict:
     """
     Convert a HuggingFace model to JANG v2 format.
@@ -509,7 +510,35 @@ def convert_model(
         w_shape = weights.shape
         is_3d = len(w_shape) >= 3
 
-        # --- Quantize via mx.quantize() → MLX-native uint32 output ---
+        # --- Check for GPTQ Hessian for this tensor ---
+        _gptq_hessian = None
+        _gptq_hinv = None
+        if gptq_hessian_dir is not None:
+            import re
+            _layer_match = re.search(r'layers\.(\d+)', tensor_name)
+            _is_expert = "experts" in tensor_name or "switch_mlp" in tensor_name
+            if _layer_match and bits <= 4 and (_is_expert or is_3d):
+                _layer_idx = int(_layer_match.group(1))
+                _h_path = Path(gptq_hessian_dir) / f"H_FP8_L{_layer_idx}.npy"
+                if _h_path.exists():
+                    _gptq_hessian = np.load(str(_h_path)).astype(np.float64)
+                    # Cache H_inv per layer (shared across all 256 experts)
+                    if not hasattr(convert_model, '_gptq_hinv_cache'):
+                        convert_model._gptq_hinv_cache = {}
+                    if _layer_idx not in convert_model._gptq_hinv_cache:
+                        damp = 0.01 * np.mean(np.diag(_gptq_hessian))
+                        _H = _gptq_hessian.copy()
+                        _H[np.diag_indices_from(_H)] += damp
+                        try:
+                            _L = np.linalg.cholesky(_H)
+                            _hinv = np.linalg.solve(_L.T, np.linalg.solve(_L, np.eye(_H.shape[0], dtype=np.float64)))
+                        except np.linalg.LinAlgError:
+                            _H[np.diag_indices_from(_H)] += damp * 100
+                            _hinv = np.linalg.inv(_H)
+                        convert_model._gptq_hinv_cache[_layer_idx] = _hinv
+                    _gptq_hinv = convert_model._gptq_hinv_cache[_layer_idx]
+
+        # --- Quantize via mx.quantize() or GPTQ → MLX-native uint32 output ---
         try:
             import mlx.core as mx
 
@@ -543,28 +572,47 @@ def convert_model(
                     del w_mx_pre, w_rotated
                     mx.clear_cache()
 
-            n_elements = weights.shape[0] * weights.shape[1]
-            if n_elements > 100_000_000:
-                chunk_rows = max(1, 100_000_000 // weights.shape[1])
-                all_qw, all_s, all_b = [], [], []
-                for start in range(0, weights.shape[0], chunk_rows):
-                    end = min(start + chunk_rows, weights.shape[0])
-                    chunk = mx.array(weights[start:end].astype(np.float16))
-                    cqw, cs, cb = mx.quantize(chunk, group_size=tensor_gs, bits=bits)
-                    all_qw.append(np.array(cqw))
-                    all_s.append(np.array(cs))
-                    all_b.append(np.array(cb))
-                    mx.synchronize()
-                mlx_weight = np.concatenate(all_qw, axis=0)
-                mlx_scales = np.concatenate(all_s, axis=0).astype(np.float16)
-                mlx_biases = np.concatenate(all_b, axis=0).astype(np.float16)
+            # GPTQ path: use error feedback with Hessian for expert tensors
+            if _gptq_hessian is not None and bits <= 4:
+                if not hasattr(convert_model, '_gptq_logged'):
+                    print(f"    GPTQ activated: {tensor_name} (bits={bits})")
+                    convert_model._gptq_logged = True
+                from .gptq_mlx import gptq_quantize_fast_with_hinv
+                _gptq_w = weights.astype(np.float32)
+                # For down_proj, Hessian is for hidden_size input but weight has
+                # intermediate_size input — use identity-scaled H_inv
+                if _gptq_hinv is not None and _gptq_hinv.shape[0] == _gptq_w.shape[1]:
+                    _hinv_use = _gptq_hinv
+                else:
+                    # Fallback: identity H_inv (no error feedback, just MSE-optimal clipping)
+                    _hinv_use = np.eye(_gptq_w.shape[1], dtype=np.float64) / max(np.mean(np.diag(_gptq_hessian)), 1e-10)
+                mlx_weight, mlx_scales, mlx_biases = gptq_quantize_fast_with_hinv(
+                    _gptq_w, _hinv_use, bits=bits, group_size=tensor_gs,
+                )
+                del _gptq_w
             else:
-                w_mx = mx.array(weights.astype(np.float16))
-                qw, scales, biases = mx.quantize(w_mx, group_size=tensor_gs, bits=bits)
-                # Keep as numpy with MLX shapes — uint32 weights, float16 scales/biases
-                mlx_weight = np.array(qw)       # uint32, (out_dim, packed_per_row)
-                mlx_scales = np.array(scales).astype(np.float16)  # (out_dim, n_groups)
-                mlx_biases = np.array(biases).astype(np.float16)  # (out_dim, n_groups)
+                # Standard RTN path via mx.quantize
+                n_elements = weights.shape[0] * weights.shape[1]
+                if n_elements > 100_000_000:
+                    chunk_rows = max(1, 100_000_000 // weights.shape[1])
+                    all_qw, all_s, all_b = [], [], []
+                    for start in range(0, weights.shape[0], chunk_rows):
+                        end = min(start + chunk_rows, weights.shape[0])
+                        chunk = mx.array(weights[start:end].astype(np.float16))
+                        cqw, cs, cb = mx.quantize(chunk, group_size=tensor_gs, bits=bits)
+                        all_qw.append(np.array(cqw))
+                        all_s.append(np.array(cs))
+                        all_b.append(np.array(cb))
+                        mx.synchronize()
+                    mlx_weight = np.concatenate(all_qw, axis=0)
+                    mlx_scales = np.concatenate(all_s, axis=0).astype(np.float16)
+                    mlx_biases = np.concatenate(all_b, axis=0).astype(np.float16)
+                else:
+                    w_mx = mx.array(weights.astype(np.float16))
+                    qw, scales, biases = mx.quantize(w_mx, group_size=tensor_gs, bits=bits)
+                    mlx_weight = np.array(qw)
+                    mlx_scales = np.array(scales).astype(np.float16)
+                    mlx_biases = np.array(biases).astype(np.float16)
 
             # Reshape back to 3D for expert weights
             if is_3d:
@@ -796,6 +844,9 @@ def convert_model(
         print(f"  {_preflushed_idx} shards pre-flushed ({len(_preflushed_map)} tensors on disk)")
 
     model_config = json.loads((model_path / "config.json").read_text())
+    # Strip source quantization_config (FP8 metadata) — leaving it causes mlx_lm
+    # to misinterpret the model format. JANG uses "quantization" key instead.
+    model_config.pop("quantization_config", None)
     bit_widths_used = sorted(set(_tensor_bits.values()))
     total_weight_bytes = sum(
         arr.nbytes for name, arr in v2_tensors.items()

@@ -125,6 +125,16 @@ TIER_RULES = [
     ("q_a_proj", Tier.CRITICAL),
     ("q_b_proj", Tier.CRITICAL),
 
+    # ── DSA (DeepSeek Sparse Attention) Indexer (GLM-5/V3.2) ─
+    # The indexer produces top-k token indices for sparse attention.
+    # If quantized too aggressively, it selects WRONG tokens to attend to,
+    # causing attention to drift and model to degenerate during generation.
+    # Must stay CRITICAL — small tensors, high sensitivity.
+    ("indexer.wk", Tier.CRITICAL),
+    ("indexer.wq_b", Tier.CRITICAL),
+    ("indexer.weights_proj", Tier.CRITICAL),
+    ("indexers_proj", Tier.CRITICAL),
+
     # ── Full Softmax Attention ───────────────────────────────
     # Standard Q/K/V/O projections — critical for coherence
     ("q_proj", Tier.CRITICAL),
@@ -249,10 +259,16 @@ def classify_tensor(tensor_name: str, num_experts: int = 0, has_shared_mlp: bool
     """
     name_lower = tensor_name.lower()
 
-    # Gemma 4 shared MLP: mlp.{gate,up,down}_proj alongside experts.* per layer.
-    # The dense MLP is always-active (shared expert equivalent). Quantization errors
-    # compound through every layer. Must be CRITICAL, not COMPRESS.
-    if has_shared_mlp and "experts" not in name_lower:
+    # Gemma 4 shared MLP / GLM-5 first_k_dense_replace:
+    # For MoE models, any mlp.{gate,up,down}_proj that is NOT inside experts.*
+    # is a dense MLP that is ALWAYS active (either shared MLP like Gemma 4,
+    # or first_k_dense_replace layers like GLM-5/DeepSeek V3 where the first
+    # N layers use dense MLP instead of MoE). These always-active layers process
+    # every token and quantization errors compound through every subsequent layer.
+    # Must be CRITICAL, not COMPRESS.
+    # Trigger: num_experts > 0 (MoE model) OR has_shared_mlp (Gemma 4 pattern).
+    is_moe_model_dense_mlp = (num_experts > 0 or has_shared_mlp) and "experts" not in name_lower
+    if is_moe_model_dense_mlp:
         for mlp_pat in ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
                         "mlp.fc1", "mlp.fc2"):
             if mlp_pat in name_lower:
@@ -301,7 +317,7 @@ MLP_ASYMMETRY_FLOORS = {
 
 def _apply_mlp_asymmetry_floor(name: str, bits: int, num_experts: int) -> int:
     """
-    Apply MLP asymmetry bit floors for 512+ expert models.
+    Apply MLP asymmetry bit floors for 256+ expert models.
 
     Returns the adjusted bit width (may be higher than input if floor applies).
     Only affects routed expert MLP tensors, not shared_expert.
@@ -635,7 +651,7 @@ def allocate_bits_profile(
     Works for ANY architecture: dense transformer, MoE, hybrid SSM,
     MLA, VL, Mamba, etc. No tensor name hardcoding needed.
 
-    For 512+ expert models, applies MLP asymmetry fix:
+    For 256+ expert models, applies MLP asymmetry fix:
       - gate_proj of routed experts → IMPORTANT tier (4-bit min)
       - down_proj of routed experts → 3-bit floor (prevents residual corruption)
       - up_proj stays COMPRESS (2-bit OK when gate is protected)

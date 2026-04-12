@@ -117,17 +117,30 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
     weight_files = _get_v2_weight_files(path)
     logger.info(f"  Loading {len(weight_files)} safetensors shards via mmap")
 
-    # Detect Nemotron-H: needs fc1/fc2 rename + gate dequantization
+    # Detect model-specific weight transforms
     _model_cfg = json.loads((path / "config.json").read_text())
     _top_type = _model_cfg.get("model_type", "")
     _text_type = _model_cfg.get("text_config", {}).get("model_type", "")
     _is_nemotron = _top_type == "nemotron_h"
-    # Mistral 4 uses DeepSeek V2 MoE with raw gate weight — needs same dequant
-    _needs_gate_dequant = _is_nemotron or _text_type == "mistral4"
+    _is_mistral4 = _text_type == "mistral4"
+    # Nemotron + Mistral 4 need gate dequantization
+    _needs_gate_dequant = _is_nemotron or _is_mistral4
     _nemotron_renames = {
         "switch_mlp.up_proj": "switch_mlp.fc1",
         "switch_mlp.down_proj": "switch_mlp.fc2",
     }
+    # Mistral 4 MLA: kv_b_proj must be split into embed_q + unembed_out
+    _mistral4_cfg = None
+    if _is_mistral4:
+        _t_cfg = _model_cfg.get("text_config", _model_cfg)
+        _mistral4_cfg = {
+            "nheads": _t_cfg.get("num_attention_heads", 32),
+            "qk_nope": _t_cfg.get("qk_nope_head_dim", 64),
+            "v_head": _t_cfg.get("v_head_dim", 128),
+            "kv_rank": _t_cfg.get("kv_lora_rank", 256),
+            "nlayers": _t_cfg.get("num_hidden_layers", 36),
+        }
+        _mistral4_cfg["head_dim"] = _mistral4_cfg["qk_nope"] + _mistral4_cfg["v_head"]
 
     for sf in weight_files:
         weights = mx.load(str(sf))
@@ -188,6 +201,51 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
                             except Exception:
                                 continue
             weights = renamed
+
+        # Mistral 4 MLA: split kv_b_proj into embed_q + unembed_out
+        if _mistral4_cfg:
+            mc = _mistral4_cfg
+            keys_to_remove = []
+            new_weights = {}
+            kv_count = sum(1 for k in weights if "kv_b_proj" in k)
+            kv_w = sum(1 for k in weights if ".kv_b_proj.weight" in k)
+            if kv_count > 0:
+                print(f"  MLA: {kv_count} kv_b_proj keys ({kv_w} weights) in this shard")
+                sample = [k for k in weights if "kv_b_proj" in k][:3]
+                print(f"    Sample: {sample}")
+            for k, v in weights.items():
+                if ".kv_b_proj.weight" not in k:
+                    continue
+                pfx = k.replace(".kv_b_proj.weight", "")
+                # Dequantize if quantized
+                s_key = f"{pfx}.kv_b_proj.scales"
+                b_key = f"{pfx}.kv_b_proj.biases"
+                if s_key in weights:
+                    s, b = weights[s_key], weights.get(b_key, mx.zeros_like(weights[s_key]))
+                    for try_bits in [8, 6, 4, 3, 2]:
+                        elem = 32 // try_bits
+                        real = v.shape[-1] * elem
+                        gs = real // s.shape[-1] if s.shape[-1] > 0 else 0
+                        if gs > 0 and gs * s.shape[-1] == real:
+                            try:
+                                v = mx.dequantize(v, s, b, gs, try_bits)
+                                break
+                            except Exception:
+                                continue
+                    keys_to_remove.extend([s_key, b_key])
+                # Reshape: (nheads*head_dim, kv_rank) → (nheads, head_dim, kv_rank)
+                v = v.reshape(mc["nheads"], mc["head_dim"], mc["kv_rank"])
+                # embed_q: key projection (nheads, kv_rank, qk_nope)
+                wk = mx.contiguous(v[:, :mc["qk_nope"], :].swapaxes(-1, -2))
+                # unembed_out: value projection (nheads, v_head, kv_rank)
+                wv = mx.contiguous(v[:, mc["qk_nope"]:, :])
+                new_weights[f"{pfx}.embed_q.weight"] = wk.astype(mx.float16)
+                new_weights[f"{pfx}.unembed_out.weight"] = wv.astype(mx.float16)
+                keys_to_remove.append(k)
+                logger.info(f"  Split kv_b_proj: embed_q={wk.shape}, unembed_out={wv.shape}")
+            for k in keys_to_remove:
+                weights.pop(k, None)
+            weights.update(new_weights)
 
         model.load_weights(list(weights.items()), strict=False)
         del weights
@@ -333,14 +391,22 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
     model = model_class.Model(model_config)
 
     # Quantize ALL layers that support it (same approach as mlx_lm).
-    # The class_predicate used to check weight key names, but model param names
-    # and HuggingFace weight names differ (e.g., "language_model.model.embed_tokens"
-    # vs "model.language_model.embed_tokens") — so the lookup always failed.
-    # Fix: quantize everything, then _fix_quantized_bits adjusts per-layer.
+    # Use model's quant_predicate if available (e.g., Mistral 4 needs 8-bit gate)
+    _lang_model = getattr(model, 'language_model', model)
+    _quant_pred = getattr(_lang_model, 'quant_predicate', None)
+
     def get_class_predicate(p, m):
         if skip_multimodal_module(p):
             return False
-        return hasattr(m, "to_quantized")
+        if not hasattr(m, "to_quantized"):
+            return False
+        # Model-specific quantization (e.g., Mistral 4: gate at 8-bit)
+        if _quant_pred is not None:
+            result = _quant_pred(p, m)
+            if isinstance(result, dict):
+                return result  # e.g., {"group_size": 64, "bits": 8}
+            return result
+        return True
 
     nn.quantize(model, group_size=block_size, bits=default_bits,
                 class_predicate=get_class_predicate)
@@ -358,14 +424,13 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
         # On failure, apply a minimal sanitize (rename + transpose + norm fix)
         # that skips the gate_up splitting.
         # JANG MoE expert remap: switch_mlp.* → experts.switch_glu.*
-        # JANG v2 stores expert weights as switch_mlp.{gate,up,down}_proj but
-        # mlx-vlm's Gemma 4 model expects experts.switch_glu.*. Upstream mlx-vlm
-        # (0.4.x) doesn't have this remap, causing expert weights to silently
-        # fail to load → garbage output. Apply BEFORE sanitize so it works with
-        # any mlx-vlm version.
+        # Only for models that use experts.switch_glu (Gemma 4).
+        # Mistral 4 uses mlp.switch_mlp directly — do NOT remap.
+        _text_mt_vlm = config.get("text_config", {}).get("model_type", "")
+        _needs_expert_remap = _text_mt_vlm != "mistral4"
         remapped = {}
         for k, v in shard_weights.items():
-            if ".switch_mlp." in k:
+            if _needs_expert_remap and ".switch_mlp." in k:
                 remapped[k.replace(".switch_mlp.", ".experts.switch_glu.")] = v
             else:
                 remapped[k] = v
@@ -441,11 +506,112 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
                         if dq is not None:
                             shard_weights[k] = dq.astype(mx.float16)
                             del shard_weights[s_key], shard_weights[b_key]
+        # Mistral 4 MLA: split kv_b_proj into embed_q + unembed_out
+        # DISABLED: mlx_vlm now has native mistral4 model (Mistral4Model in
+        # mlx_vlm/models/mistral4/language.py) that handles kv_b_proj natively.
+        # Our split conflicts with the native model's quantized expectations.
+        _text_mt = config.get("text_config", {}).get("model_type", "")
+        if False and _text_mt == "mistral4":
+            _t_cfg = config.get("text_config", config)
+            _nheads = _t_cfg.get("num_attention_heads", 32)
+            _qk_nope = _t_cfg.get("qk_nope_head_dim", 64)
+            _v_head = _t_cfg.get("v_head_dim", 128)
+            _kv_rank = _t_cfg.get("kv_lora_rank", 256)
+            _head_dim = _qk_nope + _v_head
+            new_kv = {}
+            rm_kv = []
+            for k, v in shard_weights.items():
+                if ".kv_b_proj.weight" not in k:
+                    continue
+                pfx = k.replace(".kv_b_proj.weight", "")
+                s_key = f"{pfx}.kv_b_proj.scales"
+                b_key = f"{pfx}.kv_b_proj.biases"
+                if s_key in shard_weights:
+                    s = shard_weights[s_key]
+                    b = shard_weights.get(b_key, mx.zeros_like(s))
+                    for bits in [8, 6, 4, 3, 2]:
+                        elem = 32 // bits
+                        real = v.shape[-1] * elem
+                        gs = real // s.shape[-1] if s.shape[-1] > 0 else 0
+                        if gs > 0 and gs * s.shape[-1] == real:
+                            try:
+                                v = mx.dequantize(v, s, b, gs, bits)
+                                break
+                            except Exception:
+                                continue
+                    rm_kv.extend([s_key, b_key])
+                v = v.reshape(_nheads, _head_dim, _kv_rank)
+                wk = mx.contiguous(v[:, :_qk_nope, :].swapaxes(-1, -2))
+                wv = mx.contiguous(v[:, _qk_nope:, :])
+                new_kv[f"{pfx}.embed_q.weight"] = wk.astype(mx.float16)
+                new_kv[f"{pfx}.unembed_out.weight"] = wv.astype(mx.float16)
+                rm_kv.append(k)
+                logger.info(f"  Split kv_b_proj: embed_q={wk.shape}, unembed_out={wv.shape}")
+            for k in rm_kv:
+                shard_weights.pop(k, None)
+            shard_weights.update(new_kv)
+
+        # MoE gate dequantization (Nemotron, Mistral 4, etc.)
+        # Gate is nn.Linear quantized at 8-bit by nn.quantize, but JANG stores
+        # gate as uint32+scales+biases. Dequant here so it loads as float.
+        # After loading, we fix the gate module type (see post-load fixup below).
+        _n_exp = config.get("text_config", config).get("n_routed_experts", 0) or config.get("text_config", config).get("num_local_experts", 0)
+        if _n_exp > 0:
+            gate_parts = {}
+            gate_rm = []
+            for k, v in shard_weights.items():
+                if ".gate." in k and (k.endswith(".scales") or k.endswith(".biases")) and "gate_proj" not in k:
+                    prefix = k.rsplit(".", 1)[0]
+                    gate_parts.setdefault(prefix, {})[k.rsplit(".", 1)[1]] = v
+                    gate_rm.append(k)
+            for k in gate_rm:
+                del shard_weights[k]
+            for prefix, parts in gate_parts.items():
+                wkey = f"{prefix}.weight"
+                if wkey in shard_weights and "scales" in parts:
+                    qw = shard_weights[wkey]
+                    scales = parts["scales"]
+                    biases = parts.get("biases", mx.zeros_like(scales))
+                    for bits in [8, 6, 4, 3, 2]:
+                        elem = 32 // bits
+                        real = qw.shape[-1] * elem
+                        gs = real // scales.shape[-1] if scales.shape[-1] > 0 else 0
+                        if gs > 0 and gs * scales.shape[-1] == real:
+                            try:
+                                dq = mx.dequantize(qw, scales, biases, gs, bits)
+                                mx.eval(dq)
+                                shard_weights[wkey] = dq.astype(mx.bfloat16)
+                                logger.info(f"  Dequantized gate: {wkey} bits={bits} gs={gs}")
+                                break
+                            except Exception:
+                                continue
+
         model.load_weights(list(shard_weights.items()), strict=False)
         del shard_weights
         gc.collect()
 
     _fix_quantized_bits(model, {})
+
+    # Post-load fixup: replace QuantizedLinear gates with plain Linear
+    # when gate weights were dequantized to float by our loader.
+    # nn.quantize created QuantizedLinear but we loaded float weights.
+    if _n_exp > 0:
+        _lang = getattr(model, 'language_model', model)
+        _mdl = getattr(_lang, 'model', _lang)
+        _layers = getattr(_mdl, 'layers', [])
+        for _layer in _layers:
+            _mlp = getattr(_layer, 'mlp', None)
+            if _mlp is None:
+                continue
+            _gate = getattr(_mlp, 'gate', None)
+            if _gate is None:
+                continue
+            _gw = getattr(_gate, 'weight', None)
+            if _gw is not None and _gw.dtype != mx.uint32:
+                # Gate was dequanted to float — replace QuantizedLinear with Linear
+                new_gate = nn.Linear(_gw.shape[1], _gw.shape[0], bias=False)
+                new_gate.weight = _gw
+                _mlp.gate = new_gate
 
     if not hasattr(model, "config"):
         model.config = model_config

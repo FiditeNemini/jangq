@@ -1,26 +1,66 @@
+# Models & weights
 models/
+*.whl
+*.tar.gz
+*.safetensors
+
+# Python
 .venv/
 __pycache__/
 *.egg-info/
 .pytest_cache/
-.DS_Store
-jang-runtime/.build/
-jang-runtime/.swiftpm/
-.DS_Store
-*.txt
+build/
+dist/
+.pypirc
+
+# Research & experiments (PRIVATE — never publish)
+research/
+
+# Internal docs
+JANG-ISSUES.md
+JANG-PLAN.md
+gemma4_*.md
+
+# Scripts (private experiments)
+scripts/
 crack_*.py
 probe_*.py
 benchmark_*.py
-run_*.py
-ram_monitor.sh
-scripts/
+run_*
+eval_*
+sweep*
+debug_*
+test_*
+repack_*
+ram_monitor*
+
+# Logs & results
 mmlu_results*
-JANG-ISSUES.md
-JANG-PLAN.md
-research/
-eval_*.py
-.pypirc
+*.log
+
+# Build artifacts
+jang-runtime/.build/
+jang-runtime/.swiftpm/
+jang-tools/build/
+
+# Environment & config
 .env
-*.whl
-*.tar.gz
+.DS_Store
+.claude/
 .playwright-mcp/
+
+# Server (private)
+jang-server/
+
+# Experimental quantization modules (private R&D)
+jang-tools/jang_tools/calibrate_fp8.py
+jang-tools/jang_tools/convert_mxrq.py
+jang-tools/jang_tools/convert_mxtq.py
+jang-tools/jang_tools/convert_mxtq_to_jang.py
+jang-tools/jang_tools/gptq_mlx.py
+jang-tools/jang_tools/load_mxrq.py
+jang-tools/jang_tools/load_mxtq.py
+jang-tools/jang_tools/turboquant/
+
+# Vectors (experimental)
+vectors/
