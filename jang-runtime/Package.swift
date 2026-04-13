@@ -12,7 +12,9 @@ let package = Package(
     products: [
         .executable(name: "jang", targets: ["JANGCLI"]),
         .executable(name: "jang-spec-iobench", targets: ["JangSpecIOBench"]),
+        .executable(name: "jang-core", targets: ["JangCoreCLI"]),
         .library(name: "JANG", targets: ["JANG"]),
+        .library(name: "JANGCore", targets: ["JANGCore"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -20,6 +22,7 @@ let package = Package(
     targets: [
         .target(name: "JANGMetal", dependencies: [], path: "Sources/JANGMetal"),
         .target(name: "JANG", dependencies: ["JANGMetal"], path: "Sources/JANG"),
+        .target(name: "JANGCore", dependencies: [], path: "Sources/JANGCore"),
         .executableTarget(
             name: "JANGCLI",
             dependencies: ["JANG", .product(name: "ArgumentParser", package: "swift-argument-parser")],
@@ -30,6 +33,12 @@ let package = Package(
             dependencies: [],
             path: "Sources/jang-spec-iobench"
         ),
+        .executableTarget(
+            name: "JangCoreCLI",
+            dependencies: ["JANGCore", .product(name: "ArgumentParser", package: "swift-argument-parser")],
+            path: "Sources/jang-core"
+        ),
         .testTarget(name: "JANGTests", dependencies: ["JANG"], path: "Tests/JANGTests"),
+        .testTarget(name: "JANGCoreTests", dependencies: ["JANGCore"], path: "Tests/JANGCoreTests"),
     ]
 )
