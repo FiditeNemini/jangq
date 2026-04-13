@@ -195,7 +195,7 @@ assert BLOB_HEADER_SIZE == 32, f"blob header must be 32 bytes, got {BLOB_HEADER_
 # }
 TENSOR_HEADER_FORMAT = "<BBHIIIIQQ"
 TENSOR_HEADER_SIZE = struct.calcsize(TENSOR_HEADER_FORMAT)
-assert TENSOR_HEADER_SIZE == 40, f"tensor header must be 40 bytes, got {TENSOR_HEADER_SIZE}"
+assert TENSOR_HEADER_SIZE == 36, f"tensor header must be 36 bytes, got {TENSOR_HEADER_SIZE}"
 
 # Tensor-kind enum (matches TensorHeader.kind).
 KIND_GATE = 0
