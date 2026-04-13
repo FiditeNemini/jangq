@@ -11,6 +11,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "jang", targets: ["JANGCLI"]),
+        .executable(name: "jang-spec-iobench", targets: ["JangSpecIOBench"]),
         .library(name: "JANG", targets: ["JANG"]),
     ],
     dependencies: [
@@ -23,6 +24,11 @@ let package = Package(
             name: "JANGCLI",
             dependencies: ["JANG", .product(name: "ArgumentParser", package: "swift-argument-parser")],
             path: "Sources/JANGCLI"
+        ),
+        .executableTarget(
+            name: "JangSpecIOBench",
+            dependencies: [],
+            path: "Sources/jang-spec-iobench"
         ),
         .testTarget(name: "JANGTests", dependencies: ["JANG"], path: "Tests/JANGTests"),
     ]
