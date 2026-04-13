@@ -1,4 +1,4 @@
-# jang-spec — Router-Aware Speculative Decoding with SSD-Streamed MoE Targets
+# jang-spec — SSD-Streamed MoE Speculative Decoding
 
 - **Status:** design, not yet implemented
 - **Date:** 2026-04-13
@@ -11,11 +11,13 @@
 
 Run JANG MoE models that do not fit in unified memory (GLM-5.1, MiniMax M2.7, Cascade-2, Qwen 122B/397B-class) on a single Mac Studio by:
 
-1. Keeping a small **router-aware draft model** resident in RAM.
+1. Keeping a small **draft model** resident in RAM.
 2. Storing the **target** MoE model on SSD in a purpose-built streaming container, streaming experts on demand into unified memory via `MTLIOCommandQueue`.
 3. Using speculative decoding so each SSD-streamed target verification pass advances output by many tokens, amortizing I/O.
 
-The draft predicts both tokens *and* the target's expert-routing decisions, so expert reads can be prefetched the moment drafting finishes — before verification starts. This makes streaming an MoE target practical instead of I/O-bound.
+Expert prefetching is driven by a **precomputed router prior** (coactivation and transition statistics captured during bundle build). The prior pins high-coactivation experts in the LRU cache and prefetches high-probability experts for the next layer based on the current layer's selection. This is a purely static, inference-free prefetch strategy.
+
+A future v2 will add *router-aware drafting* — training the draft to predict target expert routing — to improve prefetch hit rate. That is explicitly deferred; v1 does not depend on it working.
 
 ## 2. Non-goals (v1)
 
@@ -25,21 +27,21 @@ The draft predicts both tokens *and* the target's expert-routing decisions, so e
 - Prefix caching across requests.
 - Dense (non-MoE) JANG models. They fit in RAM; streaming buys nothing.
 - Training the draft model from scratch inside this spec. A sibling spec covers the training recipe; v1 consumes a pre-trained draft.
+- **Router-aware drafting.** Deferred to v2. See §13.
 
 ## 3. Why this is not a DFlash clone
 
 | Dimension | DFlash | jang-spec |
 |---|---|---|
 | Drafting mechanism | Block diffusion with iterative refinement | Masked-prediction heads (Medusa-style), block-parallel in one pass |
-| Draft output | Tokens only | **Tokens + per-layer target expert-ID predictions** |
 | Target location | VRAM, fully resident | SSD, streamed per-expert |
 | Platform | CUDA (vLLM, SGLang) | Swift + Metal unified memory |
 | Container | Vanilla HuggingFace safetensors | Purpose-built `.jangspec` bundle with per-expert blobs and flat index |
-| Calibration | N/A | Coactivation + transition priors to warm expert cache |
+| Calibration | N/A | Coactivation + transition priors to warm expert cache and drive prefetch |
 
 DFlash is cited as prior art for "parallel block drafting as a paradigm." No DFlash code, checkpoints, training recipe, or benchmarks are reused.
 
-The defensible contribution is **router-aware drafting**: existing speculative decoders (DFlash, EAGLE, Medusa) predict tokens; none predict the target's routing. Routing prediction is only valuable when the target is streamed. The ML idea and the systems idea exist to serve each other.
+The defensible contribution of v1 is the **streaming runtime itself**: `.jangspec` container format, unified-memory expert cache with prior-driven prefetch, `MTLIOCommandQueue`-based direct SSD reads, and Swift/Metal-native speculative decoding on Apple Silicon. No existing framework runs MoE targets from SSD this way.
 
 ## 4. Architecture overview
 
@@ -73,10 +75,11 @@ The defensible contribution is **router-aware drafting**: existing speculative d
 
 One step of the decoding loop:
 
-1. Draft forward on current context, outputs `B` token proposals and a set `S` of target expert IDs it predicts will be needed.
-2. Prefetch stage: submit async reads for experts in `S` not already resident via `MTLIOCommandQueue`. Return immediately; reads continue in background.
-3. Target verification: parallel forward pass over the `B` proposed tokens. Per layer, compute router, see which experts the target actually chose; if any are missing from the cache, synchronous fallback load. Expert matmul uses a gather-quantized kernel.
-4. Accept the longest prefix where target and draft agree, roll back KV for rejected suffix, emit accepted tokens, loop.
+1. Draft forward on current context, outputs `B` token proposals via Medusa-style masked-prediction heads in a single forward pass.
+2. Target verification: parallel forward pass over the `B` proposed tokens. Per MoE layer, compute the router on the hot core, see which experts the target actually chose. The prior-driven prefetcher, seeded at startup and updated layer-to-layer by the transition matrix, aims to have those experts already resident. Any miss triggers a synchronous load. Expert matmul uses a gather-quantized kernel.
+3. Accept the longest prefix where target and draft agree, roll back KV for rejected suffix, emit accepted tokens, loop.
+
+Prefetch is *pipelined across layers within the verification pass*: while layer L's experts are computing, the transition matrix predicts layer L+1's likely experts and issues async reads for those not resident. This overlaps I/O with compute even without a router-aware draft.
 
 ## 5. The `.jangspec` bundle format
 
@@ -96,7 +99,7 @@ One step of the decoding loop:
     jang_config.json
     config.json
     model.safetensors            JANG-quantized draft, 1–4 B params
-    draft_heads.safetensors      router-head weights (separate for versioning)
+    medusa_heads.safetensors     B masked-prediction heads
   router_prior/
     coact.safetensors            expert coactivation stats (calibration)
     transition.safetensors       layer L -> L+1 expert transition probs
@@ -164,51 +167,41 @@ During bundle build, a small calibration set (e.g. 1k WikiText + 1k code prompts
 
 These warm the expert LRU cache at startup and provide a cheap fallback if the draft's router head is uncertain.
 
-## 6. Router-aware draft model
+## 6. Draft model
 
 ### 6.1 Architecture
 
 - Backbone: small dense or small-MoE transformer, 1–4 B params, JANG-quantized.
 - Shares tokenizer with target (hash-enforced at bundle build time).
-- Heads (both run from the same final hidden state):
+- Heads (all run from the same final hidden state):
 
 ```
 h = backbone(x)                           # [T, hidden]
 token_logits = token_head(h)              # [T, vocab]
 
-# B parallel-prediction heads for Medusa-style block drafting
+# B Medusa-style masked-prediction heads for block drafting
 for k in 0..<B:
     pos_logits[k] = masked_head_k(h)      # [T, vocab]
-
-# Router-aware head
-router_pred = router_head(h)              # [T, L_target * topk] logits over
-                                          # target expert ids; reshape to
-                                          # [T, L_target, topk]
 ```
-
-`L_target` = number of MoE layers in the target, `topk` = target top-k (typically 6–8). Memory cost of the router head is `hidden × L_target × E_target × topk` which is at most a few hundred MB even for MiniMax-scale targets.
 
 ### 6.2 Block drafting
 
-Borrowing the *idea* of parallel block proposals from DFlash without copying its diffusion approach: we train `B` Medusa-style masked-prediction heads. Each head predicts `x_{t+k}` from `h_t` with its own weights. At generation time, one draft forward produces a block of B proposed tokens. This is a published, well-understood technique and is implemented in our own code.
+We borrow the *idea* of parallel block proposals from DFlash without copying its diffusion approach: we train `B` Medusa-style masked-prediction heads. Each head predicts `x_{t+k}` from `h_t` with its own weights. At generation time, one draft forward produces a block of B proposed tokens. This is a published, well-understood technique and is implemented in our own code.
 
 B is configurable; defaults:
 - B=8 for latency-sensitive runs
 - B=16 for throughput runs (matches DFlash's observed sweet spot)
 
-### 6.3 Training recipe (sketched here, owned by a sibling spec)
+### 6.3 Training recipe (owned by a sibling spec)
 
-Distillation from the target JANG:
+Plain distillation from the target JANG:
 
 ```
 loss = α · CE(token_head(h), x_true)
      + β · Σ_k CE(masked_head_k(h), x_true[+k])
-     + γ · Σ_L CE(router_pred[:,L,:], target_router_topk[:,L,:])
 ```
 
-Target router top-k labels come from running the target JANG on the same batches and recording `topk(router_logits, k)` per MoE layer. No DFlash code, no DFlash data.
-
-Training is out of scope for this spec; jang-spec runtime assumes a pre-trained draft exists.
+Training is out of scope for this spec; jang-spec runtime assumes a pre-trained draft exists. For the first target (GLM-5.1 JANG_1L) a minimal draft can be any small JANG model with a matching tokenizer, with Medusa heads trained in a few GPU-days.
 
 ## 7. Streaming target runtime
 
@@ -218,19 +211,29 @@ A fixed-size cache in unified memory holding decoded expert `MTLBuffer`s keyed b
 
 Eviction: LRU with a pinned set seeded from the router prior's top-coactivating experts at startup, so the most common experts never evict.
 
-### 7.2 Prefetch stage
+### 7.2 Prefetch strategy
 
-The moment the draft forward returns:
+Prior-driven, pipelined within the verification pass:
 
 ```
-pred_experts: Set<(Int, Int)> = union over b, L of router_pred[b,L,topk]
-missing = pred_experts.subtracting(cache.resident)
-for (layer, expert) in missing {
-    cache.enqueueLoad(layer, expert)   // async MTLIOCommandBuffer
+// At startup: pin the top-N coactivating experts per layer, seeded from
+//             coact.safetensors, until the cache budget is exhausted.
+
+// During verification, one layer ahead of compute:
+func onLayerStart(L) {
+    if L+1 < nLayers {
+        // transition[L][actual_topk(L)] -> distribution over layer L+1 experts
+        let predicted = transition[L].predict(actual_topk_at_L, topk: targetTopK * 2)
+        for (expert) in predicted where !cache.contains((L+1, expert)) {
+            cache.enqueueLoad(L+1, expert)   // async MTLIOCommandBuffer
+        }
+    }
 }
 ```
 
-`MTLIOCommandQueue` (Metal 3) reads directly from file handles into Metal buffers backed by unified memory, no CPU staging copy. We do not wait; verification starts immediately.
+`MTLIOCommandQueue` (Metal 3) reads directly from file handles into Metal buffers backed by unified memory, no CPU staging copy. We do not wait; compute on layer L continues while layer L+1's experts stream in.
+
+The prior is cheap and static — `transition[L]` is just a matrix lookup, and it's accurate enough to hit the most common next experts because token-level routing has strong layer-to-layer correlation in trained MoE models.
 
 ### 7.3 Verification forward pass
 
@@ -263,14 +266,14 @@ logits = lm_head(x)
 
 ### 7.4 Metrics emitted per step
 
-- `router_hit_rate`: fraction of required experts already resident
-- `router_prefetch_hit_rate`: fraction hit because the draft predicted them
-- `router_prior_hit_rate`: fraction hit because they were pinned by the prior
+- `expert_hit_rate`: fraction of required experts already resident
+- `prefetch_hit_rate`: fraction hit because the transition prior prefetched them
+- `pinned_hit_rate`: fraction hit because the coactivation prior pinned them
 - `accept_rate`: fraction of B proposed tokens accepted by target
 - `io_ms`, `compute_ms`, `io_compute_overlap_ms`
 - `evictions`, `cache_bytes_resident`, `cache_pressure`
 
-These drive both user-facing tuning and, offline, retraining of the router head.
+These drive user-facing tuning and motivate the v2 router-aware draft (§13) if prior-only hit rate turns out to be insufficient.
 
 ## 8. Swift engine layout
 
@@ -363,15 +366,37 @@ Dense JANG models (4B, 9B, 27B) are not candidates.
 
 ## 11. Open questions
 
-- **Draft size sweet spot.** 1 B probably too weak for routing prediction on 128-expert targets; 4 B may be too slow for drafting. Start at 2 B, tune empirically per target.
-- **`MTLIOCommandQueue` throughput in practice.** Apple quotes ~5 GB/s from NVMe on M2/M3 Ultra. Need to measure on your Mac Studio's SSD with representative expert sizes.
-- **Router head size.** `L_target × E_target × topk` fan-out on MiniMax is ~32 × 128 × 8 = 32k logits per token, doable but not tiny. Consider low-rank factorization if memory becomes a problem.
-- **Acceptance-rate floor.** If the draft accepts <50% of tokens, SSD streaming can't keep up. We need a calibration benchmark before committing to a draft architecture.
+- **`MTLIOCommandQueue` throughput in practice.** Apple quotes ~5 GB/s from NVMe on M-series Ultra. Must be measured on real Mac Studio with expert-sized reads (10–100 MB) before committing to the streaming premise. De-risked by Spike A in §14.
+- **Prior-only prefetch hit rate.** Token-level routing has known layer-to-layer correlation, but how much of the needed experts the transition matrix actually catches is unmeasured on our target models. Low hit rate is survivable (synchronous loads degrade speed, not correctness) but directly sets achievable tok/s.
+- **Draft size sweet spot.** 1 B may be too weak to drive good token acceptance; 4 B may be too slow per draft step. Start at 2 B, tune per target.
+- **Acceptance-rate floor.** If the draft accepts <4 of 16 proposed tokens, SSD streaming can't amortize the per-verification I/O cost. Need a benchmark before committing to a draft size.
 
 ## 12. Success criteria for v1
 
-- GLM-5.1 JANG_1L running on 192 GB Mac Studio at >= 10 tok/s sustained with coherent output.
-- End-to-end expert cache hit rate (prefetch + prior) >= 90% on typical prompts.
+- GLM-5.1 JANG_1L running on 192 GB Mac Studio at >= 8 tok/s sustained with coherent output.
+- End-to-end expert cache hit rate (prior pins + transition prefetch) >= 80% on typical prompts.
 - Accepted-tokens-per-verification >= 6 (i.e., >= 6/B acceptance rate).
 - `jang-specd` drop-in replaces `vllm_mlx` in the vmlx Electron app for at least one target model, no panel code changes.
 - Zero code, checkpoints, or training artifacts borrowed from DFlash; prior-art citation only.
+
+## 13. Future work (v2)
+
+**Router-aware drafting.** Add a router-prediction head to the draft model that emits `[L_target × E_target × topk]` expert-ID predictions per token, trained with a distillation loss against target router top-k labels. When mature, the draft's predictions union with the transition-prior prefetch and cover token-specific routing the prior cannot.
+
+Gated by two things: (a) evidence from v1 that prior-only prefetch is hit-rate-limited, and (b) a feasibility study showing a small backbone can actually learn target routing better than the prior baseline.
+
+**Other v2 candidates:** tree-based speculative decoding, multi-stream batching, cross-request expert cache, compressed expert blobs that skip the dequant step by running matmul directly on the packed format.
+
+## 14. De-risk spikes (pre-implementation)
+
+Before writing the implementation plan in full, run one spike to validate the streaming premise:
+
+**Spike A — `MTLIOCommandQueue` benchmark.** 1 day. Swift binary `jang-spec-iobench` that:
+- Creates a tmp directory with 512 files of 50 MB each (roughly one expert's worth for a MiniMax-class target).
+- Measures random-access read throughput via `MTLIOCommandQueue` into unified-memory `MTLBuffer`s.
+- Compares against plain `pread`.
+- Reports: GB/s sustained, p50/p99 per-read latency, CPU copy cost.
+
+Go/no-go: if sustained random-access throughput on Mac Studio SSD is < 2 GB/s or per-read latency > 5 ms, the spec needs revision (larger block sizes, fewer experts-per-verification, or giving up on streaming). If >= 3 GB/s with < 2 ms latency, proceed to full implementation.
+
+The router-prediction feasibility spike is deferred along with the router-aware feature itself.
