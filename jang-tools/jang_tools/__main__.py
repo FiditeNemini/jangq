@@ -247,6 +247,11 @@ def main():
     p_upgrade.add_argument("model", help="Path to JANG v1 model directory")
     p_upgrade.set_defaults(func=cmd_upgrade)
 
+    # --- spec subcommand (jang-spec bundle tooling) ---
+    from .jangspec.cli import register_subparsers as _register_spec
+    p_spec = subparsers.add_parser("spec", help="jang-spec bundle tooling")
+    _register_spec(p_spec)
+
     args = parser.parse_args()
 
     if args.command is None:
