@@ -218,7 +218,7 @@ DTYPE_BIASES = 2    # float16
 # }
 INDEX_ENTRY_FORMAT = "<IIHHQQ"
 INDEX_ENTRY_SIZE = struct.calcsize(INDEX_ENTRY_FORMAT)
-assert INDEX_ENTRY_SIZE == 32, f"index entry must be 32 bytes, got {INDEX_ENTRY_SIZE}"
+assert INDEX_ENTRY_SIZE == 28, f"index entry must be 28 bytes, got {INDEX_ENTRY_SIZE}"
 
 # ---- Index file header ----
 # struct IndexHeader {
@@ -247,7 +247,7 @@ cd /Users/eric/jang/jang-tools && python -c "from jang_tools.jangspec import for
 ```
 Expected output:
 ```
-32 40 32 24
+32 36 28 24
 4096 4096 8192
 ```
 
