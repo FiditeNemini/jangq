@@ -24,7 +24,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from safetensors import safe_open
@@ -82,9 +82,32 @@ class _ExpertShard:
 
 
 class JangSpecBuilder:
-    def __init__(self, source_dir: Path, out_dir: Path):
+    def __init__(
+        self,
+        source_dir: Path,
+        out_dir: Path,
+        write_streaming: bool = False,
+    ):
+        """
+        Build a .jangspec bundle from a source JANG MoE directory.
+
+        Parameters
+        ----------
+        source_dir : Path
+            The source `JANG_xxx/` directory with safetensors shards.
+        out_dir : Path
+            Where to write the bundle.
+        write_streaming : bool, default False
+            If True, additionally emit the per-expert blob format
+            (`target/experts.jsidx` + `experts-*.bin`) alongside the
+            fat `experts.safetensors`. The per-blob format is intended
+            for future SSD-streaming runtimes; it doubles the bundle
+            size on disk (~126 GB for MiniMax-M2.7-JANG_2L). The default
+            Swift loader never reads it.
+        """
         self.source_dir = Path(source_dir)
         self.out_dir = Path(out_dir)
+        self.write_streaming = write_streaming
 
     # ------------------------------------------------------------------ public
 
@@ -193,20 +216,22 @@ class JangSpecBuilder:
             f"expert layer indices are not contiguous: {sorted_layers}"
         )
 
-        # Open the first shard file.
+        # Per-blob streaming output — only written when write_streaming=True.
         shards: List[_ExpertShard] = []
-        current = _ExpertShard(file_id=0, path=self.out_dir / fmt.EXPERT_FILE_PATTERN.format(idx=0))
-        current.open()
-        shards.append(current)
+        current: Optional[_ExpertShard] = None
+        if self.write_streaming:
+            current = _ExpertShard(
+                file_id=0, path=self.out_dir / fmt.EXPERT_FILE_PATTERN.format(idx=0))
+            current.open()
+            shards.append(current)
 
         entries: List[ExpertIndexEntry] = []
 
         # Fat-layout output: all expert tensors in their original 3D stacked
         # form under their full original names. This lets the Swift runtime
         # `loadArraysAndMetadata`-mmap them directly with zero restack, the
-        # same way the source JANG directory path works. Bundle loader
-        # checks for this file first; falls back to per-blob restack only
-        # if it is absent.
+        # same way the source JANG directory path works. This is the default
+        # load path for the Swift bundle loader.
         fat_tensors: Dict[str, np.ndarray] = {}
 
         for lid in sorted_layers:
@@ -236,68 +261,72 @@ class JangSpecBuilder:
                 fat_tensors[f"{full_base}.biases"] = np.ascontiguousarray(
                     arrays[kind]["biases"])
 
-            # Per-blob streaming format (optional — used by the SSD
-            # streaming runtime, not by the default in-RAM loader).
-            for expert_id in range(self.n_experts_per_layer):
-                expert = ExpertTensors(
-                    bits=bits,
-                    gate=(
-                        np.ascontiguousarray(arrays["gate_proj"]["qweight"][expert_id]),
-                        np.ascontiguousarray(arrays["gate_proj"]["scales"][expert_id]),
-                        np.ascontiguousarray(arrays["gate_proj"]["biases"][expert_id]),
-                    ),
-                    up=(
-                        np.ascontiguousarray(arrays["up_proj"]["qweight"][expert_id]),
-                        np.ascontiguousarray(arrays["up_proj"]["scales"][expert_id]),
-                        np.ascontiguousarray(arrays["up_proj"]["biases"][expert_id]),
-                    ),
-                    down=(
-                        np.ascontiguousarray(arrays["down_proj"]["qweight"][expert_id]),
-                        np.ascontiguousarray(arrays["down_proj"]["scales"][expert_id]),
-                        np.ascontiguousarray(arrays["down_proj"]["biases"][expert_id]),
-                    ),
-                )
-                blob = pack_expert_blob(layer_idx=lid, expert_id=expert_id, tensors=expert)
-
-                # Roll shard if adding this blob would exceed the per-file ceiling.
-                if current.size + len(blob) > fmt.EXPERT_FILE_BYTES_MAX and current.size > 0:
-                    current.close()
-                    current = _ExpertShard(
-                        file_id=current.file_id + 1,
-                        path=self.out_dir / fmt.EXPERT_FILE_PATTERN.format(idx=current.file_id + 1),
+            # Per-blob streaming format — optional, only when requested.
+            if self.write_streaming:
+                assert current is not None
+                for expert_id in range(self.n_experts_per_layer):
+                    expert = ExpertTensors(
+                        bits=bits,
+                        gate=(
+                            np.ascontiguousarray(arrays["gate_proj"]["qweight"][expert_id]),
+                            np.ascontiguousarray(arrays["gate_proj"]["scales"][expert_id]),
+                            np.ascontiguousarray(arrays["gate_proj"]["biases"][expert_id]),
+                        ),
+                        up=(
+                            np.ascontiguousarray(arrays["up_proj"]["qweight"][expert_id]),
+                            np.ascontiguousarray(arrays["up_proj"]["scales"][expert_id]),
+                            np.ascontiguousarray(arrays["up_proj"]["biases"][expert_id]),
+                        ),
+                        down=(
+                            np.ascontiguousarray(arrays["down_proj"]["qweight"][expert_id]),
+                            np.ascontiguousarray(arrays["down_proj"]["scales"][expert_id]),
+                            np.ascontiguousarray(arrays["down_proj"]["biases"][expert_id]),
+                        ),
                     )
-                    current.open()
-                    shards.append(current)
+                    blob = pack_expert_blob(layer_idx=lid, expert_id=expert_id, tensors=expert)
 
-                offset, nbytes = current.write(blob)
-                entries.append(
-                    ExpertIndexEntry(
-                        layer_idx=lid,
-                        expert_id=expert_id,
-                        file_id=current.file_id,
-                        offset=offset,
-                        nbytes=nbytes,
+                    if current.size + len(blob) > fmt.EXPERT_FILE_BYTES_MAX and current.size > 0:
+                        current.close()
+                        current = _ExpertShard(
+                            file_id=current.file_id + 1,
+                            path=self.out_dir / fmt.EXPERT_FILE_PATTERN.format(idx=current.file_id + 1),
+                        )
+                        current.open()
+                        shards.append(current)
+
+                    offset, nbytes = current.write(blob)
+                    entries.append(
+                        ExpertIndexEntry(
+                            layer_idx=lid,
+                            expert_id=expert_id,
+                            file_id=current.file_id,
+                            offset=offset,
+                            nbytes=nbytes,
+                        )
                     )
-                )
 
             # Release numpy views early to keep RAM use bounded.
             del arrays
 
-        current.close()
-
-        write_index(
-            self.out_dir / fmt.INDEX_FILENAME,
-            entries=entries,
-            n_layers=self.n_layers,
-            n_experts_per_layer=self.n_experts_per_layer,
-        )
+        if self.write_streaming:
+            assert current is not None
+            current.close()
+            write_index(
+                self.out_dir / fmt.INDEX_FILENAME,
+                entries=entries,
+                n_layers=self.n_layers,
+                n_experts_per_layer=self.n_experts_per_layer,
+            )
+            self.expert_bytes = sum(e.nbytes for e in entries)
+        else:
+            # Fat-only: expert_bytes is the aggregate size of the 3D stacks
+            # we wrote into experts.safetensors.
+            self.expert_bytes = sum(a.nbytes for a in fat_tensors.values())
 
         # Save the fat layout. The Swift loader prefers this path because
         # it maps directly into unified memory with no restack cost.
         fat_path = self.out_dir / "experts.safetensors"
         save_file(fat_tensors, str(fat_path))
-
-        self.expert_bytes = sum(e.nbytes for e in entries)
 
     # ------------------------------------------------------------- tokenizer
 

@@ -14,7 +14,7 @@ def test_bundle_loader_returns_hot_core_tensors(jangspec_fixture_model: Path, tm
     from jang_tools.jangspec.builder import JangSpecBuilder
 
     out = tmp_path / "fx.jangspec"
-    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out).build()
+    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out, write_streaming=True).build()
 
     weights = load_weights_from_bundle(out)
     # Hot core has embeddings, attention, norms, lm_head — pick one we know
@@ -35,7 +35,7 @@ def test_bundle_loader_reconstructs_expert_3d_stacks(
     from jang_tools.jangspec import format as fmt
 
     out = tmp_path / "fx.jangspec"
-    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out).build()
+    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out, write_streaming=True).build()
 
     weights = load_weights_from_bundle(out)
     manifest = load_manifest(out / fmt.MANIFEST_FILENAME)
@@ -69,7 +69,7 @@ def test_bundle_loader_byte_parity_against_source(
     from jang_tools.jangspec.builder import JangSpecBuilder
 
     out = tmp_path / "fx.jangspec"
-    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out).build()
+    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out, write_streaming=True).build()
     weights = load_weights_from_bundle(out)
 
     # Pick layer 0 and compare the gate_proj 3D tensor end-to-end.

@@ -11,7 +11,8 @@ from jang_tools.jangspec.reader import JangSpecReader
 
 def test_reader_matches_source_bytes(jangspec_fixture_model: Path, tmp_path: Path):
     out = tmp_path / "fixture.jangspec"
-    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out).build()
+    # JangSpecReader reads the per-blob streaming layout — opt in via write_streaming.
+    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out, write_streaming=True).build()
 
     reader = JangSpecReader(out)
     assert reader.n_layers > 0
@@ -47,7 +48,8 @@ def test_reader_matches_source_bytes(jangspec_fixture_model: Path, tmp_path: Pat
 
 def test_reader_random_access(jangspec_fixture_model: Path, tmp_path: Path):
     out = tmp_path / "fixture.jangspec"
-    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out).build()
+    # JangSpecReader reads the per-blob streaming layout — opt in via write_streaming.
+    JangSpecBuilder(source_dir=jangspec_fixture_model, out_dir=out, write_streaming=True).build()
 
     reader = JangSpecReader(out)
     last_layer = reader.n_layers - 1

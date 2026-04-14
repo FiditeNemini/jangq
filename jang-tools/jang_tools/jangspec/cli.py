@@ -15,7 +15,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     if out.exists() and not args.force:
         print(f"error: output directory {out} already exists (use --force to overwrite)")
         return 1
-    builder = JangSpecBuilder(source_dir=source, out_dir=out)
+    builder = JangSpecBuilder(
+        source_dir=source, out_dir=out, write_streaming=args.streaming)
     builder.build()
     print(f"  built bundle: {out}")
     print(f"    layers:       {builder.n_layers}")
@@ -48,6 +49,11 @@ def register_subparsers(spec_parser: argparse.ArgumentParser) -> None:
     build.add_argument("source", help="Path to source JANG model directory")
     build.add_argument("--out", required=True, help="Path to output .jangspec directory")
     build.add_argument("--force", action="store_true", help="Overwrite existing output directory")
+    build.add_argument(
+        "--streaming", action="store_true",
+        help="Also emit the per-expert blob format (experts.jsidx + experts-*.bin). "
+             "Used by future SSD streaming runtimes; doubles bundle size on disk. "
+             "The default Swift loader never reads it.")
     build.set_defaults(func=cmd_build)
 
     inspect = sub.add_parser("inspect", help="Inspect a .jangspec bundle")
