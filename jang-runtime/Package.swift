@@ -15,6 +15,7 @@ let package = Package(
         .executable(name: "jang-core", targets: ["JangCoreCLI"]),
         .library(name: "JANG", targets: ["JANG"]),
         .library(name: "JANGCore", targets: ["JANGCore"]),
+        .library(name: "JANGCoreMetal", targets: ["JANGCoreMetal"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -23,6 +24,14 @@ let package = Package(
         .target(name: "JANGMetal", dependencies: [], path: "Sources/JANGMetal"),
         .target(name: "JANG", dependencies: ["JANGMetal"], path: "Sources/JANG"),
         .target(name: "JANGCore", dependencies: [], path: "Sources/JANGCore"),
+        .target(
+            name: "JANGCoreMetal",
+            dependencies: ["JANGCore"],
+            path: "Sources/JANGCoreMetal",
+            resources: [
+                .copy("JangV2QuantMatmul.metal")
+            ]
+        ),
         .executableTarget(
             name: "JANGCLI",
             dependencies: ["JANG", .product(name: "ArgumentParser", package: "swift-argument-parser")],
@@ -40,5 +49,13 @@ let package = Package(
         ),
         .testTarget(name: "JANGTests", dependencies: ["JANG"], path: "Tests/JANGTests"),
         .testTarget(name: "JANGCoreTests", dependencies: ["JANGCore"], path: "Tests/JANGCoreTests"),
+        .testTarget(
+            name: "JANGCoreMetalTests",
+            dependencies: ["JANGCoreMetal"],
+            path: "Tests/JANGCoreMetalTests",
+            resources: [
+                .copy("fixtures")
+            ]
+        ),
     ]
 )
