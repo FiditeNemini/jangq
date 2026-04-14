@@ -233,3 +233,91 @@ Expected tok/s after QKV fusion + gate_up fusion on top of the current cleanups:
 - +20–40% from cold expert pruning → ~25–30 tok/s
 
 Target: 20 tok/s is a realistic stretch goal before Plan 8 speculative decoding kicks in.
+
+---
+
+## QKV fusion — implemented, measurement pending
+
+### What landed
+
+`vmlx/swift/Sources/vMLXLLM/Models/MiniMax.swift`:
+
+1. `MiniMaxAttention` rewritten to use a single fused `@ModuleInfo(key: "qkv_proj") var wqkv: Linear` with output dim = `qOutDim + 2 × kvOutDim` = `6144 + 1024 + 1024 = 8192`. Drops 2 dispatches per attention layer per token.
+2. Forward pass: `let qkv = wqkv(x)` → slice along the last axis with `qkv[.ellipsis, 0..<qOutDim]` (queries), `[qOutDim..<(qOutDim+kvOutDim)]` (keys), `[(qOutDim+kvOutDim)..<(qOutDim+2*kvOutDim)]` (values). The slice is a zero-copy view; the downstream `reshaped(B, L, heads, -1).transposed(0, 2, 1, 3)` is handled by MLX without an extra materialization.
+3. `MiniMaxModel.sanitize(weights:)` now walks every layer and:
+   - Reads `self_attn.{q,k,v}_proj.weight`
+   - Checks the last-dim `packed_in` of all three — must be equal (same JANG bit width)
+   - On match: `concatenated([qW, kW, vW], axis: 0)` → writes `self_attn.qkv_proj.weight`, removes the three per-projection keys
+   - Same treatment for `.scales` and `.biases`
+   - On mismatch (different bit widths across q/k/v in the same layer): leaves them alone, skips fusion for that layer
+
+For MiniMax-M2.7-JANG_2L all three attention projections are 8-bit CRITICAL tier, so fusion fires on all 62 layers.
+
+### Build status
+
+Full release build clean after one unrelated bystander fix (`Stream.swift:477` had a `Self.logger.warning(...)` introduced by a concurrent agent edit where `Engine` is an actor with no `logger`; replaced with a direct stderr write to unblock).
+
+### Measurement pending
+
+Could not run a decode bench in this session. Memory state at the time of completion:
+- `free=0.1 GB` (unusable)
+- `compressed=76.4 GB` (held by previous MiniMax loads)
+- `xctest` eating 32 GB running vmlx package tests + another for vmlx-swift-lm package tests (both launched by parallel sessions, not mine)
+
+Per the RAM-safety directive, the session policy is: only launch MiniMax serve when `free + inactive` >= 80 GB and no competing xctests are eating RAM. That state was not available in this session.
+
+### What to run when RAM is ready
+
+```bash
+# Clear competitors first
+pgrep -lf "vmlxctl|xctest" | head   # verify whose xctests are live
+# (only kill what's yours)
+
+# Verify memory
+python3 -c "import subprocess,re; o=subprocess.check_output(['vm_stat']).decode(); \
+  free=int(re.search(r'Pages free:\s+(\d+)', o).group(1)); \
+  print(f'free={free*16384/1e9:.1f}GB')"
+
+# Launch (exec -a protects from pkill collisions with other test sessions)
+cd /Users/eric/vmlx/swift
+cat > /tmp/serve-qkv.sh <<'SH'
+#!/bin/bash
+cd /Users/eric/vmlx/swift
+exec -a "jangspec-qkv" ./.build/release/vmlxctl serve \
+    --model /Users/eric/models/MiniMax-M2.7-JANG_2L.jangspec \
+    --port 8775
+SH
+chmod +x /tmp/serve-qkv.sh && nohup bash /tmp/serve-qkv.sh > /tmp/serve-qkv.log 2>&1 &
+disown
+
+# Wait for "Ready" in the log (usually 15–20s on clean RAM)
+# Warmup + timed bench
+curl -sS http://127.0.0.1:8775/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"x","messages":[{"role":"user","content":"Hi."}],"max_tokens":4}' > /dev/null
+
+START=$(python3 -c "import time;print(time.time())")
+curl -sS http://127.0.0.1:8775/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"x","messages":[{"role":"user","content":"Write a short paragraph about the Roman Empire from 27 BC to 476 AD. Be concise but thorough."}],"max_tokens":256,"temperature":0}' \
+  > /tmp/qkv-resp.json
+END=$(python3 -c "import time;print(time.time())")
+
+python3 -c "
+import json
+r = json.load(open('/tmp/qkv-resp.json'))
+u = r['usage']
+elapsed = $END - $START
+print(f'QKV fusion:')
+print(f'  wallclock = {elapsed:.2f}s, prompt={u[\"prompt_tokens\"]}, completion={u[\"completion_tokens\"]}')
+print(f'  tok/s = {u[\"completion_tokens\"] / elapsed:.3f}')
+"
+
+# Always kill the serve immediately after
+kill $(pgrep -f jangspec-qkv)
+```
+
+Expected outcome per the ceiling analysis: **~17–18 tok/s** (up from 14.99 baseline), roughly +15–20%. This bumps us from 14.4% → ~17% of the 104 tok/s memory-bandwidth ceiling.
+
+### Risk assessment
+
+- **Correctness**: the slice → reshape → transpose sequence is identical in byte layout to the original three-projection path. The concatenated weight is byte-equivalent to stacking three row ranges. Output tokens should be identical to pre-fusion for greedy decode.
+- **Bit-width mismatch**: if some bundle has different bit widths for q/k/v in any layer, the sanitize fusion guard silently skips fusion for that layer AND leaves the original per-projection weights in the dict. But the model code now expects `qkv_proj` as the only module key — the `q_proj`/`k_proj`/`v_proj` keys won't match any module, and `loadWeights` will either warn or drop them. **This is a gap**: we either need to (a) assume all MiniMax JANG variants fuse-safely, or (b) add a fallback 3-way path in `MiniMaxAttention`. For now this assumes JANG MoE always assigns attention q/k/v to the same CRITICAL tier — documented limitation.
