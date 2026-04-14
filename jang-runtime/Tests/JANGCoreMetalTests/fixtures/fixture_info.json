@@ -1,0 +1,27 @@
+{
+  "seed": 50159747054,
+  "bits": 4,
+  "group_size": 64,
+  "in_features": 64,
+  "out_features": 128,
+  "qweight_shape": [
+    128,
+    8
+  ],
+  "scales_shape": [
+    128,
+    1
+  ],
+  "biases_shape": [
+    128,
+    1
+  ],
+  "x_shape": [
+    64
+  ],
+  "y_ref_shape": [
+    128
+  ],
+  "mlx_pack_convention": "LSB-first 4-bit: position k in [0..7] at bit k*4 of each uint32",
+  "dequant_formula": "val = q_int * scale + bias, per-group"
+}
