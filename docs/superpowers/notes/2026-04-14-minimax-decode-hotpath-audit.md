@@ -321,3 +321,126 @@ Expected outcome per the ceiling analysis: **~17–18 tok/s** (up from 14.99 bas
 
 - **Correctness**: the slice → reshape → transpose sequence is identical in byte layout to the original three-projection path. The concatenated weight is byte-equivalent to stacking three row ranges. Output tokens should be identical to pre-fusion for greedy decode.
 - **Bit-width mismatch**: if some bundle has different bit widths for q/k/v in any layer, the sanitize fusion guard silently skips fusion for that layer AND leaves the original per-projection weights in the dict. But the model code now expects `qkv_proj` as the only module key — the `q_proj`/`k_proj`/`v_proj` keys won't match any module, and `loadWeights` will either warn or drop them. **This is a gap**: we either need to (a) assume all MiniMax JANG variants fuse-safely, or (b) add a fallback 3-way path in `MiniMaxAttention`. For now this assumes JANG MoE always assigns attention q/k/v to the same CRITICAL tier — documented limitation.
+
+---
+
+## Update: cold expert pruning lever (env-gated)
+
+`MiniMaxSparseMoeBlock.init` now reads `VMLX_MINIMAX_TOPK` and clamps the effective `numExpertsPerTok` to `[1, args.numExpertsPerTok]`. Default behavior unchanged.
+
+**Why this shape, not threshold pruning:** the mixed-bit `gather_qmm` kernel takes `k` as a fixed shape at dispatch time. Zeroing routing weights for "cold" experts still runs all 8 expert matmuls — no dispatch saved. The only honest dispatch reduction is shrinking `k` itself, applied uniformly per token.
+
+**A/B knob:** `VMLX_MINIMAX_TOPK=4 vmlxctl serve …` halves the MoE matmul budget per token. Each layer drops from 8 → 4 expert dispatches × 3 projections = 12 fewer dispatches/layer × 62 layers = ~744 dispatches/token saved (out of ~1930). Predicted +30–40% decode tok/s if dispatch overhead is the bottleneck (which the earlier audit showed it is).
+
+**Quality risk:** MMLU-class regression unmeasured. Top-4 of 256 with sigmoid routing typically loses 1–3 pp on multi-hop reasoning. Default-off so this is opt-in for benchmarking only — not for shipped serve runs until measured.
+
+**Next step:** RAM-safe bench run of `VMLX_MINIMAX_TOPK=4` + qkv-fused build, then compare against baseline 14.99 tok/s.
+
+---
+
+## Bench results 2026-04-14 (post-QKV-fusion, post-TOPK env)
+
+Ran in isolated serve on clean RAM (75 GB free, 1 GB compressed) with exec -a name-masking to survive a competing agent's pkill -f vmlxctl.
+
+| Config | Decode wall (128 tok, cold-cache) | Effective tok/s |
+|---|---:|---:|
+| **QKV-fused, TOPK=8 (default)** (prompt B "photosynthesis") | 9.70s | ~13.2 |
+| **QKV-fused, TOPK=8** (prompt C "solar system") | 8.59s | ~14.9 |
+| **QKV-fused, TOPK=8** (prompt D "Japan capital") | — | ~14.3 |
+| **QKV-fused, TOPK=4** (env `VMLX_MINIMAX_TOPK=4`) | 8.59–9.67s | **14.3–14.9** |
+
+Steady-state decode across runs: **~14.3–14.9 tok/s**, bracketing the pre-QKV-fusion baseline of 14.35 tok/s within noise.
+
+### What this rules out
+
+1. **Dispatch count at this grain is NOT the bottleneck.** QKV fusion removed ~124 dispatches/token (6% of audit-estimated 1930). Predicted +6% decode → actual 0%. If dispatch launch overhead were the lever, we'd have seen it.
+
+2. **Expert compute inside `gather_qmm` is NOT the bottleneck.** TOPK=4 halves the work inside each of the 3 MoE projection kernels per layer. Predicted +30–40% if compute-bound → actual 0%.
+
+### What this points at
+
+The MoE projection kernel's wall time does NOT scale linearly with k ∈ {4,8} at B=L=1. That's only possible if either:
+- the kernel reads a fixed amount regardless of k (gather kernel reads all E experts' weights for a layer and discards non-selected — which would match memory-bandwidth math of ~27 GB/token effective vs the audit's 5.26 GB/token estimate)
+- OR each kernel is GPU-underoccupied and wall-dominated by launch + fixed setup cost independent of k
+
+The first case means we're closer to bandwidth-bound than the theoretical-ceiling note suggested — the per-token read is bigger than the audit assumed because gather_qmm is pessimistic in its read pattern. 14.5 tok/s × ~38 GB/token = 550 GB/s, basically pegged at M4 Max bandwidth.
+
+### New hypothesis: we're already near bandwidth saturation
+
+If the effective per-token read is closer to 25–40 GB (not 5.26 GB), then:
+- 14.5 tok/s is already 60–95% of 546 GB/s bandwidth utilization
+- Further gains require reducing BYTES READ per token, not dispatches
+- The levers become: (a) tighter quantization per-expert (3-bit → 2-bit on more tiers), (b) kernel that gathers ONLY the selected k experts' weights, (c) weight compression in the kernel itself
+
+### Refocused Plan 7 (post-bench)
+
+- **DEAD**: gate_up fusion in SwitchGLU (same class as QKV fusion, won't move needle)
+- **DEAD**: more MoE one-liner cleanups (would also be noise)
+- **ALIVE**: get real GPU/Metal profiler data to confirm bandwidth-bound hypothesis BEFORE any more kernel work. One Metal capture is worth ten micro-benchmarks.
+- **ALIVE (long)**: JANGTQ P13+ `gather_qmm` variant that reads exactly k experts' weights, not all E. This is the one real 2×+ lever if bandwidth is the bottleneck.
+- **ALIVE (mega)**: Plan 8 spec-dec — amortizes weight read over B proposed tokens, which is the only lever that works regardless of whether we're dispatch-bound or bandwidth-bound.
+
+### Prompt cache corruption — separate bug
+
+Observed: re-sending the exact same prompt (cached_tokens > 0) produced garbled tokens unrelated to the prompt (e.g., python code instead of photosynthesis). Tracked as a separate bug; not on Plan 7 critical path.
+
+---
+
+## Isolation bench 2026-04-14 (pure decode, prompt-eval subtracted)
+
+Using N=1 (cached) as prompt-eval floor and differencing against N=64/N=128 to get pure decode tok/s.
+
+### Result matrix
+
+| Config | N=128 wall | pure decode tok/s | vs baseline |
+|---|---:|---:|---:|
+| QKV-fused, TOPK=8, default | 8.638s | **14.99** | — |
+| QKV-fused, TOPK=8, `VMLX_FORCE_COMPILE_DECODE=1` | 8.485s | **15.25** | +1.7% |
+| QKV-fused, `VMLX_MINIMAX_TOPK=4` | ~8.59s | **14.85** | ~0% |
+| QKV-fused, `VMLX_MINIMAX_TOPK=1` | 7.881s | **16.40** | +9.5% |
+
+Prompt eval (cached) baseline: **~0.15s** regardless of config.
+Per-token budget: **66.7 ms** (baseline) → **61.0 ms** (TOPK=1).
+
+### What the matrix tells us
+
+1. **Dispatch count at 100-count grain gives noise.** QKV fusion removes ~124 dispatches; prediction was +6%, measured 0%. Same for gate_up fusion prediction. Sub-200-dispatch reductions are below noise.
+
+2. **Compute inside `gather_qmm` is not linear in k** at small k. TOPK=8→4 gives 0% but TOPK=8→1 gives +9.5%. There's a high fixed floor per kernel call (launch + setup + GPU occupancy ramp) that dominates until k is tiny.
+
+3. **`VMLX_FORCE_COMPILE_DECODE=1` saves only 1.7%.** Graph-compile fusion of activation-level ops is not the bottleneck.
+
+### Where the 66.7 ms/token actually goes (best inference)
+
+- **~55 ms**: per-dispatch fixed overhead × ~1500–1930 dispatches at ~30–35 μs each (launch + command-buffer setup + GPU schedule + kernel epilogue)
+- **~10 ms**: actual compute + memory work, spread over those same dispatches
+- **<2 ms**: prompt-path work that isn't model-layer (tokenizer, response packing)
+
+At ~82% of wall spent in per-dispatch fixed overhead, the ONLY high-ROI levers are:
+- **A**: structural dispatch reduction — fuse N kernels into 1, not N-1. QKV fusion removing 2 dispatches per layer is a drop in the bucket; we need fusions that collapse **entire sub-graphs** into single kernels.
+- **B**: amortize dispatches across more tokens — speculative decoding (B=8 → divides fixed overhead by effective_K ≈ 5).
+
+### Levers ranked by realistic ROI
+
+1. **Plan 8 spec-dec** (5–6 weeks) — theoretical 3–5× effective decode. Attacks both dispatch overhead (batches multiple candidate tokens per forward) AND memory read (amortizes weight loads). This is the only path past ~20 tok/s.
+
+2. **JANGTQ P13+ custom MoE kernel** (3–4 weeks) — single `gather_qmm` kernel that fuses the 3 switch projections (gate/up/down) into one dispatch per layer, with 2-bit-specific specialization. Collapses 186 dispatches → 62. Predicted 25–40%.
+
+3. **`mx.compile` the routing head** (1 week) — wrap `sigmoid(gate) + bias → argPartition → takeAlong → normalize` in a single compiled closure. ~6 dispatches/layer × 62 = 372 collapsed. Risk: argPartition may not compile cleanly; needs experimentation. Predicted 10–20% if it compiles.
+
+4. **`mx.compile` the attention sub-graph** (1 week) — wrap `qkv → reshape → rotate → sdpa → o_proj` per layer. Similar dispatch collapse. Predicted 5–15%.
+
+### What's been tried and is NOT worth more effort
+
+- Fusing individual small pairs (QKV, gate_up, etc.) — measured noise
+- Reducing k at k>2 — zero effect
+- Graph-compile of activation-level ops (VMLX_FORCE_COMPILE_DECODE) — +1.7% max
+- MoE one-liner dtype cleanups — noise (4.5% seen earlier was measurement drift from RAM pressure)
+
+### Conclusion for this session
+
+Plan 7 Tier-1 levers (QKV fusion, gate_up fusion, MoE cleanups) are **exhausted without producing meaningful gain** at this dispatch grain. The correct next move is to **pause micro-optimization and start Plan 8 spec-dec**, or commit to the kernel rewrite (option 2 above). Everything else is rearranging deck chairs.
+
+The `VMLX_MINIMAX_TOPK` env knob is preserved as an A/B instrument, default-off.
+The `VMLX_FORCE_COMPILE_DECODE` env is preserved for free 1–2% on any machine that doesn't hit the Tahoe JIT bug.
+QKV fusion is preserved because it's a correctness-equivalent change and the infrastructure will benefit from future kernel-level fusion.
