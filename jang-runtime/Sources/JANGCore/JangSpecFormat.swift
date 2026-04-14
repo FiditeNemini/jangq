@@ -30,14 +30,14 @@ public enum JangSpecFormat {
     public static let indexHeaderSize: Int = 24
 
     // Tensor-kind enum (matches Python KIND_* constants).
-    public enum TensorKind: UInt8 {
+    public enum TensorKind: UInt8, Sendable {
         case gate = 0
         case up = 1
         case down = 2
     }
 
     // Dtype enum (matches Python DTYPE_* constants).
-    public enum TensorDType: UInt32 {
+    public enum TensorDType: UInt32, Sendable {
         case qweight = 0  // uint32 packed
         case scales = 1   // float16
         case biases = 2   // float16
