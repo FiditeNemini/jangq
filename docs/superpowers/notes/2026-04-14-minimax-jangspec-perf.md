@@ -150,10 +150,28 @@ Full ANE-bench harness preserved at `/tmp/ane-bench.swift` + `/tmp/ane-one.swift
 
 ## Immediate next steps (Plan 7 execution)
 
-1. **Default bundle builder to fat-only** with `--streaming` opt-in flag for the per-blob layout. Saves 63 GB per MiniMax bundle. Task #35.
-2. **Investigate compile-decode fusion status** in the `vmlxctl serve` path for MiniMax specifically. If `mx.compile(shapeless: true)` is not wrapping the hot layer body for this model class, enabling it is ~free. Task #36.
-3. **Plan 7 design doc** covering decode speedup levers: compile fusion, P13+ kernels, cold expert pruning, Metal-draft spec-dec. Task #34.
-4. **Long-term parity check** — once decode is optimized, rebenchmark bundle vs source to confirm they stay at parity (the fat layout is not brittle against kernel updates).
+### ✅ Done this session
+
+1. **Default bundle builder to fat-only.** `--streaming` opt-in flag added for the per-blob layout. Saves 63 GB per MiniMax bundle. Jang repo `jang-spec-plan5-bundle-python-validation` branch commit `58f21c0`.
+2. **Compile-decode fusion investigation.** `HardwareInfo.isCompiledDecodeSupported` was hardcoded `false` across all hardware due to a macOS Tahoe Metal JIT bug (MLX #3329/#3201/#3256). Added a `VMLX_FORCE_COMPILE_DECODE=1` env override in `Sources/vMLXLMCommon/HardwareInfo.swift`. **M4 Max does NOT hit the Tahoe bug** — compile-decode runs to completion with no crash. Measured effect on MiniMax-M2.7-JANG_2L decode: **14.23 → 14.42 tok/s (+1.3%, within noise).** The SwiGLU/GeGLU activation-level fusion is not where the time is spent. Conclusion: compile fusion is a free small win on M4 Max but not the "beat minimax itself" move. The actual bottleneck is the quantized MoE expert matmul kernel.
+
+### 🔜 Remaining levers
+
+3. **L2 — Cold expert pruning.** Threshold-drop experts with routing weight below (say) 5% of the max. Predicted 20–40% decode speedup at <1% MMLU cost. This is the highest-ROI item left on the menu and applies equally to bundle and source paths.
+4. **L3 — JANGTQ P13+ Metal kernel extensions.** 2-bit-specific gather_qmm variant, fused expert dispatch, activation caching. Weeks of work but targets the actual decode bottleneck.
+5. **Plan 8 — Metal-resident speculative decoding.** Deferred to its own plan. Ceiling ~3× on effective decode. 5–6 week scope.
+6. **Long-term parity check** — once decode is optimized, rebenchmark bundle vs source to confirm they stay at parity.
+
+### Key insight from the compile-decode experiment
+
+The decode hot path for a JANG MoE model is NOT dominated by activation ops — it's dominated by **the quantized-matmul kernel calls for the 8 active experts per token**. Fusing SwiGLU (2 Metal dispatches collapsed to 1) across 62 layers saves ~60 dispatches per token out of a total count dominated by 62 × 8 × 3 = ~1500 quantized-matmul dispatches. The 1.3% measured delta is consistent with that math.
+
+**What would actually move the needle** at the kernel level:
+- Fuse the 8-way gather+matmul inside a single dispatch (currently launches separate `gather_qmm` per expert call)
+- Reuse dequantized expert weights across consecutive decode steps where the router picks the same expert
+- A 2-bit-specific kernel that avoids the variable-bit dispatch overhead of the current mixed-bit `gather_qmm`
+
+These are all P13+ kernel work — not config flags, not loader changes, not compile-fusion tweaks.
 
 ## Parking lot — not today
 
