@@ -8,7 +8,7 @@ Last updated: 2026-04-13
 
 ## TL;DR
 
-SSD-streamed MoE speculative decoding for JANG models. v1 = streaming + Medusa drafting + prior-based prefetch. Plans 1–4 done — Plan 5 (dense forward pass) is next. Three real MoE bundles built and verified (Gemma-4-26B, Qwen3.5-35B-A3B, MiniMax M2.7 228B). Streaming IO spike GO on M4 Max (12.54 GB/s random). Hot-core loader parses JANG v2 safetensors and classifies every tensor in the MiniMax hot core in ~0.5 s via mmap. First Metal compute kernel (4-bit GEMV) now validated against an MLX reference within fp16 drift (max abs 7.5e-3 vs 1e-2 bound).
+SSD-streamed MoE speculative decoding for JANG models. v1 = streaming + Medusa drafting + prior-based prefetch. Plans 1–4 done — Plan 5 (Python bundle validation) code ready, awaiting RAM-free run on Gemma-4-26B. Three real MoE bundles built and verified (Gemma-4-26B, Qwen3.5-35B-A3B, MiniMax M2.7 228B). Streaming IO spike GO on M4 Max (12.54 GB/s random). Hot-core loader parses JANG v2 safetensors and classifies every tensor in the MiniMax hot core in ~0.5 s via mmap. First Metal compute kernel (4-bit GEMV) now validated against an MLX reference within fp16 drift (max abs 7.5e-3 vs 1e-2 bound).
 
 ---
 
@@ -28,7 +28,7 @@ SSD-streamed MoE speculative decoding for JANG models. v1 = streaming + Medusa d
 | 2 | Swift bundle loader (JANGCore) | **DONE** | `jang-spec-plan2-swift-loader` | `JANGCore` library, `jang-core inspect` CLI |
 | 3 | Hot-core loader (Swift, v2 safetensors, no Metal yet) | **DONE** | `jang-spec-plan3-hotcore` | `SafetensorsV2File`, `BitInference`, `QuantizedTensorView`, `HotCoreLoader`, `jang-core hot-core` CLI |
 | 4 | Metal v2 quantized matmul kernel (4-bit GEMV) | **DONE** | `jang-spec-plan4-metal-matmul` | `JANGCoreMetal` library, `JangV2QuantMatmul.metal`, `QuantizedMatmul4` |
-| 5 | Dense JANG v2 forward pass | queued | — | — |
+| 5 | Python validation: run Gemma-4-26B-A4B from `.jangspec` bundle | **CODE READY (run pending)** | `jang-spec-plan5-bundle-python-validation` | `jang_tools.jangspec.bundle_loader`, `validate_bundle_gemma4.py`, 3 unit tests |
 | 6 | MoE layer (router, shared expert, switch_mlp, RAM-resident) | queued | — | — |
 | 7 | ExpertStreamer — swap RAM experts for SSD streaming | queued | — | — |
 | 8 | Medusa drafter + speculative decoding loop | queued | — | — |
@@ -72,7 +72,7 @@ Config: 256 × 50 MB files, random-order reads into unified-memory `MTLBuffer`s.
 
 ## Tests (running totals)
 
-- **Python:** 14 tests under `jang-tools/tests/jangspec/` — unit (blob, index, manifest, tier) + integration (builder, reader round-trip against Gemma fixture)
+- **Python:** 17 tests under `jang-tools/tests/jangspec/` — unit (blob, index, manifest, tier) + integration (builder, reader round-trip against Gemma fixture, bundle_loader hot-core/expert-stack/byte-parity)
 - **Swift:** 20 tests total — 19 under `jang-runtime/Tests/JANGCoreTests/` (format, index, blob, safetensors v2, bit inference, bundle open, expert/hot-core load) + 1 under `jang-runtime/Tests/JANGCoreMetalTests/` (4-bit GEMV correctness vs MLX reference)
 - **Swift benchmark:** `jang-spec-iobench` (standalone, not an XCTest)
 
@@ -110,14 +110,16 @@ v2 will add router-aware drafting as a distinct ML contribution once v1 proves o
 
 ## Immediate next
 
-**Plan 5: Dense JANG v2 forward pass.** Wire `QuantizedMatmul4` into a real forward pass on a small dense JANG model, using it for all linear layers (q/k/v/o projections, MLP gate/up/down).
-- Load a tiny dense JANG v2 bundle via `SafetensorsV2File` + `HotCoreLoader`
-- Replace Plan 4's synthetic fixture with real per-layer projections and validate against an MLX reference forward
-- Extend `JANGCoreMetal` with the companion kernels (RMSNorm, SiLU, residual add, rope) as needed
-- CLI surface: `jang-core forward <bundle>` runs one token end-to-end and prints logits
-- Plan 6 generalizes this to MoE with a router + switch_mlp gather variant
+**Plan 6: Swift forward pass on Gemma-4-26B (RAM-resident MoE, no streaming yet).** To be designed once Plan 5's validation script confirms the bundle is byte-equivalent to the source on a real generation. Plan 5 code is committed but not yet run (~16 GB RAM); Eric will execute `python3 jang-tools/scripts/validate_bundle_gemma4.py` when RAM is free.
 
 Plans 6–9 build up MoE → streamed → drafted → shipped.
+
+### Plan 5 notes
+
+- **`jang_tools.jangspec.bundle_loader`** is the inverse of `JangSpecBuilder`. `load_weights_from_bundle(bundle_dir)` returns a `{name: mx.array}` dict identical to what `mx.load("model.safetensors")` would yield on the source `JANG_xxx/` directory. Hot-core tensors are mmap'd via `safetensors.numpy.load_file`; expert blobs are walked via `JangSpecReader.load_expert(layer, expert)` and restacked into 3D `[E, ...]` tensors under the original `model.language_model.layers.N.switch_mlp.{gate,up,down}_proj.{weight,scales,biases}` keys. `np.stack(axis=0)` over experts in `0..E-1` order produces tensors that are **byte-identical** to the source safetensors slices (verified by `test_bundle_loader_byte_parity_against_source`).
+- **`load_jang_model_from_bundle(bundle_dir)`** is a higher-level helper that builds an mlx-vlm/mlx-lm model skeleton from `target/config.json`, runs the loaded weights through `model.sanitize()`, and calls `model.load_weights(..., strict=False)` (strict=False because the hot core lacks vision-tower / audio-embed tensors). VLM detection looks for `vision_config`/`vision_tower`/`audio_config` or `Conditional` in `architectures`. It tolerates both `(model, config)` and bare-`model` return types from `mlx_vlm.utils.load_model`.
+- **Validation script:** `jang-tools/scripts/validate_bundle_gemma4.py`. Loads Gemma-4-26B-A4B-it-JANG_4M from both the source `JANG_4M/` directory and the `.jangspec` bundle, runs greedy decode for 16 tokens on `"The capital of France is"`, and asserts token-level equality. **Not yet executed** — the model is ~16 GB resident and Eric will run it manually when RAM is free. Import-checked to ensure clean module load.
+- **3 new tests** in `tests/jangspec/test_bundle_loader.py`: hot-core key presence, expert 3D-stack reconstruction, byte parity vs source. All pass against the real Gemma-4-26B fixture in ~50 s (each test rebuilds the bundle from scratch into `tmp_path`). The byte-parity test confirms `np.stack(axis=0)` is the correct expert-stacking convention.
 
 ### Plan 4 notes
 
