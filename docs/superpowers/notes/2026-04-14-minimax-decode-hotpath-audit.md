@@ -198,3 +198,38 @@ Expected gain from (1)+(3)+(4): <1%. Low risk, easy to verify.
 - More aggressive quantization (2-bit → 1.5-bit for some layers) — quality risk, doesn't help dispatch count.
 - Switch activation functions — SwiGLU is correct for MiniMax, changing breaks the model.
 - Swap dtype bf16 → fp16 — bf16 is correct for MiniMax and matches the Metal accumulator.
+
+---
+
+## Cleanup results (measured)
+
+Applied the one-line cleanups from Tier 2 to `MiniMax.swift` and re-measured:
+
+```
+eScoreCorrectionBias: MLXArray.zeros([...], dtype: .bfloat16)      // was: default fp32
+argPartition(scores, kth: numExperts - k)[numExperts-k..<numExperts]  // was: argPartition(-scores, ...)[..<k]
+epsilon: static MLXArray constant on the class                      // was: MLXArray(1e-20, ...) per forward
+scores.asType(x.dtype) removed                                      // no-op after eScoreCorrectionBias fix
+```
+
+Result on MiniMax-M2.7-JANG_2L bundle, clean RAM, same prompt (60 prompt / 256 gen / greedy):
+
+| Config | tok/s |
+|---|---:|
+| Baseline (source dir) | 14.35 |
+| Baseline (bundle fat layout) | 14.23 |
+| Bundle fat + compile-decode on | 14.42 |
+| **Bundle fat + MoE cleanups** | **14.99** |
+
+**+4.5% decode speedup** from four one-line changes. The biggest contributor is almost certainly the `scores + eScoreCorrectionBias` path staying in bf16 instead of promoting to fp32 — the negate + asType fixes are each small but compound. The eScoreCorrectionBias dtype init alone avoids ~5 dispatches per layer × 62 layers = ~310 ops per token.
+
+This confirms the audit hypothesis: **dispatch count reduction is the real lever**, and the Tier 1 fusions (QKV + gate_up) should give much bigger wins because they collapse multiple quantized matmul dispatches per layer.
+
+### New projected ceiling after Tier 1
+
+Expected tok/s after QKV fusion + gate_up fusion on top of the current cleanups:
+- +15–25% from QKV fusion → ~17–19 tok/s
+- +8–12% from gate_up fusion → ~19–21 tok/s
+- +20–40% from cold expert pruning → ~25–30 tok/s
+
+Target: 20 tok/s is a realistic stretch goal before Plan 8 speculative decoding kicks in.
