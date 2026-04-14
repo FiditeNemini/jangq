@@ -201,6 +201,14 @@ class JangSpecBuilder:
 
         entries: List[ExpertIndexEntry] = []
 
+        # Fat-layout output: all expert tensors in their original 3D stacked
+        # form under their full original names. This lets the Swift runtime
+        # `loadArraysAndMetadata`-mmap them directly with zero restack, the
+        # same way the source JANG directory path works. Bundle loader
+        # checks for this file first; falls back to per-blob restack only
+        # if it is absent.
+        fat_tensors: Dict[str, np.ndarray] = {}
+
         for lid in sorted_layers:
             base = layers[lid]
             arrays: Dict[str, Dict[str, np.ndarray]] = {}
@@ -215,6 +223,21 @@ class JangSpecBuilder:
 
             bits = _infer_bits(arrays["gate_proj"]["qweight"], arrays["gate_proj"]["scales"], self.group_size)
 
+            # Emit 3D stacked tensors into the fat layout. Same byte
+            # layout the source directory has — these arrays are the
+            # product of JANG's build pipeline and already have leading
+            # expert dim at axis 0.
+            for kind in ("gate_proj", "up_proj", "down_proj"):
+                full_base = base[kind]
+                fat_tensors[f"{full_base}.weight"] = np.ascontiguousarray(
+                    arrays[kind]["qweight"])
+                fat_tensors[f"{full_base}.scales"] = np.ascontiguousarray(
+                    arrays[kind]["scales"])
+                fat_tensors[f"{full_base}.biases"] = np.ascontiguousarray(
+                    arrays[kind]["biases"])
+
+            # Per-blob streaming format (optional — used by the SSD
+            # streaming runtime, not by the default in-RAM loader).
             for expert_id in range(self.n_experts_per_layer):
                 expert = ExpertTensors(
                     bits=bits,
@@ -269,16 +292,34 @@ class JangSpecBuilder:
             n_experts_per_layer=self.n_experts_per_layer,
         )
 
+        # Save the fat layout. The Swift loader prefers this path because
+        # it maps directly into unified memory with no restack cost.
+        fat_path = self.out_dir / "experts.safetensors"
+        save_file(fat_tensors, str(fat_path))
+
         self.expert_bytes = sum(e.nbytes for e in entries)
 
     # ------------------------------------------------------------- tokenizer
 
     def _copy_tokenizer(self) -> None:
-        for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
-            src = self.source_dir / name
-            if src.exists():
-                shutil.copy2(src, self.out_dir / name)
-        # Copy source jang_config.json and config.json into target/ for Swift reader.
+        # Copy every non-weight file from the source model directory into
+        # the bundle root. This catches anything the model factory might
+        # need (processor_config.json for VLMs, generation_config.json,
+        # chat_template.jinja, preprocessor configs, modeling_*.py for
+        # trust_remote_code models, etc.) without having to maintain a
+        # hardcoded list per model architecture.
+        skip_suffixes = (".safetensors",)
+        skip_names = {"model.safetensors.index.json"}
+        for child in self.source_dir.iterdir():
+            if not child.is_file():
+                continue
+            if child.name in skip_names:
+                continue
+            if child.name.endswith(skip_suffixes):
+                continue
+            shutil.copy2(child, self.out_dir / child.name)
+        # Also keep config.json and jang_config.json under target/ for the
+        # streaming Swift runtime that reads from the bundle's target/ subdir.
         (self.out_dir / "target").mkdir(parents=True, exist_ok=True)
         for name in ("config.json", "jang_config.json"):
             src = self.source_dir / name
