@@ -16,6 +16,11 @@ dist/
 # Research & experiments (PRIVATE — never publish)
 research/
 
+# Per-session investigation + bench notes (PRIVATE — never publish).
+# Contains architectural findings, kernel speed measurements, and
+# comparison data that competitors reproduced from past public notes.
+docs/superpowers/notes/
+
 # Internal docs
 JANG-ISSUES.md
 JANG-PLAN.md

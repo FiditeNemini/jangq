@@ -9,6 +9,7 @@ Pipeline: detect arch → calibrate → allocate bits → quantize → write
 """
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -890,16 +891,34 @@ def convert_model(
         },
     }
 
-    # Copy tokenizer files
+    # Copy tokenizer files. Be robust to non-UTF-8 locales and binary-ish
+    # tokenizer assets (tokenizer.model is sentencepiece protobuf bytes;
+    # merges.txt may have surrogate-encoded chars on some sources).
+    # mlxstudio#74 (Hemanth Pai): conversion failed late and the only
+    # visible log was a leaked semaphore — silent text-encode errors at
+    # the end of conversion are a prime suspect on macOS POSIX locales.
     tokenizer_files = {}
+    _binary_tok_files = {"tokenizer.model"}  # always copy as bytes
     for tok_file in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
                      "tokenizer.model", "merges.txt", "vocab.json", "added_tokens.json"]:
         tok_path = model_path / tok_file
-        if tok_path.exists():
+        if not tok_path.exists():
+            continue
+        try:
             if tok_file.endswith(".json"):
-                tokenizer_files[tok_file] = json.loads(tok_path.read_text())
+                # JSON must be parsed so eos/template fixups can mutate it.
+                # Force UTF-8 explicitly — never trust the locale.
+                tokenizer_files[tok_file] = json.loads(tok_path.read_text(encoding="utf-8"))
+            elif tok_file in _binary_tok_files:
+                # sentencepiece .model files are binary protobuf — store
+                # raw bytes and let the writer copy them via Path.write_bytes
+                tokenizer_files[tok_file] = tok_path.read_bytes()
             else:
-                tokenizer_files[tok_file] = tok_path.read_text()
+                # merges.txt / vocab.json fallback / etc — text, force UTF-8
+                tokenizer_files[tok_file] = tok_path.read_text(encoding="utf-8", errors="surrogateescape")
+        except OSError as _e:
+            print(f"  WARNING: failed to read {tok_file}: {_e}")
+            continue
 
     # ── eos_token_id auto-fix ──────────────────────────────────
     # Qwen3.5 source ships with eos_token_id=248044 (<|endoftext|>) which is WRONG.
@@ -937,21 +956,56 @@ def convert_model(
     # Chat templates are CRITICAL — missing or wrong template causes:
     #   - Qwen3.5: infinite thinking loops if eos_token_id wrong
     #   - MiniMax: loops if enable_thinking toggle missing from template
+    #   - GLM-5.1: model thinks forever without reasoning parser
+    # mlxstudio#74: switched from shutil.copy2 → robust copy that falls
+    # back to byte-stream copy when metadata copy (xattrs, mtime) fails
+    # on cross-filesystem moves (NTFS via FUSE, exFAT, certain SMB shares).
     output_path.mkdir(parents=True, exist_ok=True)
+
+    def _safe_copy(src: Path, dst: Path) -> None:
+        """Copy file contents; tolerate metadata-copy failures on
+        cross-FS / NTFS / SMB destinations. Always preserves bytes;
+        loses xattrs/mtime if the destination FS doesn't support them.
+        """
+        try:
+            shutil.copy2(str(src), str(dst))
+            return
+        except (OSError, PermissionError):
+            pass
+        # Fallback: pure byte copy (no metadata)
+        try:
+            with open(src, "rb") as r, open(dst, "wb") as w:
+                while True:
+                    chunk = r.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    w.write(chunk)
+                w.flush()
+                try:
+                    os.fsync(w.fileno())
+                except OSError:
+                    pass
+        except OSError as _ce:
+            print(f"  WARNING: failed to copy {src.name}: {_ce}")
+
     extra_configs = ["preprocessor_config.json", "video_preprocessor_config.json",
                      "chat_template.json", "chat_template.jinja",
                      "generation_config.json"]
+    extras_copied = []
     for extra_file in extra_configs:
         extra_path = model_path / extra_file
         if extra_path.exists():
-            shutil.copy2(str(extra_path), str(output_path / extra_file))
+            _safe_copy(extra_path, output_path / extra_file)
+            extras_copied.append(extra_file)
+    if extras_copied:
+        print(f"  Extra config files: {', '.join(extras_copied)}")
 
     # Copy ALL custom .py files (trust_remote_code models: Nemotron, MiniMax, etc.)
     # Auto-detect instead of hardcoding specific filenames.
     py_files_copied = []
     for f in model_path.iterdir():
         if f.suffix == ".py" and f.is_file():
-            shutil.copy2(str(f), str(output_path / f.name))
+            _safe_copy(f, output_path / f.name)
             py_files_copied.append(f.name)
     if py_files_copied:
         print(f"  Custom .py files: {', '.join(py_files_copied)}")

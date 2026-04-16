@@ -69,6 +69,96 @@ def load_jangtq_model(model_path, skip_params_eval=False):
         model_path, lazy=True, strict=False, model_config=model_config
     )
 
+    _hydrate_jangtq_model(
+        model=model,
+        model_path=model_path,
+        mxtq_seed=mxtq_seed,
+        mxtq_bits_map=mxtq_bits_map,
+        model_config=model_config,
+        skip_params_eval=skip_params_eval,
+    )
+
+    eos_ids = config.get("eos_token_id")
+    if isinstance(eos_ids, int):
+        eos_ids = [eos_ids]
+    tokenizer = load_tokenizer(model_path, eos_token_ids=eos_ids)
+    print(f"  Done (eos_token_ids={eos_ids})", flush=True)
+    return model, tokenizer
+
+
+def _vlm_minimal_sanitize(model, weights):
+    """VLM weight sanitize that skips the (already-applied) expert split.
+
+    Mirrors the LLM-path mlx_lm.qwen3_5.sanitize behavior — same as what
+    `load_jangtq_model` triggers via `model.sanitize(regular)` — but
+    avoids mlx_vlm's qwen3_5_moe.sanitize which would also try to
+    re-split routed experts (we already split them via TQ above) and
+    unconditionally shift norm weights (mlx_lm only shifts conditionally
+    on `has_unsanitized_conv1d`, and our artifact's conv1d shape `(out,
+    1, kernel)` always trips that flag, so the shift IS needed).
+
+    Steps applied:
+      * drop mtp.* (speculative decode extras — unused at inference time)
+      * drop lm_head.weight when tie_word_embeddings
+      * rename `model.language_model.*` → `language_model.model.*`
+      * rename `model.visual.*` → `vision_tower.*` (alternate HF layout)
+      * rename `lm_head.*` → `language_model.lm_head.*`
+      * conv1d.weight: moveaxis(2, 1) so shape (out, 1, k) → (out, k, 1)
+      * RMSNorm.weight: `+= 1.0` (same shift mlx_lm applies for our
+        artifact's pre-shift convention)
+    """
+    text_tied = False
+    tc = getattr(model.config, "text_config", None)
+    if tc is not None:
+        text_tied = bool(getattr(tc, "tie_word_embeddings", False))
+
+    norm_suffixes = (
+        ".input_layernorm.weight",
+        ".post_attention_layernorm.weight",
+        "model.norm.weight",
+        ".q_norm.weight",
+        ".k_norm.weight",
+    )
+
+    out = {}
+    for key, value in weights.items():
+        if "mtp." in key:
+            continue
+        if text_tied and key == "lm_head.weight":
+            continue
+        if key.startswith("model.language_model"):
+            key = key.replace("model.language_model", "language_model.model")
+        elif key.startswith("model.visual"):
+            key = key.replace("model.visual", "vision_tower")
+        elif key.startswith("lm_head"):
+            key = key.replace("lm_head", "language_model.lm_head")
+
+        # GatedDeltaNet conv1d weights are stored on disk as
+        # (out, 1, kernel) but mlx's `nn.Conv1d` expects (out, kernel, 1).
+        # Same fix mlx_vlm + mlx_lm do in their sanitize passes.
+        if "conv1d.weight" in key and value.ndim == 3 and value.shape[-1] != 1:
+            value = value.moveaxis(2, 1)
+
+        # RMSNorm `+= 1.0`: matches mlx_lm.qwen3_5.sanitize behavior when
+        # `has_unsanitized_conv1d` (always true for our artifact). The
+        # text-path verifies this is correct: norms saved at ~0.03 mean,
+        # decoded after shift to ~1.03, produces coherent text at 96 tok/s.
+        if value.ndim == 1 and any(key.endswith(sfx) for sfx in norm_suffixes):
+            value = value + 1.0
+
+        out[key] = value
+    return out
+
+
+def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
+                          model_config, skip_params_eval=False):
+    """Apply JANGTQ TQ replacement, weight load, and runtime patches in-place.
+
+    Shared by `load_jangtq_model` (LLM-only) and `load_jangtq_vlm.load_jangtq_vlm_model`
+    (VLM with vision_tower). Caller is responsible for building `model` and (for
+    LLM path) the tokenizer/processor.
+    """
+    model_path = Path(model_path)
     weight_files = sorted(model_path.glob("model-*.safetensors"))
     print(f"  {len(weight_files)} shards", flush=True)
 
@@ -245,7 +335,16 @@ def load_jangtq_model(model_path, skip_params_eval=False):
 
     # Load regular weights
     if hasattr(model, "sanitize"):
-        regular = model.sanitize(regular)
+        # mlx_vlm's qwen3_5_moe.sanitize would re-split experts (already split
+        # via TQ above) and unconditionally shift norm weights by +1.0 (already
+        # baked into our converted artifact). Detect VLM models by the presence
+        # of vision_tower and use a minimal sanitize that only handles key
+        # renames + lm_head tie + mtp drops.
+        is_vlm_model = hasattr(model, "vision_tower") and hasattr(model, "language_model")
+        if is_vlm_model:
+            regular = _vlm_minimal_sanitize(model, regular)
+        else:
+            regular = model.sanitize(regular)
     model.load_weights(list(regular.items()), strict=False)
     del regular
     gc.collect()
@@ -591,22 +690,19 @@ def load_jangtq_model(model_path, skip_params_eval=False):
     except Exception as _e:
         print(f"  P18 QKV fusion skipped: {_e}", flush=True)
 
-    # bfloat16 for MLA models
-    tc = model_config.get("text_config", model_config)
-    if tc.get("kv_lora_rank", 0) > 0 or tc.get("model_type", "") == "glm_moe_dsa":
+    # bfloat16 for MLA models. model_config can be a dict (mlx_lm path) or
+    # a dataclass (mlx_vlm path); normalize via getattr/getitem fallback.
+    def _cfg_get(cfg, key, default=None):
+        if hasattr(cfg, key):
+            return getattr(cfg, key)
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        return default
+    tc = _cfg_get(model_config, "text_config", model_config)
+    if _cfg_get(tc, "kv_lora_rank", 0) > 0 or _cfg_get(tc, "model_type", "") == "glm_moe_dsa":
         model.set_dtype(mx.bfloat16)
         print("  bfloat16 enabled", flush=True)
 
     if not skip_params_eval:
         mx.synchronize()
-
-    # Pass eos_token_ids list from config so multi-eos models (GLM, etc.)
-    # actually stop instead of looping. Without this, mlx_lm only sees the
-    # single tokenizer.eos_token_id (usually <|endoftext|>) but the model
-    # emits other end-of-turn tokens like <|user|> or <|observation|>.
-    eos_ids = config.get("eos_token_id")
-    if isinstance(eos_ids, int):
-        eos_ids = [eos_ids]
-    tokenizer = load_tokenizer(model_path, eos_token_ids=eos_ids)
-    print(f"  Done (eos_token_ids={eos_ids})", flush=True)
-    return model, tokenizer
+    print("  Hydration complete", flush=True)

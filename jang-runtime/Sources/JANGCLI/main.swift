@@ -5,7 +5,9 @@
 
 import ArgumentParser
 import Foundation
+import Metal
 import JANG
+import JANGCoreMetal
 
 @main
 struct JANGCLI: ParsableCommand {
@@ -19,7 +21,7 @@ struct JANGCLI: ParsableCommand {
         GPUs with custom Metal kernels for maximum performance.
         """,
         version: "0.1.0",
-        subcommands: [Info.self, Run.self, Debug.self]
+        subcommands: [Info.self, Run.self, Debug.self, JangTQ.self]
     )
 }
 
@@ -241,4 +243,96 @@ struct Debug: ParsableCommand {
 
         print("\n  Debug complete.\n")
     }
+}
+
+
+// MARK: - JANGTQ Command (codebook + Hadamard runtime)
+
+struct JangTQ: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "tq",
+        abstract: "Run a JANGTQ (codebook + Hadamard) MoE model end-to-end."
+    )
+
+    @Argument(help: "Path to JANGTQ model directory")
+    var modelPath: String
+
+    @Option(name: .shortAndLong, help: "User prompt")
+    var prompt: String = "What is the capital of France?"
+
+    @Option(name: .long, help: "System prompt (defaults to MiniMax default)")
+    var system: String?
+
+    @Option(name: .long, help: "Max tokens to generate")
+    var maxTokens: Int = 200
+
+    @Option(name: .long, help: "Max sequence length for KV cache")
+    var maxSeqLen: Int = 2048
+
+    @Option(name: .long, help: "MoE prefix in the safetensors keys")
+    var moePrefix: String = "block_sparse_moe"
+
+    @Flag(name: .long, help: "Stream tokens as they decode")
+    var stream: Bool = false
+
+    @Flag(name: .long, help: "Print prompt + token counts + tok/s")
+    var verbose: Bool = false
+
+    func run() throws {
+        let url = URL(fileURLWithPath: modelPath)
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw JANGError.inferenceError("No Metal device available")
+        }
+
+        print("Loading JANGTQ model from \(url.path)…", flush: true)
+        let t0 = Date()
+
+        let bundle = try JANGTQLoader(device: device).load(from: url)
+        let ctx = try MetalContext()
+        let model = try JANGTQModel(
+            bundle: bundle, context: ctx, maxSeqLen: maxSeqLen, moePrefix: moePrefix
+        )
+        let tok = try JANGTQTokenizer(modelDir: url)
+        let gen = JANGTQGenerator(model: model, tokenizer: tok)
+
+        let loadElapsed = Date().timeIntervalSince(t0)
+        print(String(format: "Loaded in %.1fs.", loadElapsed))
+
+        if verbose {
+            let cfg = bundle.config
+            print("""
+              ──────────────────────────────────
+              Source: \(cfg.quant.sourceModelName)
+              Architecture: \(cfg.model.modelType ?? "?")
+              Layers: \(cfg.model.numHiddenLayers)
+              Hidden: \(cfg.model.hiddenSize)
+              Experts: \(cfg.model.numLocalExperts ?? 0) / top-\(cfg.model.numExpertsPerTok ?? 0)
+              Vocab: \(cfg.model.vocabSize)
+              Stop tokens: \(tok.stopTokenIds.sorted())
+              ──────────────────────────────────
+            """)
+        }
+
+        print("\n> \(prompt)\n")
+
+        let result = try gen.generate(
+            userMessage: prompt, system: system,
+            maxTokens: maxTokens, verbose: stream
+        )
+
+        if !stream {
+            print(result.text)
+        }
+
+        print()
+        print(String(format: "  %d prompt + %d output tokens in %.2fs (%.1f tok/s, stop: %@)",
+                     result.promptTokens, result.outputTokens,
+                     result.elapsedSec, result.tokensPerSec, result.stopReason.rawValue))
+    }
+}
+
+// Foundation's print does not flush by default — wrap it for the loading trace.
+fileprivate func print(_ s: String, flush: Bool) {
+    Swift.print(s)
+    if flush { fflush(stdout) }
 }

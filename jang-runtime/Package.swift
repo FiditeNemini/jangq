@@ -22,19 +22,22 @@ let package = Package(
     ],
     targets: [
         .target(name: "JANGMetal", dependencies: [], path: "Sources/JANGMetal"),
-        .target(name: "JANG", dependencies: ["JANGMetal"], path: "Sources/JANG"),
+        .target(name: "JANG", dependencies: ["JANGMetal", "JANGCoreMetal"], path: "Sources/JANG"),
         .target(name: "JANGCore", dependencies: [], path: "Sources/JANGCore"),
         .target(
             name: "JANGCoreMetal",
             dependencies: ["JANGCore"],
             path: "Sources/JANGCoreMetal",
             resources: [
-                .copy("JangV2QuantMatmul.metal")
+                .copy("JangV2QuantMatmul.metal"),
+                .copy("JANGTQMatmul.metal"),
+                .copy("JANGTQAffine8Matmul.metal"),
+                .copy("JANGTQDecodeOps.metal"),
             ]
         ),
         .executableTarget(
             name: "JANGCLI",
-            dependencies: ["JANG", .product(name: "ArgumentParser", package: "swift-argument-parser")],
+            dependencies: ["JANG", "JANGCoreMetal", .product(name: "ArgumentParser", package: "swift-argument-parser")],
             path: "Sources/JANGCLI"
         ),
         .executableTarget(
@@ -47,7 +50,7 @@ let package = Package(
             dependencies: ["JANGCore", .product(name: "ArgumentParser", package: "swift-argument-parser")],
             path: "Sources/jang-core"
         ),
-        .testTarget(name: "JANGTests", dependencies: ["JANG"], path: "Tests/JANGTests"),
+        .testTarget(name: "JANGTests", dependencies: ["JANG", "JANGCoreMetal"], path: "Tests/JANGTests"),
         .testTarget(name: "JANGCoreTests", dependencies: ["JANGCore"], path: "Tests/JANGCoreTests"),
         .testTarget(
             name: "JANGCoreMetalTests",

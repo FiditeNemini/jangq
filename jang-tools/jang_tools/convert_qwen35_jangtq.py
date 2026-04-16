@@ -294,6 +294,16 @@ for tensor_name, shape, sf_path in tqdm(all_tensors, desc="  Processing"):
         tensor = tensor.astype(np.float32)
 
     if method == "passthrough":
+        # Qwen3.6 patch_embed.proj.weight ships in HF-native layout
+        # (out_channels, in_channels, temporal_patch, patch, patch) — shape like
+        # (1152, 3, 2, 16, 16). mlx_vlm's Qwen3_5 ViT expects in_channels last:
+        # (out_channels, temporal_patch, patch, patch, in_channels). Transpose
+        # once at conversion so the shipped model loads without a runtime hack.
+        if out_name.endswith("vision_tower.patch_embed.proj.weight") \
+                and tensor.ndim == 5 and tensor.shape[1] == 3:
+            tensor = np.ascontiguousarray(
+                np.transpose(tensor, (0, 2, 3, 4, 1))
+            )
         add_tensor(out_name, tensor.astype(np.float16))
         total_passthrough += 1
 
@@ -387,12 +397,14 @@ jang_config = {
         "name": SRC.name,
         "architecture": src_arch,
     },
-    # has_vision: false signals the Swift ModelDetector to dispatch
-    # through the LLM (text-only) factory instead of the VLM factory.
-    # The Swift Qwen35JANGTQModel strips vision_tower keys at sanitize
-    # so the artifact runs text-only. Set to True when a Swift VLM
-    # JANGTQ port lands.
-    "has_vision": False,
+    # has_vision: true now that Swift Qwen35MoEJANGTQ (vMLXVLM) is
+    # available. The detector routes the artifact through VLMModelFactory
+    # which dispatches qwen3_5_moe + weight_format=mxtq to the
+    # vision-aware JANGTQ class. Both Python (load_jangtq_vlm_model) and
+    # Swift VLM paths consume the SAME on-disk weights — the LLM-side
+    # Swift Qwen35JANGTQModel.sanitize harmlessly strips vision_tower
+    # keys when accidentally used.
+    "has_vision": True,
     "mxtq_seed": SEED,
     "mxtq_bits": {
         "attention": 8,

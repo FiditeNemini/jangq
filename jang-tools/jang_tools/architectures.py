@@ -213,27 +213,31 @@ MLA_LAYER_CONFIGS = {
     ),
 }
 
-# GatedDeltaNet (Linear Attention / SSM hybrid in Qwen 3.5)
+# GatedDeltaNet / Qwen3-Next-style linear attention (Qwen3.5, Qwen3.6, Qwen3-Next).
+# Actual MLX weight paths live under `linear_attn.*`, not `delta_net.*`.
+# in_proj_b / in_proj_a are tiny `[num_v_heads, hidden]` — clamp to >=4 bit so
+# profile sweeps don't collapse them. conv1d / A_log / dt_bias / norm are
+# mx.arrays or grouped Conv weights; they stay bf16 (mx.quantize ignores them).
 GATED_DELTANET_CONFIGS = {
-    "delta_net.beta_proj": LayerQuantConfig(
-        min_bits=4, preferred_bits=4, importance_weight=2.0,
-        description="DeltaNet beta projection — controls state update rate"
-    ),
-    "delta_net.out_proj": LayerQuantConfig(
-        min_bits=3, preferred_bits=4, importance_weight=1.3,
-        description="DeltaNet output projection"
-    ),
-    "delta_net.q_proj": LayerQuantConfig(
+    "linear_attn.in_proj_qkv": LayerQuantConfig(
         min_bits=3, preferred_bits=4, importance_weight=1.5,
-        description="DeltaNet query projection"
+        description="GatedDeltaNet fused Q/K/V input projection"
     ),
-    "delta_net.k_proj": LayerQuantConfig(
+    "linear_attn.in_proj_z": LayerQuantConfig(
         min_bits=3, preferred_bits=4, importance_weight=1.4,
-        description="DeltaNet key projection"
+        description="GatedDeltaNet value-gate input projection"
     ),
-    "delta_net.v_proj": LayerQuantConfig(
-        min_bits=3, preferred_bits=3, importance_weight=1.2,
-        description="DeltaNet value projection"
+    "linear_attn.in_proj_b": LayerQuantConfig(
+        min_bits=4, preferred_bits=8, importance_weight=2.5,
+        description="GatedDeltaNet beta projection — [num_v_heads, hidden] tiny, keep high-bit"
+    ),
+    "linear_attn.in_proj_a": LayerQuantConfig(
+        min_bits=4, preferred_bits=8, importance_weight=2.5,
+        description="GatedDeltaNet alpha projection — [num_v_heads, hidden] tiny, keep high-bit"
+    ),
+    "linear_attn.out_proj": LayerQuantConfig(
+        min_bits=3, preferred_bits=4, importance_weight=1.3,
+        description="GatedDeltaNet output projection"
     ),
 }
 

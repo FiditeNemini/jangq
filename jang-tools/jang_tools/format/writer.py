@@ -78,13 +78,31 @@ def write_jang_v2_model(
     jang_config["format_version"] = FORMAT_VERSION  # 2.0
     _write_json(output_dir / JANG_CONFIG_FILENAME, jang_config)
 
-    # Write tokenizer files
+    # Write tokenizer files. mlxstudio#74: tolerate three content types
+    #   - dict        → JSON (parsed earlier, may have eos fixups applied)
+    #   - bytes       → binary protobuf (sentencepiece tokenizer.model)
+    #   - str         → utf-8 text (merges.txt etc., possibly with
+    #                   surrogateescape codepoints from non-utf8 sources)
+    # Any of these previously fell through to `write_text(content)` which
+    # raises if `content` isn't a string. The new binary path for
+    # tokenizer.model would have crashed the WHOLE conversion at the
+    # very last step, after quantizing 100%. Now handled explicitly.
     if tokenizer_files:
         for filename, content in tokenizer_files.items():
+            dst = output_dir / filename
             if isinstance(content, dict):
-                _write_json(output_dir / filename, content)
+                _write_json(dst, content)
+            elif isinstance(content, (bytes, bytearray)):
+                dst.write_bytes(bytes(content))
+            elif isinstance(content, str):
+                # Use surrogateescape to round-trip non-utf8 bytes from
+                # the source merges.txt (rare but seen on some Asian
+                # tokenizer dumps). Default `errors=` would crash here.
+                dst.write_text(content, encoding="utf-8", errors="surrogateescape")
             else:
-                (output_dir / filename).write_text(content)
+                # Unknown type — best-effort string conversion + warn
+                print(f"  WARNING: tokenizer file {filename} has unexpected content type {type(content).__name__}; coercing to str")
+                dst.write_text(str(content), encoding="utf-8")
 
     # Include pre-flushed shards in the weight map (incremental flush for large models)
     weight_map = {}
@@ -252,5 +270,17 @@ def _shard_tensors(
 
 
 def _write_json(path: Path, data: dict) -> None:
-    """Write dict as formatted JSON."""
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    """Write dict as formatted JSON. mlxstudio#74: force utf-8 + fsync
+    so the JSON files are durable on external drives where the OS
+    write cache may not flush cleanly on process exit. Critical for
+    config.json, jang_config.json, and model.safetensors.index.json
+    — without these, the loader can't resolve any tensors.
+    """
+    payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(payload)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
