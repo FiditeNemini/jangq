@@ -71,13 +71,18 @@ shared_exp_inter = text_cfg.get("shared_expert_intermediate_size", 0)
 
 
 # === Bit assignment ===
-# Profile = JANGTQ_{2L,3L,4M}. First char after "JANGTQ_" = expert bits.
+# Canonical profile names: JANGTQ{N} where N = routed-expert bit count.
+# Legacy suffix forms (JANGTQ_2L, _4M, etc.) are accepted as aliases for
+# backwards compatibility; the canonical form is what lands in jang_config.
 _EXPERT_BITS_BY_PROFILE = {
-    "JANGTQ_2L": 2, "JANGTQ_2S": 2,
-    "JANGTQ_3L": 3, "JANGTQ_3S": 3,
-    "JANGTQ_4M": 4, "JANGTQ_4K": 4,
+    "JANGTQ2": 2, "JANGTQ_2L": 2, "JANGTQ_2S": 2,
+    "JANGTQ3": 3, "JANGTQ_3L": 3, "JANGTQ_3S": 3,
+    "JANGTQ4": 4, "JANGTQ_4M": 4, "JANGTQ_4K": 4,
 }
-EXPERT_BITS = _EXPERT_BITS_BY_PROFILE.get(PROFILE, 2)
+# Case-insensitive lookup; canonicalize to JANGTQ{N}.
+_PROFILE_NORM = PROFILE.upper()
+EXPERT_BITS = _EXPERT_BITS_BY_PROFILE.get(_PROFILE_NORM, 2)
+PROFILE = f"JANGTQ{EXPERT_BITS}"
 
 
 def get_bits_and_method(tensor_name):
@@ -433,6 +438,25 @@ for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
     src_f = SRC / f
     if src_f.exists():
         shutil.copy2(str(src_f), str(OUT / f))
+
+
+# --- Osaurus / swift-transformers compatibility fix ---------------------------
+# Some source releases ship tokenizer_config.json with
+#   "tokenizer_class": "TokenizersBackend"
+# which swift-transformers (Osaurus, vmlx-swift-lm) can't parse and throws
+#   unsupportedTokenizer("TokenizersBackend")
+# Map it back to a concrete class that swift-transformers knows. For the
+# Qwen 3.5/3.6 family this is Qwen2Tokenizer (same vocab family).
+_tok_cfg = OUT / "tokenizer_config.json"
+if _tok_cfg.exists():
+    try:
+        _tc = json.load(open(_tok_cfg))
+        if _tc.get("tokenizer_class") == "TokenizersBackend":
+            _tc["tokenizer_class"] = "Qwen2Tokenizer"
+            json.dump(_tc, open(_tok_cfg, "w"), indent=2)
+            print("  [osaurus-fix] tokenizer_class: TokenizersBackend → Qwen2Tokenizer", flush=True)
+    except Exception as _e:
+        print(f"  [osaurus-fix] skipped: {_e}", flush=True)
 
 
 print(f"\n  Done!")

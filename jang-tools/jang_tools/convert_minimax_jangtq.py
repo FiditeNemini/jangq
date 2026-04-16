@@ -19,9 +19,22 @@ from jang_tools.turboquant.linear import tq_quantize_weight
 
 # === Config ===
 SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/Volumes/EricsLLMDrive/MiniMax-M2.7-FP8")
-OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/Volumes/EricsLLMDrive/MiniMax-M2.7-JANGTQ_2L")
-PROFILE = sys.argv[3] if len(sys.argv) > 3 else "JANGTQ_2L"
+OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/Volumes/EricsLLMDrive/MiniMax-M2.7-JANGTQ2")
+PROFILE = sys.argv[3] if len(sys.argv) > 3 else "JANGTQ2"
 SEED = 42
+
+# Canonical profile names: JANGTQ{N}. Legacy JANGTQ_2L / _4M etc accepted.
+_PROFILE_BITS = {
+    "JANGTQ2": 2, "JANGTQ_2L": 2, "JANGTQ_2S": 2,
+    "JANGTQ3": 3, "JANGTQ_3L": 3, "JANGTQ_3S": 3,
+    "JANGTQ4": 4, "JANGTQ_4M": 4, "JANGTQ_4K": 4,
+}
+_PROFILE_NORM = PROFILE.upper()
+if _PROFILE_NORM not in _PROFILE_BITS:
+    raise ValueError(f"unknown profile {PROFILE!r}; expected one of {sorted(_PROFILE_BITS)}")
+# Canonicalize; downstream get_bits_and_method still gates on 'experts' so bit
+# count is derived from the profile at jang_config-write time.
+PROFILE = f"JANGTQ{_PROFILE_BITS[_PROFILE_NORM]}"
 
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -286,6 +299,22 @@ for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
     src_f = SRC / f
     if src_f.exists():
         shutil.copy2(str(src_f), str(OUT / f))
+
+# --- Osaurus / swift-transformers compatibility fix ---------------------------
+# Remap tokenizer_class: "TokenizersBackend" → a concrete class swift-transformers
+# can parse. For MiniMax (Mixtral-family vocab) use GPT2Tokenizer as the stable
+# fallback; swift-transformers routes it through its generic BPE path. Change
+# this if an explicit MiniMaxTokenizer class is added upstream.
+_tok_cfg = OUT / "tokenizer_config.json"
+if _tok_cfg.exists():
+    try:
+        _tc = json.load(open(_tok_cfg))
+        if _tc.get("tokenizer_class") == "TokenizersBackend":
+            _tc["tokenizer_class"] = "GPT2Tokenizer"
+            json.dump(_tc, open(_tok_cfg, "w"), indent=2)
+            print("  [osaurus-fix] tokenizer_class: TokenizersBackend → GPT2Tokenizer", flush=True)
+    except Exception as _e:
+        print(f"  [osaurus-fix] skipped: {_e}", flush=True)
 
 print(f"\n  Done!")
 print(f"  MXTQ tensors: {total_mxtq}")
