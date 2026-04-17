@@ -425,7 +425,30 @@ jang_config = {
         "bits_default": EXPERT_BITS,
     },
 }
+# Stamp Tier-1 capabilities (reasoning/tool parser, cache type, modality)
+# so vmlx CapabilityDetector picks the right parsers without falling back
+# to silver/bronze. Idempotent — safe to re-run.
+from jang_tools.capabilities import build_capabilities
+caps = build_capabilities(jang_config, config, OUT)
+if caps is not None:
+    jang_config["capabilities"] = caps
+    print(f"  capabilities: family={caps['family']} reasoning={caps['reasoning_parser']} "
+          f"tool={caps['tool_parser']} cache={caps['cache_type']} modality={caps['modality']}",
+          flush=True)
+else:
+    print("  WARNING: could not resolve capabilities for this model — vmlx will "
+          "fall back to silver/bronze detection. Add the family to "
+          "jang_tools/capabilities.py::FAMILY_MAP if this is a new architecture.",
+          flush=True)
+
 json.dump(jang_config, open(OUT / "jang_config.json", "w"), indent=2)
+
+# Validate the final jang_config — catch schema drift / typos / missing keys.
+from jang_tools.capabilities import verify_directory
+_ok, _msg = verify_directory(OUT)
+print(f"  verify: {_msg}")
+if not _ok:
+    raise SystemExit(f"capabilities verify failed: {_msg}")
 
 
 # Copy tokenizer/template/preprocessor files (always-VL rule: keep VL assets)
@@ -457,6 +480,22 @@ if _tok_cfg.exists():
             print("  [osaurus-fix] tokenizer_class: TokenizersBackend → Qwen2Tokenizer", flush=True)
     except Exception as _e:
         print(f"  [osaurus-fix] skipped: {_e}", flush=True)
+
+
+# Build Swift runtime sidecar so Swift runtimes (vmlx-swift-lm, vmlxctl,
+# Osaurus) can load without fatalError. Python loader doesn't need it, but
+# uploading without it is a footgun — see research/JANGTQ-REFERENCE.md.
+print(f"\n  Building jangtq_runtime.safetensors sidecar...")
+try:
+    from jang_tools.build_jangtq_sidecar import main as _build_sidecar
+    _saved_argv = sys.argv
+    sys.argv = ["build_jangtq_sidecar", str(OUT)]
+    try:
+        _build_sidecar()
+    finally:
+        sys.argv = _saved_argv
+except (Exception, SystemExit) as _e:
+    print(f"  [sidecar] FAILED: {_e} — run `python3 -m jang_tools.build_jangtq_sidecar {OUT}` manually before upload", flush=True)
 
 
 print(f"\n  Done!")

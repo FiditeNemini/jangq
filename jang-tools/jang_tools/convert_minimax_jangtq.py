@@ -32,9 +32,8 @@ _PROFILE_BITS = {
 _PROFILE_NORM = PROFILE.upper()
 if _PROFILE_NORM not in _PROFILE_BITS:
     raise ValueError(f"unknown profile {PROFILE!r}; expected one of {sorted(_PROFILE_BITS)}")
-# Canonicalize; downstream get_bits_and_method still gates on 'experts' so bit
-# count is derived from the profile at jang_config-write time.
-PROFILE = f"JANGTQ{_PROFILE_BITS[_PROFILE_NORM]}"
+EXPERT_BITS = _PROFILE_BITS[_PROFILE_NORM]
+PROFILE = f"JANGTQ{EXPERT_BITS}"
 
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -44,7 +43,8 @@ n_experts = config.get("num_local_experts", 256)
 
 
 # === Bit assignment ===
-# JANGTQ_2L: attn=8 affine, embed=6 affine, lm_head=8 affine, expert MLP=2 mxtq, gate/router=fp16
+# attn=8 affine, embed/lm_head=8 affine, routed expert MLP=EXPERT_BITS mxtq
+# (2/3/4 by profile), gate/router/norms=fp16.
 def get_bits_and_method(tensor_name):
     name = tensor_name.lower()
 
@@ -69,9 +69,9 @@ def get_bits_and_method(tensor_name):
     if "shared_expert" in name:
         return (8, "affine")
 
-    # Routed expert MLP (w1/w2/w3 = gate/down/up) — MXTQ 2-bit
+    # Routed expert MLP (w1/w2/w3 = gate/down/up) — MXTQ EXPERT_BITS
     if "experts" in name and (".w1" in name or ".w2" in name or ".w3" in name):
-        return (2, "mxtq")
+        return (EXPERT_BITS, "mxtq")
 
     # Default — affine 8-bit (catch unmapped)
     return (8, "affine")
@@ -84,7 +84,7 @@ print("=" * 60)
 print(f"  Source: {SRC}")
 print(f"  Output: {OUT}")
 print(f"  Layers: {n_layers}, Experts: {n_experts}")
-print(f"  Profile: attn=affine-8, expert=mxtq-2, gate=fp16")
+print(f"  Profile: attn=affine-8, expert=mxtq-{EXPERT_BITS}, gate=fp16")
 print(flush=True)
 
 # Scan tensors
@@ -257,7 +257,9 @@ json.dump(index, open(OUT / "model.safetensors.index.json", "w"), indent=2)
 
 # Write config
 config.pop("quantization_config", None)
-config["quantization"] = {"group_size": 64, "bits": 2}
+config["quantization"] = {"group_size": 64, "bits": EXPERT_BITS}
+config["weight_format"] = "mxtq"
+config["mxtq_bits"] = EXPERT_BITS
 json.dump(config, open(OUT / "config.json", "w"), indent=2)
 
 # Write jang_config
@@ -274,17 +276,37 @@ jang_config = {
     "mxtq_bits": {
         "attention": 8,
         "shared_expert": 8,
-        "routed_expert": 2,
+        "routed_expert": EXPERT_BITS,
         "embed_tokens": 8,
         "lm_head": 8,
     },
     "quantization": {
         "method": "affine+mxtq",
         "group_size": 64,
-        "bits_default": 2,
+        "bits_default": EXPERT_BITS,
     },
 }
+# Stamp Tier-1 capabilities for vmlx CapabilityDetector. Idempotent.
+from jang_tools.capabilities import build_capabilities
+caps = build_capabilities(jang_config, config, OUT)
+if caps is not None:
+    jang_config["capabilities"] = caps
+    print(f"  capabilities: family={caps['family']} reasoning={caps['reasoning_parser']} "
+          f"tool={caps['tool_parser']} cache={caps['cache_type']} modality={caps['modality']}",
+          flush=True)
+else:
+    print("  WARNING: could not resolve capabilities — vmlx will fall back to "
+          "silver/bronze. Add the family to jang_tools/capabilities.py::FAMILY_MAP.",
+          flush=True)
+
 json.dump(jang_config, open(OUT / "jang_config.json", "w"), indent=2)
+
+# Validate the final jang_config — catch schema drift / typos / missing keys.
+from jang_tools.capabilities import verify_directory
+_ok, _msg = verify_directory(OUT)
+print(f"  verify: {_msg}")
+if not _ok:
+    raise SystemExit(f"capabilities verify failed: {_msg}")
 
 # Copy tokenizer / chat-template / VL preprocessor / custom .py files.
 # Downstream consumers (mlx-vlm, transformers) need the preprocessor configs
@@ -315,6 +337,21 @@ if _tok_cfg.exists():
             print("  [osaurus-fix] tokenizer_class: TokenizersBackend → GPT2Tokenizer", flush=True)
     except Exception as _e:
         print(f"  [osaurus-fix] skipped: {_e}", flush=True)
+
+# Build Swift runtime sidecar so Swift runtimes (vmlx-swift-lm, vmlxctl,
+# Osaurus) can load without fatalError. Python loader doesn't need it, but
+# uploading without it is a footgun — see research/JANGTQ-REFERENCE.md.
+print(f"\n  Building jangtq_runtime.safetensors sidecar...")
+try:
+    from jang_tools.build_jangtq_sidecar import main as _build_sidecar
+    _saved_argv = sys.argv
+    sys.argv = ["build_jangtq_sidecar", str(OUT)]
+    try:
+        _build_sidecar()
+    finally:
+        sys.argv = _saved_argv
+except (Exception, SystemExit) as _e:
+    print(f"  [sidecar] FAILED: {_e} — run `python3 -m jang_tools.build_jangtq_sidecar {OUT}` manually before upload", flush=True)
 
 print(f"\n  Done!")
 print(f"  MXTQ tensors: {total_mxtq}")

@@ -891,6 +891,24 @@ def convert_model(
         },
     }
 
+    # Stamp Tier-1 capabilities (reasoning/tool parser, cache type, modality)
+    # so vmlx CapabilityDetector picks the right parsers without falling back
+    # to silver/bronze. Reads `architecture.type` from this converter's schema.
+    from .capabilities import build_capabilities
+    _caps = build_capabilities(jang_config, model_config)
+    if _caps is not None:
+        jang_config["capabilities"] = _caps
+        print(
+            f"  capabilities: family={_caps['family']} "
+            f"reasoning={_caps['reasoning_parser']} tool={_caps['tool_parser']} "
+            f"cache={_caps['cache_type']} modality={_caps['modality']}"
+        )
+    else:
+        print(
+            "  WARNING: could not resolve capabilities — vmlx will fall back to "
+            "silver/bronze. Add the family to jang_tools/capabilities.py::FAMILY_MAP."
+        )
+
     # Copy tokenizer files. Be robust to non-UTF-8 locales and binary-ish
     # tokenizer assets (tokenizer.model is sentencepiece protobuf bytes;
     # merges.txt may have surrogate-encoded chars on some sources).
@@ -1028,6 +1046,13 @@ def convert_model(
         importance_data=importance_data,
         preflushed_map=_preflushed_map,
     )
+
+    # Validate the final jang_config — catch schema drift / typos / missing keys.
+    from .capabilities import verify_directory
+    _ok, _msg = verify_directory(output_path)
+    print(f"  verify: {_msg}")
+    if not _ok:
+        raise SystemExit(f"capabilities verify failed: {_msg}")
 
     # Clean up incremental flush state
     if hasattr(convert_model, '_shard_idx'):
