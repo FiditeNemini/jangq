@@ -120,7 +120,7 @@ Items below the active step are dimmed and unclickable until prereqs land — lo
 
 ### 2.5 Step 3 — Profile
 
-Two-tab segmented control: **JANG** (always enabled) / **JANGTQ** (enabled only when `detected.model_type ∈ {qwen3_5_moe, minimax_m2, glm_*}`; otherwise tab is greyed with tooltip *"JANGTQ supports Qwen 3.6, MiniMax, and GLM only — your model is X"*).
+Two-tab segmented control: **JANG** (always enabled) / **JANGTQ** (enabled only when `detected.model_type ∈ {qwen3_5_moe, minimax_m2}`; otherwise tab is greyed with tooltip *"JANGTQ supports Qwen 3.6 and MiniMax only (v1) — your model is X"*). GLM JANGTQ is deferred to v1.1 — see Open Item #4.
 
 **JANG tab** — grid of profile cards grouped by bit tier:
 - 2-bit: 2S / 2M / 2L / 1L
@@ -130,7 +130,7 @@ Two-tab segmented control: **JANG** (always enabled) / **JANGTQ** (enabled only 
 
 Each card shows: name, estimated output size (computed from param count × bits + overhead), critical/important/compress bit triple, recommended use case (1-line). Selected card glows blue.
 
-**JANGTQ tab** — three cards: JANGTQ2 / JANGTQ3 / JANGTQ4 with same size estimates, plus a footer: *"Routes to `convert_qwen35_jangtq.py` / `convert_minimax_jangtq.py` / GLM converter based on detected arch."*
+**JANGTQ tab** — three cards: JANGTQ2 / JANGTQ3 / JANGTQ4 with same size estimates, plus a footer: *"Routes to `convert_qwen35_jangtq.py` or `convert_minimax_jangtq.py` based on detected arch."*
 
 Below the cards:
 - **Output folder** picker (default = sibling dir `<source>-<profile>`)
@@ -211,7 +211,7 @@ actor PythonRunner {
   - `arguments` = `["-m", "jang_tools", "convert", src, "-o", out, "-p", profile, "-m", method, "--progress=json", "--quiet-text"] + (hadamard ? ["--hadamard"] : [])`. JANGTQ branch routes by detected `model_type`:
     - `qwen3_5_moe` → `-m jang_tools.convert_qwen35_jangtq <src> <out> <profile>`
     - `minimax_m2`  → `-m jang_tools.convert_minimax_jangtq <src> <out> <profile>`
-    - `glm_*`       → **see Open Item #4** (no `convert_glm_jangtq.py` exists yet — likely needs to be authored before the JANGTQ-on-GLM tab is enabled in v1)
+    - (GLM JANGTQ deferred to v1.1 — JANGTQ tab disabled for `glm_*`.)
   - `environment` = inherits + `PYTHONPATH` set to bundled site-packages, `PYTHONUNBUFFERED=1`, `PYTHONNOUSERSITE=1`, `JANG_PROGRESS=1`
   - `currentDirectoryURL` = chosen output dir's parent (clean relative paths in logs)
 - **Pipes** — separate `Pipe()` for stdout (text logs) and stderr (JSONL). Two `Task`s drain each pipe via `FileHandle.bytes.lines` async sequence — never block the main actor.
@@ -264,7 +264,7 @@ A 397B conversion produces ~50k tqdm ticks. Three guards:
 | 3 | Output dir resolvable + writable + not inside `.app` + not equal to source | filesystem | fail |
 | 4 | Disk free at output ≥ size estimate × 1.10 | `URLResourceValues.volumeAvailableCapacityForImportantUsage` | fail (with "free X GB needed") |
 | 5 | RAM ≥ source on-disk size × 1.5 | `ProcessInfo.physicalMemory` vs source GB | warn (`project_mxtq_load_expansion`: GLM-5 needed 384 GB+; warn but don't block) |
-| 6 | Family/architecture compatible: JANGTQ tab requires `model_type ∈ {qwen3_5_moe, minimax_m2, glm_*}` | detected summary | fail |
+| 6 | Family/architecture compatible: JANGTQ tab requires `model_type ∈ {qwen3_5_moe, minimax_m2}` (v1) | detected summary | fail |
 | 7 | JANGTQ source dtype is FP8 or BF16 | sniffed from header | fail |
 | 8 | At 2-bit profiles + `model_type` in known-512+-expert list, force bfloat16 (warn if user overrode to float16) | per `project_bfloat16_fix` | warn |
 | 9 | Hadamard rotation + 2-bit profile combination | per `project_hadamard_rotation` (Hadamard hurts 2-bit) | warn |
@@ -447,7 +447,7 @@ These were left as "sensible defaults" during brainstorming and should be revisi
 1. **Branding/theme** — default to system Apple HIG (light/dark mode follows OS); JANG accent color = the blue used in the JANG logo. Confirm with Eric before final asset pass.
 2. **Settings persistence** — `UserDefaults` for last source dir, last output dir, last profile, last advanced overrides. Reset via a Settings → Advanced → Reset button.
 3. **First-launch experience** — single welcome sheet on first run only: "JANG Studio converts HuggingFace models to JANG/JANGTQ for Apple Silicon. Bundled with python-build-standalone 3.11 + jang-tools v<version>." [Continue].
-4. **GLM JANGTQ converter — BLOCKING for v1 GLM JANGTQ support.** `jang_tools/` ships `convert_minimax_jangtq.py` and `convert_qwen35_jangtq.py` but **no `convert_glm_jangtq.py`**. GLM-5.1 JANGTQ artifacts exist on Eric's drive (`/Volumes/EricsLLMDrive/GLM-5.1-JANGTQ_1L`) so a conversion path exists *somewhere* — likely a private/ad-hoc script, or via `convert_mxtq_to_jang.py` after a regular `jang convert` step. **Required before implementation:** (a) decide whether GLM JANGTQ is in v1 or punted to v1.1, (b) if v1, author `convert_glm_jangtq.py` modeled on the qwen35 one, (c) if punted, the JANGTQ tab gates on `{qwen3_5_moe, minimax_m2}` only and shows GLM as "coming soon".
+4. **GLM JANGTQ — deferred to v1.1.** `jang_tools/` ships `convert_minimax_jangtq.py` and `convert_qwen35_jangtq.py` but not `convert_glm_jangtq.py`. Decision (2026-04-18): v1 ships Qwen + MiniMax JANGTQ only. GLM flows through regular `jang convert` (the standard JANG path handles `glm_moe_dsa` via MLA + FP8 dequant — see `scripts/convert-glm51.sh`). JANGTQ tab is disabled for `glm_*`; tooltip says "JANGTQ for GLM coming in v1.1". When v1.1 adds it, update the preflight check in §4.1 row 6 and the JANGTQ tab gate in §2.5.
 
 ---
 
@@ -457,7 +457,7 @@ A v1 release is considered shippable when:
 
 - ✅ Notarized DMG builds in CI on a tag push
 - ✅ A user with a fresh Mac (no Python, no `jang-tools`) can install the DMG and successfully convert a 1B HuggingFace model to JANG_4K end-to-end (5 wizard steps + verifier all green)
-- ✅ A user with a Qwen 3.6 model can convert to JANGTQ3; JANGTQ tab is correctly disabled for an unsupported architecture
+- ✅ A user with a Qwen 3.6 model can convert to JANGTQ3; a user with a MiniMax model can convert to JANGTQ2/3/4; JANGTQ tab is correctly disabled for all other architectures (including GLM in v1)
 - ✅ Cancellation mid-quantize cleanly terminates the subprocess and offers Delete/Keep
 - ✅ All 12 verifier checks fire correctly on a known-good output and a deliberately-broken output (missing chat template, missing tokenizer)
 - ✅ Diagnostics bundle reproduces a captured failure end-to-end
