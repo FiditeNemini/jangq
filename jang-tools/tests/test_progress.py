@@ -2,7 +2,6 @@
 """Tests for jang_tools.progress — ProgressEmitter API and JSONL schema."""
 import io
 import json
-import time
 import pytest
 
 from jang_tools.progress import ProgressEmitter
@@ -46,6 +45,8 @@ def test_event_warn_and_info():
     assert evs[0]["type"] == "warn"
     assert evs[0]["msg"] == "No chat template found"
     assert evs[1]["type"] == "info"
+    em.event("error", "Database connection failed")
+    assert _drain(em)[2]["type"] == "error"
 
 
 def test_done_success_and_failure():
