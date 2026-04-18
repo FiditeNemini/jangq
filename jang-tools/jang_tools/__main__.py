@@ -6,8 +6,10 @@ Created by Jinho Jang (eric@jangq.ai)
 import argparse
 import json
 import sys
+import time
 
 from . import __version__
+from .progress import ProgressEmitter, make_noop
 
 BANNER = f"""
   ╔══════════════════════════════════════════════════════╗
@@ -201,6 +203,14 @@ def main():
         description="JANG: Mixed-Precision Importance Quantization for Apple Silicon",
     )
     parser.add_argument("--version", action="version", version=f"jang-tools {__version__}")
+    parser.add_argument(
+        "--progress", choices=["json", "off"], default="off",
+        help="Emit JSONL progress events on stderr (for GUIs).",
+    )
+    parser.add_argument(
+        "--quiet-text", action="store_true",
+        help="Suppress human-readable phase/progress prints on stdout.",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     # inspect
@@ -259,8 +269,26 @@ def main():
         parser.print_help()
         sys.exit(0)
 
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return
+
     print(BANNER)
-    args.func(args)
+    progress = ProgressEmitter(
+        json_to_stderr=(args.progress == "json"),
+        quiet_text=args.quiet_text,
+    )
+    args.progress_emitter = progress
+    t0 = time.time()
+    try:
+        args.func(args)
+        progress.done(ok=True, elapsed_s=time.time() - t0)
+    except SystemExit as e:
+        progress.done(ok=False, error=f"exit-code-{e.code}", elapsed_s=time.time() - t0)
+        raise
+    except Exception as e:
+        progress.done(ok=False, error=f"{type(e).__name__}: {e}", elapsed_s=time.time() - t0)
+        raise
 
 
 if __name__ == "__main__":
