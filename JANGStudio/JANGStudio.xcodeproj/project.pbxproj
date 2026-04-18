@@ -1,0 +1,510 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		0028C3218391F535DC0BAE35 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D324A78A6B759B0FB34C620F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AB0DED9685435B483219CC32;
+			remoteInfo = JANGStudio;
+		};
+		1CE2475E34C66BAB13D6FE6B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D324A78A6B759B0FB34C620F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AB0DED9685435B483219CC32;
+			remoteInfo = JANGStudio;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		4AFCA6EF17ACDF8C518375DA /* JANGStudio.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = JANGStudio.entitlements; sourceTree = "<group>"; };
+		585147A25208BDB4C34E4EDF /* JANGStudio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JANGStudio.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5B4B6490B253FA54266EA0EF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		65E6BD1572E3801538830D75 /* JANGStudioUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9041F5409595020F642815F2 /* .keep */ = {isa = PBXFileReference; path = .keep; sourceTree = "<group>"; };
+		C6D3A1C8A36AEE5B62A33F67 /* .keep */ = {isa = PBXFileReference; path = .keep; sourceTree = "<group>"; };
+		C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JANGStudioApp.swift; sourceTree = "<group>"; };
+		D751476D77F0C9FC588A5A0B /* JANGStudioTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		33BA8324CD24CC9FF36D2409 /* JANGStudio */ = {
+			isa = PBXGroup;
+			children = (
+				A485AB6BA3487317E7410904 /* App */,
+				AD8AA33483E82D038BB0CC9C /* Resources */,
+			);
+			path = JANGStudio;
+			sourceTree = "<group>";
+		};
+		434607B01F71E749C5E2B4EF /* JANGStudioTests */ = {
+			isa = PBXGroup;
+			children = (
+				9041F5409595020F642815F2 /* .keep */,
+			);
+			name = JANGStudioTests;
+			path = Tests/JANGStudioTests;
+			sourceTree = "<group>";
+		};
+		4CB2EEEB2FF6014E22F26C31 /* JANGStudioUITests */ = {
+			isa = PBXGroup;
+			children = (
+				C6D3A1C8A36AEE5B62A33F67 /* .keep */,
+			);
+			name = JANGStudioUITests;
+			path = Tests/JANGStudioUITests;
+			sourceTree = "<group>";
+		};
+		A485AB6BA3487317E7410904 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		AD8AA33483E82D038BB0CC9C /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				5B4B6490B253FA54266EA0EF /* Info.plist */,
+				4AFCA6EF17ACDF8C518375DA /* JANGStudio.entitlements */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		D6942F5C3170FEFB5C318950 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				585147A25208BDB4C34E4EDF /* JANGStudio.app */,
+				D751476D77F0C9FC588A5A0B /* JANGStudioTests.xctest */,
+				65E6BD1572E3801538830D75 /* JANGStudioUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D8812414D87996E91BA177BA = {
+			isa = PBXGroup;
+			children = (
+				33BA8324CD24CC9FF36D2409 /* JANGStudio */,
+				434607B01F71E749C5E2B4EF /* JANGStudioTests */,
+				4CB2EEEB2FF6014E22F26C31 /* JANGStudioUITests */,
+				D6942F5C3170FEFB5C318950 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		126FB6E7647D26E1A3093DB5 /* JANGStudioTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7685FA44F7B5A1A4DF2FEEE4 /* Build configuration list for PBXNativeTarget "JANGStudioTests" */;
+			buildPhases = (
+				A7BCF7830D25AC4A57CBD16B /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				871C9E6B8F51435F2C526D89 /* PBXTargetDependency */,
+			);
+			name = JANGStudioTests;
+			packageProductDependencies = (
+			);
+			productName = JANGStudioTests;
+			productReference = D751476D77F0C9FC588A5A0B /* JANGStudioTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		AB0DED9685435B483219CC32 /* JANGStudio */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C73A87BCC2E34056120D63A6 /* Build configuration list for PBXNativeTarget "JANGStudio" */;
+			buildPhases = (
+				AA9B30409B6CE70BCA852885 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = JANGStudio;
+			packageProductDependencies = (
+			);
+			productName = JANGStudio;
+			productReference = 585147A25208BDB4C34E4EDF /* JANGStudio.app */;
+			productType = "com.apple.product-type.application";
+		};
+		FD45E52E59DA496351CA4E27 /* JANGStudioUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8B4315BE188271A01138CE60 /* Build configuration list for PBXNativeTarget "JANGStudioUITests" */;
+			buildPhases = (
+				9C44E762F59E59B0FCA635D9 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				824B52413827BEBE1DE9DE99 /* PBXTargetDependency */,
+			);
+			name = JANGStudioUITests;
+			packageProductDependencies = (
+			);
+			productName = JANGStudioUITests;
+			productReference = 65E6BD1572E3801538830D75 /* JANGStudioUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		D324A78A6B759B0FB34C620F /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					126FB6E7647D26E1A3093DB5 = {
+						DevelopmentTeam = "";
+					};
+					AB0DED9685435B483219CC32 = {
+						DevelopmentTeam = "";
+					};
+					FD45E52E59DA496351CA4E27 = {
+						DevelopmentTeam = "";
+						TestTargetID = AB0DED9685435B483219CC32;
+					};
+				};
+			};
+			buildConfigurationList = E8EA1C589AEF28714BD586D0 /* Build configuration list for PBXProject "JANGStudio" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = D8812414D87996E91BA177BA;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = D6942F5C3170FEFB5C318950 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AB0DED9685435B483219CC32 /* JANGStudio */,
+				126FB6E7647D26E1A3093DB5 /* JANGStudioTests */,
+				FD45E52E59DA496351CA4E27 /* JANGStudioUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		9C44E762F59E59B0FCA635D9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A7BCF7830D25AC4A57CBD16B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA9B30409B6CE70BCA852885 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		824B52413827BEBE1DE9DE99 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AB0DED9685435B483219CC32 /* JANGStudio */;
+			targetProxy = 0028C3218391F535DC0BAE35 /* PBXContainerItemProxy */;
+		};
+		871C9E6B8F51435F2C526D89 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AB0DED9685435B483219CC32 /* JANGStudio */;
+			targetProxy = 1CE2475E34C66BAB13D6FE6B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		258D2AE31856888D7CA7B597 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.jangq.JANGStudioTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/JANGStudio.app/Contents/MacOS/JANGStudio";
+			};
+			name = Debug;
+		};
+		2F6B3E667D306DD9EF49B697 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = JANGStudio/Resources/JANGStudio.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = JANGStudio/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.jangq.JANGStudio;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		61E7885FF373A9EFB7EC1A82 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "-";
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		6A2A6FB6C06B8E00758894AB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.jangq.JANGStudioUITests;
+				SDKROOT = macosx;
+				TEST_TARGET_NAME = JANGStudio;
+			};
+			name = Release;
+		};
+		6B6FBE791AF1CC30EECF1945 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.jangq.JANGStudioTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/JANGStudio.app/Contents/MacOS/JANGStudio";
+			};
+			name = Release;
+		};
+		A66A9F12E43EF35C76D3A550 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = JANGStudio/Resources/JANGStudio.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = JANGStudio/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.jangq.JANGStudio;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		EE6BADF06B30CD7C85CEA156 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "-";
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		F4F9C89E9765FF74F3AAF35C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.jangq.JANGStudioUITests;
+				SDKROOT = macosx;
+				TEST_TARGET_NAME = JANGStudio;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		7685FA44F7B5A1A4DF2FEEE4 /* Build configuration list for PBXNativeTarget "JANGStudioTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				258D2AE31856888D7CA7B597 /* Debug */,
+				6B6FBE791AF1CC30EECF1945 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8B4315BE188271A01138CE60 /* Build configuration list for PBXNativeTarget "JANGStudioUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F4F9C89E9765FF74F3AAF35C /* Debug */,
+				6A2A6FB6C06B8E00758894AB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C73A87BCC2E34056120D63A6 /* Build configuration list for PBXNativeTarget "JANGStudio" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2F6B3E667D306DD9EF49B697 /* Debug */,
+				A66A9F12E43EF35C76D3A550 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E8EA1C589AEF28714BD586D0 /* Build configuration list for PBXProject "JANGStudio" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				61E7885FF373A9EFB7EC1A82 /* Debug */,
+				EE6BADF06B30CD7C85CEA156 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = D324A78A6B759B0FB34C620F /* Project object */;
+}

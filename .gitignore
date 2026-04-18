@@ -69,3 +69,9 @@ jang-tools/jang_tools/turboquant/
 
 # Vectors (experimental)
 vectors/
+
+# JANGStudio
+JANGStudio/build/
+JANGStudio/JANGStudio.xcodeproj/xcuserdata/
+JANGStudio/DerivedData/
+.superpowers/
