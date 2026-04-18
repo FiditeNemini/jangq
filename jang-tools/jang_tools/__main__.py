@@ -263,6 +263,9 @@ def main():
     p_spec = subparsers.add_parser("spec", help="jang-spec bundle tooling")
     _register_spec(p_spec)
 
+    from .inspect_source import register as _register_inspect_source
+    _register_inspect_source(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -274,7 +277,9 @@ def main():
         parser.print_help()
         return
 
-    print(BANNER)
+    suppress_banner = args.quiet_text or (args.command == "inspect-source" and getattr(args, "json", False))
+    if not suppress_banner:
+        print(BANNER)
     progress = ProgressEmitter(
         json_to_stderr=(args.progress == "json"),
         quiet_text=args.quiet_text,

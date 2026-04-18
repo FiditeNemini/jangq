@@ -1,0 +1,9 @@
+{
+  "model_type": "qwen3_5_moe",
+  "hidden_size": 128,
+  "num_hidden_layers": 2,
+  "num_attention_heads": 4,
+  "vocab_size": 1024,
+  "num_experts": 8,
+  "torch_dtype": "bfloat16"
+}

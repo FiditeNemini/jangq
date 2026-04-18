@@ -1,0 +1,76 @@
+"""Fast, no-model-load source inspector. Used by JANG Studio's Step 1."""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+# v1 JANGTQ whitelist — synced with JANG Studio spec §2.5
+_JANGTQ_V1_WHITELIST = {"qwen3_5_moe", "minimax_m2"}
+
+
+def _sniff_dtype(model_path: Path) -> str:
+    """Peek at the first safetensors shard header to determine source dtype."""
+    shards = sorted(model_path.glob("*.safetensors"))
+    if not shards:
+        return "unknown"
+    try:
+        import struct
+        with open(shards[0], "rb") as fh:
+            hdr_len = struct.unpack("<Q", fh.read(8))[0]
+            hdr = json.loads(fh.read(hdr_len))
+        dtypes = {v.get("dtype") for k, v in hdr.items() if isinstance(v, dict) and "dtype" in v}
+        for preferred in ("BF16", "F16", "F8_E4M3", "F8_E5M2"):
+            if preferred in dtypes:
+                return {
+                    "BF16": "bfloat16", "F16": "float16",
+                    "F8_E4M3": "float8_e4m3fn", "F8_E5M2": "float8_e5m2",
+                }[preferred]
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _is_moe(cfg: dict) -> bool:
+    for key in ("num_experts", "n_routed_experts", "num_local_experts"):
+        if cfg.get(key, 0) and int(cfg[key]) > 1:
+            return True
+    return False
+
+
+def _total_bytes(model_path: Path) -> int:
+    return sum(f.stat().st_size for f in model_path.glob("*.safetensors"))
+
+
+def cmd_inspect_source(args) -> None:
+    src = Path(args.model)
+    cfg_path = src / "config.json"
+    if not cfg_path.exists():
+        print(f"ERROR: config.json not found under {src}", file=sys.stderr)
+        sys.exit(2)
+    cfg = json.loads(cfg_path.read_text())
+    model_type = cfg.get("model_type") or cfg.get("text_config", {}).get("model_type", "unknown")
+    summary = {
+        "model_type": model_type,
+        "is_moe": _is_moe(cfg),
+        "num_experts": int(cfg.get("num_experts") or cfg.get("n_routed_experts") or 0),
+        "num_hidden_layers": int(cfg.get("num_hidden_layers", 0)),
+        "hidden_size": int(cfg.get("hidden_size", 0)),
+        "dtype": _sniff_dtype(src),
+        "total_bytes": _total_bytes(src),
+        "shard_count": len(list(src.glob("*.safetensors"))),
+        "jangtq_compatible": model_type in _JANGTQ_V1_WHITELIST,
+        "is_vl": bool((src / "preprocessor_config.json").exists()),
+    }
+    if args.json:
+        print(json.dumps(summary, indent=None, separators=(",", ":")))
+    else:
+        for k, v in summary.items():
+            print(f"  {k}: {v}")
+
+
+def register(subparsers) -> None:
+    p = subparsers.add_parser("inspect-source", help="Fast source-model inspector")
+    p.add_argument("model", help="Path to HuggingFace model directory")
+    p.add_argument("--json", action="store_true", help="Emit single JSON line on stdout")
+    p.set_defaults(func=cmd_inspect_source)
