@@ -1,5 +1,7 @@
 # Models & weights
 models/
+# Allow JANGStudio Swift Models source folder (case-insensitive match above would block it)
+!JANGStudio/JANGStudio/Models/
 *.whl
 *.tar.gz
 *.safetensors

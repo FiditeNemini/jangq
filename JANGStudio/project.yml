@@ -45,8 +45,18 @@ targets:
     platform: macOS
     sources: [Tests/JANGStudioTests]
     dependencies: [{target: JANGStudio}]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
   JANGStudioUITests:
     type: bundle.ui-testing
     platform: macOS
     sources: [Tests/JANGStudioUITests]
     dependencies: [{target: JANGStudio}]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
