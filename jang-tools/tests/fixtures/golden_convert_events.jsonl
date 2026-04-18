@@ -1,0 +1,11 @@
+{"type":"phase","n":1,"total":5,"name":"detect","v":1,"ts":1776545882.1536489}
+{"type":"info","msg":"Detected qwen3_5_moe \u2014 256 experts, MLA","v":1,"ts":1776545882.153731}
+{"type":"phase","n":2,"total":5,"name":"calibrate","v":1,"ts":1776545882.153746}
+{"type":"phase","n":3,"total":5,"name":"allocate","v":1,"ts":1776545882.153756}
+{"type":"info","msg":"Profile JANG_4K: 4/4/8 bits","v":1,"ts":1776545882.153763}
+{"type":"phase","n":4,"total":5,"name":"quantize","v":1,"ts":1776545882.1537678}
+{"type":"tick","done":0,"total":100,"label":"layer.0.gate_proj","v":1,"ts":1776545882.153777}
+{"type":"tick","done":100,"total":100,"label":"done","v":1,"ts":1776545882.153787}
+{"type":"warn","msg":"No chat template found; will warn in verify","v":1,"ts":1776545882.153793}
+{"type":"phase","n":5,"total":5,"name":"write","v":1,"ts":1776545882.1537979}
+{"type":"done","ok":true,"output":"/tmp/out","elapsed_s":42.5,"v":1,"ts":1776545882.153804}
