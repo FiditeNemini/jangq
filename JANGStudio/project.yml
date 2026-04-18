@@ -44,6 +44,8 @@ targets:
     type: bundle.unit-test
     platform: macOS
     sources: [Tests/JANGStudioTests]
+    resources:
+      - path: Tests/JANGStudioTests/Fixtures
     dependencies: [{target: JANGStudio}]
     settings:
       base:

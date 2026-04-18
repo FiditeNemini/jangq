@@ -7,9 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */; };
 		43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = E694F8C56C73EE3B6ADC6A9F /* ConversionPlan.swift */; };
 		8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */; };
 		92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */; };
+		9480E209FB0E63DFC3C755D1 /* JSONLProgressParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */; };
+		D62D076907E51839A85394A7 /* ProgressEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6828352632D9B1B484170875 /* ProgressEvent.swift */; };
+		FEC1431FD8D0953599C2EFB3 /* golden_convert_events.jsonl in Resources */ = {isa = PBXBuildFile; fileRef = 09F5FDF4434AA3EE0A055A4A /* golden_convert_events.jsonl */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,16 +34,20 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		09F5FDF4434AA3EE0A055A4A /* golden_convert_events.jsonl */ = {isa = PBXFileReference; path = golden_convert_events.jsonl; sourceTree = "<group>"; };
+		17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONLProgressParser.swift; sourceTree = "<group>"; };
 		4AFCA6EF17ACDF8C518375DA /* JANGStudio.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = JANGStudio.entitlements; sourceTree = "<group>"; };
 		585147A25208BDB4C34E4EDF /* JANGStudio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JANGStudio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5B4B6490B253FA54266EA0EF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversionPlanTests.swift; sourceTree = "<group>"; };
 		65E6BD1572E3801538830D75 /* JANGStudioUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		6828352632D9B1B484170875 /* ProgressEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressEvent.swift; sourceTree = "<group>"; };
 		9041F5409595020F642815F2 /* .keep */ = {isa = PBXFileReference; path = .keep; sourceTree = "<group>"; };
 		C6D3A1C8A36AEE5B62A33F67 /* .keep */ = {isa = PBXFileReference; path = .keep; sourceTree = "<group>"; };
 		C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JANGStudioApp.swift; sourceTree = "<group>"; };
 		D751476D77F0C9FC588A5A0B /* JANGStudioTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E694F8C56C73EE3B6ADC6A9F /* ConversionPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversionPlan.swift; sourceTree = "<group>"; };
+		FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONLProgressParserTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -49,6 +57,7 @@
 				A485AB6BA3487317E7410904 /* App */,
 				4ECBC55FCA16B1D98FEA2703 /* Models */,
 				AD8AA33483E82D038BB0CC9C /* Resources */,
+				B6BABCDD952B5EE87961EB17 /* Runner */,
 			);
 			path = JANGStudio;
 			sourceTree = "<group>";
@@ -58,6 +67,8 @@
 			children = (
 				9041F5409595020F642815F2 /* .keep */,
 				5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */,
+				FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */,
+				65A4A1ADE592042CE25311E7 /* Fixtures */,
 			);
 			name = JANGStudioTests;
 			path = Tests/JANGStudioTests;
@@ -76,8 +87,17 @@
 			isa = PBXGroup;
 			children = (
 				E694F8C56C73EE3B6ADC6A9F /* ConversionPlan.swift */,
+				6828352632D9B1B484170875 /* ProgressEvent.swift */,
 			);
 			path = Models;
+			sourceTree = "<group>";
+		};
+		65A4A1ADE592042CE25311E7 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				09F5FDF4434AA3EE0A055A4A /* golden_convert_events.jsonl */,
+			);
+			path = Fixtures;
 			sourceTree = "<group>";
 		};
 		A485AB6BA3487317E7410904 /* App */ = {
@@ -95,6 +115,14 @@
 				4AFCA6EF17ACDF8C518375DA /* JANGStudio.entitlements */,
 			);
 			path = Resources;
+			sourceTree = "<group>";
+		};
+		B6BABCDD952B5EE87961EB17 /* Runner */ = {
+			isa = PBXGroup;
+			children = (
+				17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */,
+			);
+			path = Runner;
 			sourceTree = "<group>";
 		};
 		D6942F5C3170FEFB5C318950 /* Products */ = {
@@ -125,6 +153,7 @@
 			buildConfigurationList = 7685FA44F7B5A1A4DF2FEEE4 /* Build configuration list for PBXNativeTarget "JANGStudioTests" */;
 			buildPhases = (
 				A7BCF7830D25AC4A57CBD16B /* Sources */,
+				170170D00F7FD6A80380B9C8 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -215,6 +244,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		170170D00F7FD6A80380B9C8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FEC1431FD8D0953599C2EFB3 /* golden_convert_events.jsonl in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		9C44E762F59E59B0FCA635D9 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -228,6 +268,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */,
+				3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -237,6 +278,8 @@
 			files = (
 				43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */,
 				8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */,
+				9480E209FB0E63DFC3C755D1 /* JSONLProgressParser.swift in Sources */,
+				D62D076907E51839A85394A7 /* ProgressEvent.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
