@@ -189,6 +189,7 @@ def cmd_convert(args):
         profile=profile,
         quantization_method=args.method,
         hadamard=args.hadamard,
+        progress_emitter=getattr(args, "progress_emitter", None),
     )
 
     print(f"\n  Profile: {profile}")

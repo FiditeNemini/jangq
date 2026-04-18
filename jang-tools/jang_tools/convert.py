@@ -103,6 +103,8 @@ def convert_model(
     profile: Optional[str] = None,
     hadamard: bool = False,
     gptq_hessian_dir: Optional[str | Path] = None,
+    *,
+    progress_emitter=None,
 ) -> dict:
     """
     Convert a HuggingFace model to JANG v2 format.
@@ -123,6 +125,9 @@ def convert_model(
     Returns:
         dict with conversion results and quality metrics
     """
+    from .progress import make_noop
+    progress = progress_emitter if progress_emitter is not None else make_noop()
+
     model_path = Path(model_path)
     output_path = Path(output_path)
 
@@ -141,6 +146,9 @@ def convert_model(
     print(f"  Hadamard rotation: {'yes' if hadamard else 'no'}")
     print(f"{'='*60}\n")
 
+    # Step 1: Detect architecture
+    progress.phase(1, 5, "detect")
+
     # Check source model exists
     if not (model_path / "config.json").exists():
         raise FileNotFoundError(
@@ -150,9 +158,6 @@ def convert_model(
     # Check tie_word_embeddings early
     _raw_config = json.loads((model_path / "config.json").read_text())
     _tie_embeddings = _raw_config.get("tie_word_embeddings", False) or _raw_config.get("text_config", {}).get("tie_word_embeddings", False)
-
-    # Step 1: Detect architecture
-    print("  [1/5] Detecting architecture...")
     arch_config = detect_architecture(model_path)
     print(f"  {summarize_architecture(arch_config)}\n")
 
@@ -196,7 +201,7 @@ def convert_model(
         needs_calibration = False
 
     if needs_calibration:
-        print("  [2/5] Calibrating...")
+        progress.phase(2, 5, "calibrate")
         if imatrix_path:
             from safetensors.numpy import load_file
             importance_data = load_file(str(imatrix_path))
@@ -212,7 +217,7 @@ def convert_model(
             imatrix_out = output_path / "jang_imatrix.safetensors" if output_path else None
             importance_data = calibrate_with_activations(model_path, block_size=block_size, output_path=imatrix_out)
     else:
-        print("  [2/5] Skipping calibration (not needed for profile/K-quant allocation)")
+        progress.phase(2, 5, "skip-calibration")
         importance_data = {}
 
     # Step 2b: AWQ activation norms (optional)
@@ -227,7 +232,7 @@ def convert_model(
             use_awq = False
 
     # Step 3: Load weights and allocate bits
-    print("\n  [3/5] Allocating bits...")
+    progress.phase(3, 5, "allocate")
     skip_patterns = get_skip_tensors(arch_config)
     weight_files = sorted(model_path.glob("*.safetensors"))
 
@@ -428,7 +433,7 @@ def convert_model(
         print(f"    Consider using a higher-bit profile or reclassifying these tensors.\n")
 
     # Step 4: Quantize and build MLX-native tensors
-    print(f"\n  [4/5] Quantizing to MLX-native format ({quantization_method})...")
+    progress.phase(4, 5, "quantize")
 
     # v2 output: flat dict of tensor_name → numpy array (MLX format)
     v2_tensors = {}
@@ -436,7 +441,9 @@ def convert_model(
     expert_buffer = {}  # (layer_prefix, wtype) → {expert_id: {weight, scales, biases}}
     passthrough = {}
 
-    for tensor_name, shape, n_blocks, sf_path in tqdm(all_tensors_info, desc="  Quantizing"):
+    total_tensors = len(all_tensors_info)
+    for i, (tensor_name, shape, n_blocks, sf_path) in enumerate(all_tensors_info):
+        progress.tick(i, total_tensors, tensor_name)
         # Skip vision conv weights — Conv3d/Conv2d needs float, not uint32.
         # These are passthrough tensors that get saved as float16.
         name_lower = tensor_name.lower()
@@ -760,6 +767,8 @@ def convert_model(
             v2_tensors.clear()
             import gc; gc.collect()
 
+    progress.tick(total_tensors, total_tensors, "done")
+
     # --- Stack per-expert 2D weights into 3D QuantizedSwitchLinear format ---
     if expert_buffer:
         print(f"  Stacking {len(expert_buffer)} expert groups into 3D...")
@@ -836,7 +845,7 @@ def convert_model(
     v2_tensors.update(passthrough)
 
     # Step 5: Write JANG v2 model
-    print(f"\n  [5/5] Writing JANG v2 model (MLX-native)...")
+    progress.phase(5, 5, "write")
 
     # Account for pre-flushed shards (incremental shard flush for large models)
     _preflushed_map = getattr(convert_model, '_shard_map', {})
