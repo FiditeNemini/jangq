@@ -40,12 +40,25 @@ Profiles:
   JANGTQ_4M            — expert=4 (smallest quality delta vs bf16, ~2× disk of 2L)
 """
 import sys, json, gc, shutil, re
+import argparse
 import numpy as np
 import mlx.core as mx
 from pathlib import Path
 from tqdm import tqdm
 from safetensors import safe_open
 from safetensors.numpy import save_file
+
+_ap = argparse.ArgumentParser(add_help=False)
+_ap.add_argument("--progress", choices=["json", "off"], default="off")
+_ap.add_argument("--quiet-text", action="store_true")
+_args, _rest = _ap.parse_known_args()
+sys.argv = [sys.argv[0]] + _rest
+
+from jang_tools.progress import ProgressEmitter
+progress = ProgressEmitter(
+    json_to_stderr=(_args.progress == "json"),
+    quiet_text=_args.quiet_text,
+)
 
 from jang_tools.calibrate import _load_bf16_tensor
 from jang_tools.turboquant.linear import tq_quantize_weight, tq_quantize_experts
@@ -60,447 +73,456 @@ if SRC is None or OUT is None:
     print(__doc__)
     sys.exit(1)
 
-OUT.mkdir(parents=True, exist_ok=True)
+try:
+    OUT.mkdir(parents=True, exist_ok=True)
 
-config = json.load(open(SRC / "config.json"))
-text_cfg = config.get("text_config", config)
-n_layers = text_cfg["num_hidden_layers"]
-# Qwen3.6: 256 routed experts + 1 shared
-n_experts = text_cfg.get("num_experts", text_cfg.get("num_local_experts", 0))
-shared_exp_inter = text_cfg.get("shared_expert_intermediate_size", 0)
-
-
-# === Bit assignment ===
-# Canonical profile names: JANGTQ{N} where N = routed-expert bit count.
-# Legacy suffix forms (JANGTQ_2L, _4M, etc.) are accepted as aliases for
-# backwards compatibility; the canonical form is what lands in jang_config.
-_EXPERT_BITS_BY_PROFILE = {
-    "JANGTQ2": 2, "JANGTQ_2L": 2, "JANGTQ_2S": 2,
-    "JANGTQ3": 3, "JANGTQ_3L": 3, "JANGTQ_3S": 3,
-    "JANGTQ4": 4, "JANGTQ_4M": 4, "JANGTQ_4K": 4,
-}
-# Case-insensitive lookup; canonicalize to JANGTQ{N}.
-_PROFILE_NORM = PROFILE.upper()
-EXPERT_BITS = _EXPERT_BITS_BY_PROFILE.get(_PROFILE_NORM, 2)
-PROFILE = f"JANGTQ{EXPERT_BITS}"
+    config = json.load(open(SRC / "config.json"))
+    text_cfg = config.get("text_config", config)
+    n_layers = text_cfg["num_hidden_layers"]
+    # Qwen3.6: 256 routed experts + 1 shared
+    n_experts = text_cfg.get("num_experts", text_cfg.get("num_local_experts", 0))
+    shared_exp_inter = text_cfg.get("shared_expert_intermediate_size", 0)
 
 
-def get_bits_and_method(tensor_name):
-    """Return (bits, method, out_name).
+    # === Bit assignment ===
+    # Canonical profile names: JANGTQ{N} where N = routed-expert bit count.
+    # Legacy suffix forms (JANGTQ_2L, _4M, etc.) are accepted as aliases for
+    # backwards compatibility; the canonical form is what lands in jang_config.
+    _EXPERT_BITS_BY_PROFILE = {
+        "JANGTQ2": 2, "JANGTQ_2L": 2, "JANGTQ_2S": 2,
+        "JANGTQ3": 3, "JANGTQ_3L": 3, "JANGTQ_3S": 3,
+        "JANGTQ4": 4, "JANGTQ_4M": 4, "JANGTQ_4K": 4,
+    }
+    # Case-insensitive lookup; canonicalize to JANGTQ{N}.
+    _PROFILE_NORM = PROFILE.upper()
+    EXPERT_BITS = _EXPERT_BITS_BY_PROFILE.get(_PROFILE_NORM, 2)
+    PROFILE = f"JANGTQ{EXPERT_BITS}"
 
-    `method`   ∈ {"passthrough", "affine", "mxtq", "skip"}
-    `out_name` = None means use the input name verbatim; else rename.
-    """
-    name = tensor_name.lower()
 
-    # Drop MTP head — keep source shards around for jang-spec but not in JANGTQ output.
-    # (If you want MTP included, change this to "passthrough".)
-    if tensor_name.startswith("mtp.") or ".mtp" in tensor_name:
-        return (0, "skip", None)
+    def get_bits_and_method(tensor_name):
+        """Return (bits, method, out_name).
 
-    # Preserve vision tower as-is (bf16 → f16 passthrough) — always-VL rule.
-    if tensor_name.startswith("vision_tower") or tensor_name.startswith("model.visual"):
-        return (16, "passthrough", None)
+        `method`   ∈ {"passthrough", "affine", "mxtq", "skip"}
+        `out_name` = None means use the input name verbatim; else rename.
+        """
+        name = tensor_name.lower()
 
-    # Norms (input_layernorm, post_attention_layernorm, q_norm, k_norm, linear_attn.norm,
-    # RMSNormGated.norm, model.norm, lm_head norm etc) → passthrough fp16
-    if tensor_name.endswith("norm.weight") or tensor_name.endswith(".norm"):
-        return (16, "passthrough", None)
+        # Drop MTP head — keep source shards around for jang-spec but not in JANGTQ output.
+        # (If you want MTP included, change this to "passthrough".)
+        if tensor_name.startswith("mtp.") or ".mtp" in tensor_name:
+            return (0, "skip", None)
 
-    # 1-D Mamba-ish tensors: A_log, dt_bias → passthrough fp16
-    if tensor_name.endswith(".A_log") or tensor_name.endswith(".dt_bias"):
-        return (16, "passthrough", None)
-
-    # conv1d (grouped 1D conv in GatedDeltaNet) → passthrough fp16
-    if tensor_name.endswith("conv1d.weight"):
-        return (16, "passthrough", None)
-
-    # Router gate (mlp.gate.weight) and shared_expert_gate (sigmoid scalar gate) → passthrough fp16
-    if tensor_name.endswith(".mlp.gate.weight") or ".gate.weight" == tensor_name[-len(".gate.weight"):]:
-        # Guard against matching e.g. "gate_proj.weight" — that's handled below.
-        if "gate_proj" not in tensor_name and "up_proj" not in tensor_name and "down_proj" not in tensor_name:
+        # Preserve vision tower as-is (bf16 → f16 passthrough) — always-VL rule.
+        if tensor_name.startswith("vision_tower") or tensor_name.startswith("model.visual"):
             return (16, "passthrough", None)
-    if tensor_name.endswith("shared_expert_gate.weight"):
-        return (16, "passthrough", None)
 
-    # Embeddings / lm_head → affine 8-bit
-    if "embed_tokens" in tensor_name or tensor_name.endswith("lm_head.weight") or tensor_name == "lm_head.weight":
+        # Norms (input_layernorm, post_attention_layernorm, q_norm, k_norm, linear_attn.norm,
+        # RMSNormGated.norm, model.norm, lm_head norm etc) → passthrough fp16
+        if tensor_name.endswith("norm.weight") or tensor_name.endswith(".norm"):
+            return (16, "passthrough", None)
+
+        # 1-D Mamba-ish tensors: A_log, dt_bias → passthrough fp16
+        if tensor_name.endswith(".A_log") or tensor_name.endswith(".dt_bias"):
+            return (16, "passthrough", None)
+
+        # conv1d (grouped 1D conv in GatedDeltaNet) → passthrough fp16
+        if tensor_name.endswith("conv1d.weight"):
+            return (16, "passthrough", None)
+
+        # Router gate (mlp.gate.weight) and shared_expert_gate (sigmoid scalar gate) → passthrough fp16
+        if tensor_name.endswith(".mlp.gate.weight") or ".gate.weight" == tensor_name[-len(".gate.weight"):]:
+            # Guard against matching e.g. "gate_proj.weight" — that's handled below.
+            if "gate_proj" not in tensor_name and "up_proj" not in tensor_name and "down_proj" not in tensor_name:
+                return (16, "passthrough", None)
+        if tensor_name.endswith("shared_expert_gate.weight"):
+            return (16, "passthrough", None)
+
+        # Embeddings / lm_head → affine 8-bit
+        if "embed_tokens" in tensor_name or tensor_name.endswith("lm_head.weight") or tensor_name == "lm_head.weight":
+            return (8, "affine", None)
+
+        # Full attention q/k/v/o → affine 8-bit
+        if ".self_attn." in tensor_name and tensor_name.endswith("_proj.weight"):
+            return (8, "affine", None)
+
+        # Linear attention input/output projections → affine 8-bit
+        # (conv1d / A_log / dt_bias / norm handled above)
+        if ".linear_attn." in tensor_name and tensor_name.endswith(".weight"):
+            return (8, "affine", None)
+
+        # Shared expert projections → affine 8-bit (always active — precision matters)
+        if ".shared_expert." in tensor_name and tensor_name.endswith(".weight"):
+            return (8, "affine", None)
+
+        # Routed experts (pre-stacked) → MXTQ at profile bits
+        #   experts.gate_up_proj  → split into switch_mlp.gate_proj + switch_mlp.up_proj
+        #   experts.down_proj     → switch_mlp.down_proj
+        if tensor_name.endswith(".mlp.experts.gate_up_proj") or tensor_name.endswith(".mlp.experts.down_proj"):
+            return (EXPERT_BITS, "mxtq", None)
+
+        # Anything else → affine 8-bit fallback (keeps conversion total)
         return (8, "affine", None)
 
-    # Full attention q/k/v/o → affine 8-bit
-    if ".self_attn." in tensor_name and tensor_name.endswith("_proj.weight"):
-        return (8, "affine", None)
 
-    # Linear attention input/output projections → affine 8-bit
-    # (conv1d / A_log / dt_bias / norm handled above)
-    if ".linear_attn." in tensor_name and tensor_name.endswith(".weight"):
-        return (8, "affine", None)
-
-    # Shared expert projections → affine 8-bit (always active — precision matters)
-    if ".shared_expert." in tensor_name and tensor_name.endswith(".weight"):
-        return (8, "affine", None)
-
-    # Routed experts (pre-stacked) → MXTQ at profile bits
-    #   experts.gate_up_proj  → split into switch_mlp.gate_proj + switch_mlp.up_proj
-    #   experts.down_proj     → switch_mlp.down_proj
-    if tensor_name.endswith(".mlp.experts.gate_up_proj") or tensor_name.endswith(".mlp.experts.down_proj"):
-        return (EXPERT_BITS, "mxtq", None)
-
-    # Anything else → affine 8-bit fallback (keeps conversion total)
-    return (8, "affine", None)
+    def sanitize_key(hf_key):
+        """Map HF checkpoint key to post-sanitize (MLX) key."""
+        # `model.language_model.X` → `language_model.model.X`
+        if hf_key.startswith("model.language_model."):
+            return hf_key.replace("model.language_model", "language_model.model", 1)
+        # `model.visual.X` → `vision_tower.X`
+        if hf_key.startswith("model.visual"):
+            return hf_key.replace("model.visual", "vision_tower", 1)
+        # `lm_head.X` at top level → `language_model.lm_head.X` (Qwen3_5_moe's TextModel owns lm_head)
+        if hf_key == "lm_head.weight" or hf_key.startswith("lm_head."):
+            return "language_model." + hf_key
+        return hf_key
 
 
-def sanitize_key(hf_key):
-    """Map HF checkpoint key to post-sanitize (MLX) key."""
-    # `model.language_model.X` → `language_model.model.X`
-    if hf_key.startswith("model.language_model."):
-        return hf_key.replace("model.language_model", "language_model.model", 1)
-    # `model.visual.X` → `vision_tower.X`
-    if hf_key.startswith("model.visual"):
-        return hf_key.replace("model.visual", "vision_tower", 1)
-    # `lm_head.X` at top level → `language_model.lm_head.X` (Qwen3_5_moe's TextModel owns lm_head)
-    if hf_key == "lm_head.weight" or hf_key.startswith("lm_head."):
-        return "language_model." + hf_key
-    return hf_key
+    print("=" * 60)
+    print(f"  Qwen3.5/3.6 → {PROFILE} JANGTQ Conversion")
+    print(f"  Created by Jinho Jang (eric@jangq.ai)")
+    print("=" * 60)
+    print(f"  Source:  {SRC}")
+    print(f"  Output:  {OUT}")
+    print(f"  Layers:  {n_layers}")
+    print(f"  Experts: {n_experts} routed + 1 shared ({shared_exp_inter}d)")
+    print(f"  Profile: expert=MXTQ-{EXPERT_BITS}, attn=affine-8, shared=affine-8, gates=fp16")
+    print(flush=True)
 
 
-print("=" * 60)
-print(f"  Qwen3.5/3.6 → {PROFILE} JANGTQ Conversion")
-print(f"  Created by Jinho Jang (eric@jangq.ai)")
-print("=" * 60)
-print(f"  Source:  {SRC}")
-print(f"  Output:  {OUT}")
-print(f"  Layers:  {n_layers}")
-print(f"  Experts: {n_experts} routed + 1 shared ({shared_exp_inter}d)")
-print(f"  Profile: expert=MXTQ-{EXPERT_BITS}, attn=affine-8, shared=affine-8, gates=fp16")
-print(flush=True)
+    # Scan tensors
+    progress.phase(1, 3, "scan")
+    print("\n  Scanning source shards...", flush=True)
+    all_tensors = []
+    for sf in sorted(SRC.glob("model-*.safetensors")):
+        with safe_open(str(sf), framework="numpy") as f:
+            for k in f.keys():
+                if k.endswith("_scale_inv"):
+                    continue
+                shape = list(f.get_slice(k).get_shape())
+                all_tensors.append((k, shape, sf))
+    print(f"  Found {len(all_tensors)} tensors", flush=True)
 
 
-# Scan tensors
-print("\n  Scanning source shards...", flush=True)
-all_tensors = []
-for sf in sorted(SRC.glob("model-*.safetensors")):
-    with safe_open(str(sf), framework="numpy") as f:
-        for k in f.keys():
-            if k.endswith("_scale_inv"):
-                continue
-            shape = list(f.get_slice(k).get_shape())
-            all_tensors.append((k, shape, sf))
-print(f"  Found {len(all_tensors)} tensors", flush=True)
-
-
-# === Processing state ===
-shard_idx = 0
-shard_tensors = {}
-shard_bytes = 0
-MAX_SHARD = 1_000_000_000  # 1 GB
-total_mxtq = 0
-total_affine = 0
-total_passthrough = 0
-total_skipped = 0
-shard_map = {}
-
-
-def flush_shard():
-    global shard_idx, shard_tensors, shard_bytes
-    if not shard_tensors:
-        return
-    shard_idx += 1
-    fname = f"model-{shard_idx:05d}-of-XXXXX.safetensors"
-    save_file(shard_tensors, str(OUT / fname))
-    for k in shard_tensors:
-        shard_map[k] = fname
-    print(f"    Shard {shard_idx}: {len(shard_tensors)} tensors, {shard_bytes / 1e9:.1f} GB", flush=True)
+    # === Processing state ===
+    shard_idx = 0
     shard_tensors = {}
     shard_bytes = 0
+    MAX_SHARD = 1_000_000_000  # 1 GB
+    total_mxtq = 0
+    total_affine = 0
+    total_passthrough = 0
+    total_skipped = 0
+    shard_map = {}
 
 
-def add_tensor(name, arr):
-    global shard_bytes
-    shard_tensors[name] = arr
-    shard_bytes += arr.nbytes
-    if shard_bytes >= MAX_SHARD:
-        flush_shard()
-
-
-# === Resume support ===
-done_keys = set()
-existing_shards = sorted(OUT.glob("model-*-of-XXXXX.safetensors"))
-if existing_shards:
-    print(f"\n  Resume: found {len(existing_shards)} existing shards", flush=True)
-    import struct as _struct
-    for sf in existing_shards:
-        with open(sf, "rb") as f:
-            hsize = _struct.unpack("<Q", f.read(8))[0]
-            hdr = json.loads(f.read(hsize))
-        fname = sf.name
-        for k in hdr:
-            if k == "__metadata__":
-                continue
-            done_keys.add(k)
+    def flush_shard():
+        global shard_idx, shard_tensors, shard_bytes
+        if not shard_tensors:
+            return
+        shard_idx += 1
+        fname = f"model-{shard_idx:05d}-of-XXXXX.safetensors"
+        save_file(shard_tensors, str(OUT / fname))
+        for k in shard_tensors:
             shard_map[k] = fname
-        idx_str = sf.name.split("-")[1]
-        shard_idx = max(shard_idx, int(idx_str))
-    print(f"  Resume: {len(done_keys)} keys already written, continuing from shard {shard_idx + 1}", flush=True)
+        print(f"    Shard {shard_idx}: {len(shard_tensors)} tensors, {shard_bytes / 1e9:.1f} GB", flush=True)
+        shard_tensors = {}
+        shard_bytes = 0
 
 
-def is_already_done(out_name, method, split_gate_up):
-    if method == "skip":
-        return True
-    if method == "passthrough":
-        return out_name in done_keys
-    if method == "affine":
-        base = out_name[:-7] if out_name.endswith(".weight") else out_name
-        return (f"{base}.weight" in done_keys and f"{base}.scales" in done_keys and f"{base}.biases" in done_keys)
-    if method == "mxtq":
-        if split_gate_up:
-            gb = out_name.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
-            ub = out_name.replace("experts.gate_up_proj", "switch_mlp.up_proj")
-            return (f"{gb}.tq_packed" in done_keys and f"{ub}.tq_packed" in done_keys)
-        else:
-            base = out_name.replace("experts.down_proj", "switch_mlp.down_proj") \
-                   if out_name.endswith("experts.down_proj") else out_name
-            return (f"{base}.tq_packed" in done_keys and
-                    f"{base}.tq_norms" in done_keys and f"{base}.tq_bits" in done_keys)
-    return False
+    def add_tensor(name, arr):
+        global shard_bytes
+        shard_tensors[name] = arr
+        shard_bytes += arr.nbytes
+        if shard_bytes >= MAX_SHARD:
+            flush_shard()
 
 
-# === Main loop ===
-print("\n  Converting...", flush=True)
-skipped_resume = 0
-for tensor_name, shape, sf_path in tqdm(all_tensors, desc="  Processing"):
-    bits, method, _ = get_bits_and_method(tensor_name)
-    out_name = sanitize_key(tensor_name)
+    # === Resume support ===
+    done_keys = set()
+    existing_shards = sorted(OUT.glob("model-*-of-XXXXX.safetensors"))
+    if existing_shards:
+        print(f"\n  Resume: found {len(existing_shards)} existing shards", flush=True)
+        import struct as _struct
+        for sf in existing_shards:
+            with open(sf, "rb") as f:
+                hsize = _struct.unpack("<Q", f.read(8))[0]
+                hdr = json.loads(f.read(hsize))
+            fname = sf.name
+            for k in hdr:
+                if k == "__metadata__":
+                    continue
+                done_keys.add(k)
+                shard_map[k] = fname
+            idx_str = sf.name.split("-")[1]
+            shard_idx = max(shard_idx, int(idx_str))
+        print(f"  Resume: {len(done_keys)} keys already written, continuing from shard {shard_idx + 1}", flush=True)
 
-    if method == "skip":
-        total_skipped += 1
-        continue
 
-    split_gate_up = tensor_name.endswith("experts.gate_up_proj")
+    def is_already_done(out_name, method, split_gate_up):
+        if method == "skip":
+            return True
+        if method == "passthrough":
+            return out_name in done_keys
+        if method == "affine":
+            base = out_name[:-7] if out_name.endswith(".weight") else out_name
+            return (f"{base}.weight" in done_keys and f"{base}.scales" in done_keys and f"{base}.biases" in done_keys)
+        if method == "mxtq":
+            if split_gate_up:
+                gb = out_name.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
+                ub = out_name.replace("experts.gate_up_proj", "switch_mlp.up_proj")
+                return (f"{gb}.tq_packed" in done_keys and f"{ub}.tq_packed" in done_keys)
+            else:
+                base = out_name.replace("experts.down_proj", "switch_mlp.down_proj") \
+                       if out_name.endswith("experts.down_proj") else out_name
+                return (f"{base}.tq_packed" in done_keys and
+                        f"{base}.tq_norms" in done_keys and f"{base}.tq_bits" in done_keys)
+        return False
 
-    # Resume check
-    if done_keys and is_already_done(out_name, method, split_gate_up):
-        skipped_resume += 1
-        if method == "mxtq":   total_mxtq += (2 if split_gate_up else 1)
-        elif method == "affine": total_affine += 1
-        else:                    total_passthrough += 1
-        continue
 
-    # Load tensor (bf16 first — Qwen3.6 source is bf16)
-    with safe_open(str(sf_path), framework="numpy") as f:
-        try:
-            tensor = f.get_tensor(tensor_name)
-            if not isinstance(tensor, np.ndarray):
-                tensor = np.array(tensor)
-        except Exception:
-            tensor = _load_bf16_tensor(sf_path, tensor_name, shape)
+    # === Main loop ===
+    progress.phase(2, 3, "convert")
+    print("\n  Converting...", flush=True)
+    skipped_resume = 0
+    for tensor_name, shape, sf_path in tqdm(all_tensors, desc="  Processing"):
+        bits, method, _ = get_bits_and_method(tensor_name)
+        out_name = sanitize_key(tensor_name)
 
-    if tensor.dtype != np.float32:
-        tensor = tensor.astype(np.float32)
+        if method == "skip":
+            total_skipped += 1
+            continue
 
-    if method == "passthrough":
-        # Qwen3.6 patch_embed.proj.weight ships in HF-native layout
-        # (out_channels, in_channels, temporal_patch, patch, patch) — shape like
-        # (1152, 3, 2, 16, 16). mlx_vlm's Qwen3_5 ViT expects in_channels last:
-        # (out_channels, temporal_patch, patch, patch, in_channels). Transpose
-        # once at conversion so the shipped model loads without a runtime hack.
-        if out_name.endswith("vision_tower.patch_embed.proj.weight") \
-                and tensor.ndim == 5 and tensor.shape[1] == 3:
-            tensor = np.ascontiguousarray(
-                np.transpose(tensor, (0, 2, 3, 4, 1))
-            )
-        add_tensor(out_name, tensor.astype(np.float16))
-        total_passthrough += 1
+        split_gate_up = tensor_name.endswith("experts.gate_up_proj")
 
-    elif method == "affine":
-        w = mx.array(tensor.astype(np.float16))
-        qw, qs, qb = mx.quantize(w, group_size=64, bits=bits)
-        base = out_name[:-7] if out_name.endswith(".weight") else out_name
-        add_tensor(f"{base}.weight", np.array(qw))
-        add_tensor(f"{base}.scales", np.array(qs).astype(np.float16))
-        add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))
-        total_affine += 1
-        del w, qw, qs, qb
+        # Resume check
+        if done_keys and is_already_done(out_name, method, split_gate_up):
+            skipped_resume += 1
+            if method == "mxtq":   total_mxtq += (2 if split_gate_up else 1)
+            elif method == "affine": total_affine += 1
+            else:                    total_passthrough += 1
+            continue
 
-    elif method == "mxtq":
-        # Routed experts come pre-stacked (3D): [n_experts, out, in] in HF.
-        # Use tq_quantize_experts (handles 3D); tq_quantize_weight is 2D-only.
-        if split_gate_up:
-            # tensor shape: (n_experts, 2*inter, hidden)
-            mid = tensor.shape[1] // 2
-            gate_tensor = tensor[:, :mid, :]
-            up_tensor   = tensor[:, mid:, :]
-            gate_out = out_name.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
-            up_out   = out_name.replace("experts.gate_up_proj", "switch_mlp.up_proj")
-            for half_tensor, half_out in ((gate_tensor, gate_out), (up_tensor, up_out)):
-                result = tq_quantize_experts(half_tensor, bits=bits, seed=SEED)
-                add_tensor(f"{half_out}.tq_packed", result["packed"])
-                add_tensor(f"{half_out}.tq_norms",  result["norms"])
-                add_tensor(f"{half_out}.tq_bits",   np.array([bits], dtype=np.uint8))
+        # Load tensor (bf16 first — Qwen3.6 source is bf16)
+        with safe_open(str(sf_path), framework="numpy") as f:
+            try:
+                tensor = f.get_tensor(tensor_name)
+                if not isinstance(tensor, np.ndarray):
+                    tensor = np.array(tensor)
+            except Exception:
+                tensor = _load_bf16_tensor(sf_path, tensor_name, shape)
+
+        if tensor.dtype != np.float32:
+            tensor = tensor.astype(np.float32)
+
+        if method == "passthrough":
+            # Qwen3.6 patch_embed.proj.weight ships in HF-native layout
+            # (out_channels, in_channels, temporal_patch, patch, patch) — shape like
+            # (1152, 3, 2, 16, 16). mlx_vlm's Qwen3_5 ViT expects in_channels last:
+            # (out_channels, temporal_patch, patch, patch, in_channels). Transpose
+            # once at conversion so the shipped model loads without a runtime hack.
+            if out_name.endswith("vision_tower.patch_embed.proj.weight") \
+                    and tensor.ndim == 5 and tensor.shape[1] == 3:
+                tensor = np.ascontiguousarray(
+                    np.transpose(tensor, (0, 2, 3, 4, 1))
+                )
+            add_tensor(out_name, tensor.astype(np.float16))
+            total_passthrough += 1
+
+        elif method == "affine":
+            w = mx.array(tensor.astype(np.float16))
+            qw, qs, qb = mx.quantize(w, group_size=64, bits=bits)
+            base = out_name[:-7] if out_name.endswith(".weight") else out_name
+            add_tensor(f"{base}.weight", np.array(qw))
+            add_tensor(f"{base}.scales", np.array(qs).astype(np.float16))
+            add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))
+            total_affine += 1
+            del w, qw, qs, qb
+
+        elif method == "mxtq":
+            # Routed experts come pre-stacked (3D): [n_experts, out, in] in HF.
+            # Use tq_quantize_experts (handles 3D); tq_quantize_weight is 2D-only.
+            if split_gate_up:
+                # tensor shape: (n_experts, 2*inter, hidden)
+                mid = tensor.shape[1] // 2
+                gate_tensor = tensor[:, :mid, :]
+                up_tensor   = tensor[:, mid:, :]
+                gate_out = out_name.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
+                up_out   = out_name.replace("experts.gate_up_proj", "switch_mlp.up_proj")
+                for half_tensor, half_out in ((gate_tensor, gate_out), (up_tensor, up_out)):
+                    result = tq_quantize_experts(half_tensor, bits=bits, seed=SEED)
+                    add_tensor(f"{half_out}.tq_packed", result["packed"])
+                    add_tensor(f"{half_out}.tq_norms",  result["norms"])
+                    add_tensor(f"{half_out}.tq_bits",   np.array([bits], dtype=np.uint8))
+                    total_mxtq += 1
+                del gate_tensor, up_tensor
+            else:
+                # experts.down_proj pre-stacked (3D)
+                down_out = out_name.replace("experts.down_proj", "switch_mlp.down_proj")
+                result = tq_quantize_experts(tensor, bits=bits, seed=SEED)
+                add_tensor(f"{down_out}.tq_packed", result["packed"])
+                add_tensor(f"{down_out}.tq_norms",  result["norms"])
+                add_tensor(f"{down_out}.tq_bits",   np.array([bits], dtype=np.uint8))
                 total_mxtq += 1
-            del gate_tensor, up_tensor
-        else:
-            # experts.down_proj pre-stacked (3D)
-            down_out = out_name.replace("experts.down_proj", "switch_mlp.down_proj")
-            result = tq_quantize_experts(tensor, bits=bits, seed=SEED)
-            add_tensor(f"{down_out}.tq_packed", result["packed"])
-            add_tensor(f"{down_out}.tq_norms",  result["norms"])
-            add_tensor(f"{down_out}.tq_bits",   np.array([bits], dtype=np.uint8))
-            total_mxtq += 1
 
-    del tensor
-    if (total_mxtq + total_affine) % 200 == 0:
-        gc.collect()
+        del tensor
+        if (total_mxtq + total_affine) % 200 == 0:
+            gc.collect()
 
-flush_shard()
-if skipped_resume > 0:
-    print(f"\n  Resume: skipped {skipped_resume} tensors from previous run", flush=True)
+    flush_shard()
+    if skipped_resume > 0:
+        print(f"\n  Resume: skipped {skipped_resume} tensors from previous run", flush=True)
 
 
-# Rename shards to final {i}-of-{total}
-print(f"\n  Renaming {shard_idx} shards...", flush=True)
-for i in range(1, shard_idx + 1):
-    old = OUT / f"model-{i:05d}-of-XXXXX.safetensors"
-    new = OUT / f"model-{i:05d}-of-{shard_idx:05d}.safetensors"
-    if old.exists():
-        old.rename(new)
-shard_map = {k: v.replace("XXXXX", f"{shard_idx:05d}") for k, v in shard_map.items()}
+    # Rename shards to final {i}-of-{total}
+    progress.phase(3, 3, "write")
+    print(f"\n  Renaming {shard_idx} shards...", flush=True)
+    for i in range(1, shard_idx + 1):
+        old = OUT / f"model-{i:05d}-of-XXXXX.safetensors"
+        new = OUT / f"model-{i:05d}-of-{shard_idx:05d}.safetensors"
+        if old.exists():
+            old.rename(new)
+    shard_map = {k: v.replace("XXXXX", f"{shard_idx:05d}") for k, v in shard_map.items()}
 
 
-# Write safetensors index
-total_size = 0
-for fname in set(shard_map.values()):
-    p = OUT / fname
-    if p.exists():
-        total_size += p.stat().st_size
-index = {
-    "metadata": {"format": "jangtq", "total_size": total_size},
-    "weight_map": shard_map,
-}
-json.dump(index, open(OUT / "model.safetensors.index.json", "w"), indent=2)
+    # Write safetensors index
+    total_size = 0
+    for fname in set(shard_map.values()):
+        p = OUT / fname
+        if p.exists():
+            total_size += p.stat().st_size
+    index = {
+        "metadata": {"format": "jangtq", "total_size": total_size},
+        "weight_map": shard_map,
+    }
+    json.dump(index, open(OUT / "model.safetensors.index.json", "w"), indent=2)
 
 
-# Write config (strip any fp8/awq sections; force the default bits to expert bits)
-config.pop("quantization_config", None)
-config["quantization"] = {"group_size": 64, "bits": EXPERT_BITS}
-# Surface the JANGTQ flags at the top level so Swift's
-# `LLMModelFactory.qwen3_5_moe` dispatch can detect MXTQ format
-# without reading the sidecar.
-config["weight_format"] = "mxtq"
-config["mxtq_seed"] = SEED
-config["mxtq_bits"] = EXPERT_BITS
-json.dump(config, open(OUT / "config.json", "w"), indent=2)
+    # Write config (strip any fp8/awq sections; force the default bits to expert bits)
+    config.pop("quantization_config", None)
+    config["quantization"] = {"group_size": 64, "bits": EXPERT_BITS}
+    # Surface the JANGTQ flags at the top level so Swift's
+    # `LLMModelFactory.qwen3_5_moe` dispatch can detect MXTQ format
+    # without reading the sidecar.
+    config["weight_format"] = "mxtq"
+    config["mxtq_seed"] = SEED
+    config["mxtq_bits"] = EXPERT_BITS
+    json.dump(config, open(OUT / "config.json", "w"), indent=2)
 
 
-# Write jang_config
-src_arch = text_cfg.get("model_type") or config.get("model_type", "qwen3_5_moe")
-jang_config = {
-    "version": 2,
-    "weight_format": "mxtq",
-    "profile": PROFILE,
-    "source_model": {
-        "name": SRC.name,
-        "architecture": src_arch,
-    },
-    # has_vision: true now that Swift Qwen35MoEJANGTQ (vMLXVLM) is
-    # available. The detector routes the artifact through VLMModelFactory
-    # which dispatches qwen3_5_moe + weight_format=mxtq to the
-    # vision-aware JANGTQ class. Both Python (load_jangtq_vlm_model) and
-    # Swift VLM paths consume the SAME on-disk weights — the LLM-side
-    # Swift Qwen35JANGTQModel.sanitize harmlessly strips vision_tower
-    # keys when accidentally used.
-    "has_vision": True,
-    "mxtq_seed": SEED,
-    "mxtq_bits": {
-        "attention": 8,
-        "linear_attention": 8,
-        "shared_expert": 8,
-        "routed_expert": EXPERT_BITS,
-        "embed_tokens": 8,
-        "lm_head": 8,
-    },
-    "quantization": {
-        "method": "affine+mxtq",
-        "group_size": 64,
-        "bits_default": EXPERT_BITS,
-    },
-}
-# Stamp Tier-1 capabilities (reasoning/tool parser, cache type, modality)
-# so vmlx CapabilityDetector picks the right parsers without falling back
-# to silver/bronze. Idempotent — safe to re-run.
-from jang_tools.capabilities import build_capabilities
-caps = build_capabilities(jang_config, config, OUT)
-if caps is not None:
-    jang_config["capabilities"] = caps
-    print(f"  capabilities: family={caps['family']} reasoning={caps['reasoning_parser']} "
-          f"tool={caps['tool_parser']} cache={caps['cache_type']} modality={caps['modality']}",
-          flush=True)
-else:
-    print("  WARNING: could not resolve capabilities for this model — vmlx will "
-          "fall back to silver/bronze detection. Add the family to "
-          "jang_tools/capabilities.py::FAMILY_MAP if this is a new architecture.",
-          flush=True)
+    # Write jang_config
+    src_arch = text_cfg.get("model_type") or config.get("model_type", "qwen3_5_moe")
+    jang_config = {
+        "version": 2,
+        "weight_format": "mxtq",
+        "profile": PROFILE,
+        "source_model": {
+            "name": SRC.name,
+            "architecture": src_arch,
+        },
+        # has_vision: true now that Swift Qwen35MoEJANGTQ (vMLXVLM) is
+        # available. The detector routes the artifact through VLMModelFactory
+        # which dispatches qwen3_5_moe + weight_format=mxtq to the
+        # vision-aware JANGTQ class. Both Python (load_jangtq_vlm_model) and
+        # Swift VLM paths consume the SAME on-disk weights — the LLM-side
+        # Swift Qwen35JANGTQModel.sanitize harmlessly strips vision_tower
+        # keys when accidentally used.
+        "has_vision": True,
+        "mxtq_seed": SEED,
+        "mxtq_bits": {
+            "attention": 8,
+            "linear_attention": 8,
+            "shared_expert": 8,
+            "routed_expert": EXPERT_BITS,
+            "embed_tokens": 8,
+            "lm_head": 8,
+        },
+        "quantization": {
+            "method": "affine+mxtq",
+            "group_size": 64,
+            "bits_default": EXPERT_BITS,
+        },
+    }
+    # Stamp Tier-1 capabilities (reasoning/tool parser, cache type, modality)
+    # so vmlx CapabilityDetector picks the right parsers without falling back
+    # to silver/bronze. Idempotent — safe to re-run.
+    from jang_tools.capabilities import build_capabilities
+    caps = build_capabilities(jang_config, config, OUT)
+    if caps is not None:
+        jang_config["capabilities"] = caps
+        print(f"  capabilities: family={caps['family']} reasoning={caps['reasoning_parser']} "
+              f"tool={caps['tool_parser']} cache={caps['cache_type']} modality={caps['modality']}",
+              flush=True)
+    else:
+        print("  WARNING: could not resolve capabilities for this model — vmlx will "
+              "fall back to silver/bronze detection. Add the family to "
+              "jang_tools/capabilities.py::FAMILY_MAP if this is a new architecture.",
+              flush=True)
 
-json.dump(jang_config, open(OUT / "jang_config.json", "w"), indent=2)
+    json.dump(jang_config, open(OUT / "jang_config.json", "w"), indent=2)
 
-# Validate the final jang_config — catch schema drift / typos / missing keys.
-from jang_tools.capabilities import verify_directory
-_ok, _msg = verify_directory(OUT)
-print(f"  verify: {_msg}")
-if not _ok:
-    raise SystemExit(f"capabilities verify failed: {_msg}")
-
-
-# Copy tokenizer/template/preprocessor files (always-VL rule: keep VL assets)
-for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
-          "generation_config.json", "chat_template.jinja", "merges.txt", "vocab.json",
-          "preprocessor_config.json", "video_preprocessor_config.json",
-          "configuration.json",
-          # If the model ships custom .py files, preserve them
-          f"modeling_{src_arch}.py", f"configuration_{src_arch}.py"]:
-    src_f = SRC / f
-    if src_f.exists():
-        shutil.copy2(str(src_f), str(OUT / f))
+    # Validate the final jang_config — catch schema drift / typos / missing keys.
+    from jang_tools.capabilities import verify_directory
+    _ok, _msg = verify_directory(OUT)
+    print(f"  verify: {_msg}")
+    if not _ok:
+        raise SystemExit(f"capabilities verify failed: {_msg}")
 
 
-# --- Osaurus / swift-transformers compatibility fix ---------------------------
-# Some source releases ship tokenizer_config.json with
-#   "tokenizer_class": "TokenizersBackend"
-# which swift-transformers (Osaurus, vmlx-swift-lm) can't parse and throws
-#   unsupportedTokenizer("TokenizersBackend")
-# Map it back to a concrete class that swift-transformers knows. For the
-# Qwen 3.5/3.6 family this is Qwen2Tokenizer (same vocab family).
-_tok_cfg = OUT / "tokenizer_config.json"
-if _tok_cfg.exists():
+    # Copy tokenizer/template/preprocessor files (always-VL rule: keep VL assets)
+    for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+              "generation_config.json", "chat_template.jinja", "merges.txt", "vocab.json",
+              "preprocessor_config.json", "video_preprocessor_config.json",
+              "configuration.json",
+              # If the model ships custom .py files, preserve them
+              f"modeling_{src_arch}.py", f"configuration_{src_arch}.py"]:
+        src_f = SRC / f
+        if src_f.exists():
+            shutil.copy2(str(src_f), str(OUT / f))
+
+
+    # --- Osaurus / swift-transformers compatibility fix ---------------------------
+    # Some source releases ship tokenizer_config.json with
+    #   "tokenizer_class": "TokenizersBackend"
+    # which swift-transformers (Osaurus, vmlx-swift-lm) can't parse and throws
+    #   unsupportedTokenizer("TokenizersBackend")
+    # Map it back to a concrete class that swift-transformers knows. For the
+    # Qwen 3.5/3.6 family this is Qwen2Tokenizer (same vocab family).
+    _tok_cfg = OUT / "tokenizer_config.json"
+    if _tok_cfg.exists():
+        try:
+            _tc = json.load(open(_tok_cfg))
+            if _tc.get("tokenizer_class") == "TokenizersBackend":
+                _tc["tokenizer_class"] = "Qwen2Tokenizer"
+                json.dump(_tc, open(_tok_cfg, "w"), indent=2)
+                print("  [osaurus-fix] tokenizer_class: TokenizersBackend → Qwen2Tokenizer", flush=True)
+        except Exception as _e:
+            print(f"  [osaurus-fix] skipped: {_e}", flush=True)
+
+
+    # Build Swift runtime sidecar so Swift runtimes (vmlx-swift-lm, vmlxctl,
+    # Osaurus) can load without fatalError. Python loader doesn't need it, but
+    # uploading without it is a footgun — see research/JANGTQ-REFERENCE.md.
+    print(f"\n  Building jangtq_runtime.safetensors sidecar...")
     try:
-        _tc = json.load(open(_tok_cfg))
-        if _tc.get("tokenizer_class") == "TokenizersBackend":
-            _tc["tokenizer_class"] = "Qwen2Tokenizer"
-            json.dump(_tc, open(_tok_cfg, "w"), indent=2)
-            print("  [osaurus-fix] tokenizer_class: TokenizersBackend → Qwen2Tokenizer", flush=True)
-    except Exception as _e:
-        print(f"  [osaurus-fix] skipped: {_e}", flush=True)
+        from jang_tools.build_jangtq_sidecar import main as _build_sidecar
+        _saved_argv = sys.argv
+        sys.argv = ["build_jangtq_sidecar", str(OUT)]
+        try:
+            _build_sidecar()
+        finally:
+            sys.argv = _saved_argv
+    except (Exception, SystemExit) as _e:
+        print(f"  [sidecar] FAILED: {_e} — run `python3 -m jang_tools.build_jangtq_sidecar {OUT}` manually before upload", flush=True)
 
 
-# Build Swift runtime sidecar so Swift runtimes (vmlx-swift-lm, vmlxctl,
-# Osaurus) can load without fatalError. Python loader doesn't need it, but
-# uploading without it is a footgun — see research/JANGTQ-REFERENCE.md.
-print(f"\n  Building jangtq_runtime.safetensors sidecar...")
-try:
-    from jang_tools.build_jangtq_sidecar import main as _build_sidecar
-    _saved_argv = sys.argv
-    sys.argv = ["build_jangtq_sidecar", str(OUT)]
-    try:
-        _build_sidecar()
-    finally:
-        sys.argv = _saved_argv
-except (Exception, SystemExit) as _e:
-    print(f"  [sidecar] FAILED: {_e} — run `python3 -m jang_tools.build_jangtq_sidecar {OUT}` manually before upload", flush=True)
+    print(f"\n  Done!")
+    print(f"  MXTQ tensors:    {total_mxtq}")
+    print(f"  Affine tensors:  {total_affine}")
+    print(f"  Passthrough:     {total_passthrough}")
+    print(f"  Skipped (MTP):   {total_skipped}")
+    print(f"  Output:          {OUT}")
+    progress.done(ok=True, output=str(OUT))
 
-
-print(f"\n  Done!")
-print(f"  MXTQ tensors:    {total_mxtq}")
-print(f"  Affine tensors:  {total_affine}")
-print(f"  Passthrough:     {total_passthrough}")
-print(f"  Skipped (MTP):   {total_skipped}")
-print(f"  Output:          {OUT}")
+except Exception as _exc:
+    progress.done(ok=False, error=f"{type(_exc).__name__}: {_exc}")
+    raise
