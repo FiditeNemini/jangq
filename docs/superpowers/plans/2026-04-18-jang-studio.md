@@ -211,7 +211,7 @@ Updated as each phase lands. See each task block for detailed step-by-step statu
 
 ---
 
-## 🎉 ALL PHASES COMPLETE
+## All phases complete
 
 **Totals:** 8 phases. 47 commits on `jang-spec-plan5-bundle-python-validation`. 151 pytest + 40 XCTest unit + 1 XCUITest green. Bundle verified at 305 MB. CI workflow + 3 shipping scripts + 5 docs + end-to-end 5-step wizard UI.
 
