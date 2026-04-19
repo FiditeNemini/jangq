@@ -38,15 +38,16 @@ struct PostConvertVerifier {
                             status: caps.isEmpty ? .fail : .pass, required: true,
                             hint: caps.isEmpty ? "jang_config.capabilities missing" : nil))
 
-        // #5 chat template
+        // #5 chat template (inline | .jinja | .json all accepted)
         let hasJinja = FileManager.default.fileExists(atPath: out.appendingPathComponent("chat_template.jinja").path)
+        let hasChatJSON = FileManager.default.fileExists(atPath: out.appendingPathComponent("chat_template.json").path)
         let tokCfgData = try? Data(contentsOf: out.appendingPathComponent("tokenizer_config.json"))
         let tokCfg = (tokCfgData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) ?? [:]
         let hasInline = !((tokCfg["chat_template"] as? String) ?? "").isEmpty
-        let hasChat = hasJinja || hasInline
+        let hasChat = hasJinja || hasChatJSON || hasInline
         checks.append(.init(id: .chatTemplate, title: "Chat template present",
                             status: hasChat ? .pass : .fail, required: true,
-                            hint: hasChat ? nil : "No chat_template inline or .jinja file"))
+                            hint: hasChat ? nil : "No chat_template inline / .jinja / .json file"))
 
         // #6 tokenizer files
         let hasJSON = FileManager.default.fileExists(atPath: out.appendingPathComponent("tokenizer.json").path)
@@ -85,7 +86,7 @@ struct PostConvertVerifier {
         // #8b Video VL preprocessor — only required when detected.isVideoVL
         if plan.detected?.isVideoVL == true {
             let ok = FileManager.default.fileExists(atPath: out.appendingPathComponent("video_preprocessor_config.json").path)
-            checks.append(.init(id: .videoVLPreprocessor, title: "Video VL preprocessor config",
+            checks.append(.init(id: .videoPreprocessors, title: "Video VL preprocessor config",
                                 status: ok ? .pass : .fail, required: true,
                                 hint: ok ? nil : "Missing video_preprocessor_config.json for video-VL model"))
         }
@@ -113,6 +114,16 @@ struct PostConvertVerifier {
         checks.append(.init(id: .generationConfig, title: "generation_config.json present",
                             status: hasGenCfg ? .pass : .warn, required: false,
                             hint: hasGenCfg ? nil : "HF downstream loaders may fall back to unexpected defaults"))
+
+        // #12 layer count sanity — config.json must have num_hidden_layers > 0
+        let cfgData = try? Data(contentsOf: out.appendingPathComponent("config.json"))
+        let cfgObj = (cfgData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) ?? [:]
+        let layerCount = (cfgObj["num_hidden_layers"] as? Int)
+            ?? ((cfgObj["text_config"] as? [String: Any])?["num_hidden_layers"] as? Int)
+            ?? 0
+        checks.append(.init(id: .layerCountSane, title: "num_hidden_layers > 0",
+                            status: layerCount > 0 ? .pass : .fail, required: true,
+                            hint: layerCount > 0 ? "\(layerCount) layers" : "config.json missing or has num_hidden_layers=0"))
 
         return checks
     }

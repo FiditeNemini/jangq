@@ -1,1 +1,1 @@
-{"model_type":"qwen3_5_moe","torch_dtype":"bfloat16"}
+{"model_type":"qwen3_5_moe","torch_dtype":"bfloat16","num_hidden_layers":4,"hidden_size":128}

@@ -4,7 +4,7 @@ import Foundation
 enum VerifyID: String, CaseIterable {
     case jangConfigExists, jangConfigFormat, schemaValid, capabilitiesPresent,
          chatTemplate, tokenizerFiles, shardsMatchIndex, vlPreprocessors,
-         videoVLPreprocessor, generationConfig,
+         videoPreprocessors, generationConfig, layerCountSane,
          miniMaxCustomPy, tokenizerClassConcrete
 }
 
