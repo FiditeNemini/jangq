@@ -1,0 +1,1 @@
+{"chat_template":"{% for m in messages %}{{m.content}}{% endfor %}","tokenizer_class":"Qwen2Tokenizer"}

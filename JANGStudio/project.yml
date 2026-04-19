@@ -43,9 +43,20 @@ targets:
   JANGStudioTests:
     type: bundle.unit-test
     platform: macOS
-    sources: [Tests/JANGStudioTests]
-    resources:
-      - path: Tests/JANGStudioTests/Fixtures
+    sources:
+      - path: Tests/JANGStudioTests
+        excludes:
+          - "Fixtures/**"
+      - path: Tests/JANGStudioTests/Fixtures/fake_convert.sh
+        buildPhase: resources
+      - path: Tests/JANGStudioTests/Fixtures/golden_convert_events.jsonl
+        buildPhase: resources
+      - path: Tests/JANGStudioTests/Fixtures/good_output
+        buildPhase: resources
+        type: folder
+      - path: Tests/JANGStudioTests/Fixtures/broken_output
+        buildPhase: resources
+        type: folder
     dependencies: [{target: JANGStudio}]
     settings:
       base:
