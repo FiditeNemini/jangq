@@ -7,7 +7,6 @@ struct ProcessError: Error, Equatable {
 }
 
 actor PythonRunner {
-    // `let` properties are safe to read from any concurrency domain.
     nonisolated let executable: URL
     nonisolated let extraArgs: [String]
     private var process: Process?
@@ -18,25 +17,17 @@ actor PythonRunner {
         self.extraArgs = extraArgs
     }
 
-    // `nonisolated` — only reads immutable `let` properties, safe from any context.
+    // `nonisolated` — can be called from any context; the detached Task
+    // inside hops back to the actor via `await self.launch(...)`.
     nonisolated func run() -> AsyncThrowingStream<ProgressEvent, Error> {
-        let executable = self.executable
-        let extraArgs = self.extraArgs
-        return AsyncThrowingStream { continuation in
+        AsyncThrowingStream { continuation in
             Task.detached {
-                await PythonRunner.launch(
-                    executable: executable,
-                    extraArgs: extraArgs,
-                    continuation: continuation
-                )
+                await self.launch(continuation: continuation)
             }
         }
     }
 
-    // Static helper — no actor isolation needed, all params are Sendable values.
-    private static func launch(
-        executable: URL,
-        extraArgs: [String],
+    private func launch(
         continuation: AsyncThrowingStream<ProgressEvent, Error>.Continuation
     ) async {
         let proc = Process()
@@ -51,15 +42,15 @@ actor PythonRunner {
         let errPipe = Pipe()
         proc.standardOutput = outPipe
         proc.standardError = errPipe
+        self.process = proc
 
-        // Drain stdout (not forwarded as ProgressEvent).
+        // Drain stdout (logs, not yielded as ProgressEvents).
         let stdoutTask = Task.detached {
             for try await _ in outPipe.fileHandleForReading.bytes.lines {}
         }
 
-        // Drain stderr — parse each line into ProgressEvents.
-        // Parser and lastErrTail are owned exclusively by this task, avoiding
-        // the Swift 6 shared-mutable-state error from the plan's original layout.
+        // Drain stderr — parser + lastErrTail are owned exclusively by this task
+        // (avoids the Swift 6 shared-mutable-state error).
         let stderrTask = Task.detached {
             let parser = JSONLProgressParser()
             var lastErrTail = ""
@@ -85,6 +76,8 @@ actor PythonRunner {
 
         if proc.terminationStatus == 0 {
             continuation.finish()
+        } else if cancelled {
+            continuation.finish()    // cancellation is a clean exit
         } else {
             continuation.finish(
                 throwing: ProcessError(
