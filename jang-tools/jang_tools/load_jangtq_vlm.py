@@ -87,7 +87,129 @@ def _mlx_vlm_skeleton(model_path: Path):
         )
 
     processor = load_processor(model_path, add_generation_prompt=True)
+    _install_video_fallback(processor)
     return model, processor, config, model_config
+
+
+def _install_video_fallback(processor):
+    """Enable video inputs without torchvision.
+
+    transformers' AutoVideoProcessor requires torchvision, which is not in
+    the bundled Python vMLX ships. Qwen3VLProcessor.__call__ then falls back
+    to ``self.image_processor(videos=videos)`` which raises TypeError because
+    Qwen2VLImageProcessor's __call__ has no ``videos`` kwarg.
+
+    This adapter routes video frames through image_processor (one image per
+    frame) and promotes the resulting grid to video_grid_thw. Temporal merging
+    (temporal_patch_size) is preserved by rewriting the grid's time axis so
+    the <|video_pad|> expansion in the chat template produces the correct
+    token count. Callers still pass ``videos=[[frame1, frame2, ...]]`` — the
+    wrapper then converts internally.
+    """
+    if getattr(processor, "video_processor", None) is not None:
+        return
+    if not hasattr(processor, "image_processor"):
+        return
+
+    ip = processor.image_processor
+    proc_cls = processor.__class__
+    orig_call = proc_cls.__call__
+    if getattr(orig_call, "_jangtq_video_fallback", False):
+        return  # already patched on this class
+
+    temporal_patch = int(getattr(ip, "temporal_patch_size", 2) or 2)
+
+    def _patched_call(self, images=None, text=None, videos=None, **kwargs):
+        if videos is None or self.video_processor is not None:
+            return orig_call(self, images=images, text=text, videos=videos, **kwargs)
+
+        # Lift each video's frames into a flat image batch, one row per frame.
+        # image_processor produces image_grid_thw shape (sum_frames, 3) with t=1.
+        # We collapse each video's rows into a single row with
+        # t = ceil(n_frames / temporal_patch_size), keeping h, w from the
+        # first frame. Preserves total patch count when n_frames % tp == 0.
+        import mlx.core as _mx
+        import numpy as _np
+
+        flat_frames = []
+        frames_per_video = []
+        for v in videos:
+            fs = v if isinstance(v, (list, tuple)) else [v]
+            flat_frames.extend(fs)
+            frames_per_video.append(len(fs))
+
+        image_out = ip(images=flat_frames)
+        pv = image_out["pixel_values"]           # (sum_patches, D)
+        grid = image_out["image_grid_thw"]       # (sum_frames, 3)  t=1 each
+
+        # Build video_grid_thw per video by merging frames along t-axis.
+        g_np = grid if isinstance(grid, _np.ndarray) else _np.asarray(grid)
+        video_rows = []
+        cursor = 0
+        for n in frames_per_video:
+            if n == 0:
+                continue
+            frame_rows = g_np[cursor:cursor + n]  # (n, 3)
+            cursor += n
+            h, w = int(frame_rows[0, 1]), int(frame_rows[0, 2])
+            t_patches = max(1, (n + temporal_patch - 1) // temporal_patch)
+            video_rows.append([t_patches, h, w])
+        v_grid = _np.asarray(video_rows, dtype=_np.int64)
+
+        videos_inputs_synth = {
+            "pixel_values_videos": _mx.array(pv) if not isinstance(pv, _mx.array) else pv,
+            "video_grid_thw": _mx.array(v_grid),
+        }
+
+        # Splice synthesized video_inputs into the parent __call__ by keeping
+        # videos=None (so original path skips real video_processor) and
+        # post-merging. Simplest: call parent with images only, then merge.
+        base = orig_call(self, images=images, text=text, videos=None, **kwargs)
+
+        # Token-expansion for <|video_pad|>: same math as the real path.
+        # If `base` already tokenized text without video markers, we must
+        # re-tokenize with expanded markers. Easiest: do the text-mutation
+        # here before calling orig_call, not after. Restart the call.
+        #
+        # Because tokenization happens inside orig_call, we re-enter with
+        # the pre-expanded text.
+        if text is not None:
+            texts = text if isinstance(text, list) else [text]
+            mutated = []
+            merge_len = ip.merge_size ** 2
+            idx = 0
+            for t_str in texts:
+                s = t_str
+                while self.video_token in s and idx < len(video_rows):
+                    num_video_tokens = int(_np.prod(v_grid[idx])) // merge_len
+                    s = s.replace(self.video_token,
+                                  "<|placeholder|>" * num_video_tokens, 1)
+                    idx += 1
+                s = s.replace("<|placeholder|>", self.video_token)
+                mutated.append(s)
+            # Re-tokenize with expanded markers, drop video token-expansion
+            # that orig_call would have done (we already did it).
+            tok_kwargs = dict(kwargs)
+            tok_kwargs.pop("return_tensors", None)
+            tokenized = self.tokenizer(mutated, **tok_kwargs)
+            # Re-wrap as BatchFeature like orig_call does.
+            from transformers.feature_extraction_utils import BatchFeature
+            from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import to_mlx
+            merged = {**tokenized, **videos_inputs_synth}
+            if images is not None:
+                # image_inputs already merged into `base`; copy the image keys.
+                for k in ("pixel_values", "image_grid_thw"):
+                    if k in base:
+                        merged[k] = base[k]
+            return BatchFeature(data=to_mlx(merged))
+
+        # No text — just merge and return
+        for k, v in videos_inputs_synth.items():
+            base[k] = v
+        return base
+
+    _patched_call._jangtq_video_fallback = True
+    proc_cls.__call__ = _patched_call
 
 
 def load_jangtq_vlm_model(model_path) -> Tuple[nn.Module, object]:
