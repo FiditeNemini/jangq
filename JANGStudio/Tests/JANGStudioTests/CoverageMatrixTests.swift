@@ -251,6 +251,159 @@ final class CoverageMatrixTests: XCTestCase {
         XCTAssertFalse(tokClass.required, "tokenizerClassConcrete is warn-only (required: false)")
     }
 
+    // MARK: - Video VL verification
+
+    func test_verifier_videoVLPreprocessorRequiredForVideoVLModels() async throws {
+        let out = tmp.appendingPathComponent("out-\(UUID().uuidString)")
+        try Self.writeGoodFixture(at: out)
+        // Good fixture has no video_preprocessor_config.json — exactly what we want for this test
+        let plan = ConversionPlan()
+        plan.outputURL = out
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256,
+                              isVL: true, isVideoVL: true, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 0, shardCount: 1)
+        let checks = await PostConvertVerifier().run(plan: plan, skipPythonValidate: true)
+        XCTAssertTrue(checks.contains { $0.id == .videoPreprocessors && $0.status == .fail },
+                      "video-VL model without video_preprocessor_config.json should fail videoPreprocessors check")
+
+        // Add the file; re-run; should pass
+        try #"{"do_resize":true}"#.write(
+            to: out.appendingPathComponent("video_preprocessor_config.json"),
+            atomically: true, encoding: .utf8)
+        let checks2 = await PostConvertVerifier().run(plan: plan, skipPythonValidate: true)
+        XCTAssertTrue(checks2.contains { $0.id == .videoPreprocessors && $0.status == .pass })
+    }
+
+    func test_verifier_videoVLPreprocessorNotReportedForNonVideoModels() async throws {
+        // Image-only VL (isVL=true, isVideoVL=false) should NOT produce a videoPreprocessors row
+        let out = tmp.appendingPathComponent("out-\(UUID().uuidString)")
+        try Self.writeGoodFixture(at: out)
+        try #"{"do_resize":true}"#.write(
+            to: out.appendingPathComponent("preprocessor_config.json"),
+            atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.outputURL = out
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256,
+                              isVL: true, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 0, shardCount: 1)
+        let checks = await PostConvertVerifier().run(plan: plan, skipPythonValidate: true)
+        XCTAssertFalse(checks.contains { $0.id == .videoPreprocessors },
+                       "image-only VL should not include videoPreprocessors row")
+    }
+
+    // MARK: - Generation config verification
+
+    func test_verifier_generationConfigWarnsButDoesNotBlock() async throws {
+        // Good fixture + explicit generation_config.json — should pass
+        let okURL = tmp.appendingPathComponent("out-\(UUID().uuidString)")
+        try Self.writeGoodFixture(at: okURL)
+        try #"{"bos_token_id":1}"#.write(
+            to: okURL.appendingPathComponent("generation_config.json"),
+            atomically: true, encoding: .utf8)
+        let planA = ConversionPlan()
+        planA.outputURL = okURL
+        planA.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256,
+                               isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                               dtype: .bf16, totalBytes: 0, shardCount: 1)
+        let checksA = await PostConvertVerifier().run(plan: planA, skipPythonValidate: true)
+        let gcA = checksA.first { $0.id == .generationConfig }!
+        XCTAssertEqual(gcA.status, .pass, "good fixture has generation_config.json; should pass")
+        XCTAssertFalse(gcA.required, "generationConfig is warn-only (required: false)")
+
+        // Missing generation_config.json — should WARN but not be a required fail
+        let missingURL = tmp.appendingPathComponent("out-\(UUID().uuidString)")
+        try Self.writeGoodFixture(at: missingURL)
+        // Overwrite config.json with num_hidden_layers so layerCountSane passes
+        try #"{"model_type":"qwen3_5_moe","num_hidden_layers":28}"#.write(
+            to: missingURL.appendingPathComponent("config.json"),
+            atomically: true, encoding: .utf8)
+        let planB = ConversionPlan()
+        planB.outputURL = missingURL
+        planB.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256,
+                               isVL: false, isVideoVL: false, hasGenerationConfig: false,
+                               dtype: .bf16, totalBytes: 0, shardCount: 1)
+        let checksB = await PostConvertVerifier().run(plan: planB, skipPythonValidate: true)
+        let gcB = checksB.first { $0.id == .generationConfig }!
+        XCTAssertEqual(gcB.status, .warn, "missing generation_config.json should warn")
+        XCTAssertFalse(gcB.required, "generationConfig must remain warn-only even when missing")
+
+        // Missing generation_config.json must not block finish — confirm no required fails solely from this
+        let requiredFails = checksB.filter { $0.required && $0.status == .fail }
+        XCTAssertTrue(requiredFails.isEmpty,
+                      "missing generation_config alone must not block Finish")
+    }
+
+    // MARK: - chat_template.json as alternative to chat_template.jinja
+
+    func test_verifier_chatTemplateJsonSatisfiesChatCheck() async throws {
+        let out = tmp.appendingPathComponent("out-\(UUID().uuidString)")
+        try Self.writeGoodFixture(at: out)
+        // Strip inline chat_template from tokenizer_config.json
+        try #"{"tokenizer_class":"Qwen2Tokenizer"}"#.write(
+            to: out.appendingPathComponent("tokenizer_config.json"),
+            atomically: true, encoding: .utf8)
+        // Provide chat_template.json (NOT .jinja)
+        try #"{"chat_template":"{% for m in messages %}{{m.content}}{% endfor %}"}"#.write(
+            to: out.appendingPathComponent("chat_template.json"),
+            atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.outputURL = out
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 0, shardCount: 1)
+        let checks = await PostConvertVerifier().run(plan: plan, skipPythonValidate: true)
+        XCTAssertTrue(checks.contains { $0.id == .chatTemplate && $0.status == .pass },
+                      "chat_template.json alone must satisfy the chat template check")
+    }
+
+    // MARK: - Dense (non-MoE) JANG coverage
+
+    func test_preflight_denseLlamaAcceptsEveryJANGProfile() throws {
+        let jang = ["JANG_1L", "JANG_2S", "JANG_2M", "JANG_2L",
+                    "JANG_3K", "JANG_3S", "JANG_3M", "JANG_3L",
+                    "JANG_4K", "JANG_4S", "JANG_4M", "JANG_4L",
+                    "JANG_5K", "JANG_6K", "JANG_6M"]
+        let dense = (model: "llama", experts: 0, isVL: false, dtype: SourceDtype.bf16, label: "dense llama BF16")
+        for prof in jang {
+            let plan = try makePlan(dense, family: .jang, profile: prof)
+            let checks = PreflightRunner().run(plan: plan)
+            let archCheck = checks.first { $0.id == .jangtqArchSupported }!
+            XCTAssertEqual(archCheck.status, .pass, "dense llama JANG \(prof) should pass arch check (JANG accepts all archs)")
+            let args = CLIArgsBuilder.args(for: plan)
+            XCTAssertEqual(args[2], "convert", "dense llama JANG \(prof) should route to `jang_tools convert`")
+            XCTAssertTrue(args.contains(prof))
+        }
+    }
+
+    func test_preflight_denseLlamaRejectsJANGTQ() throws {
+        let dense = (model: "llama", experts: 0, isVL: false, dtype: SourceDtype.bf16, label: "dense llama")
+        for prof in ["JANGTQ2", "JANGTQ3", "JANGTQ4"] {
+            let plan = try makePlan(dense, family: .jangtq, profile: prof)
+            let checks = PreflightRunner().run(plan: plan)
+            XCTAssertTrue(checks.contains { $0.id == .jangtqArchSupported && $0.status == .fail },
+                          "JANGTQ \(prof) on dense llama should be rejected by preflight")
+        }
+    }
+
+    // MARK: - tokenizer.model (sentencepiece) as alternative to tokenizer.json
+
+    func test_verifier_tokenizerModelSatisfiesTokenizerCheck() async throws {
+        let out = tmp.appendingPathComponent("out-\(UUID().uuidString)")
+        try Self.writeGoodFixture(at: out)
+        // Remove tokenizer.json; provide tokenizer.model (sentencepiece) instead
+        try FileManager.default.removeItem(at: out.appendingPathComponent("tokenizer.json"))
+        FileManager.default.createFile(atPath: out.appendingPathComponent("tokenizer.model").path,
+                                       contents: Data([0x01, 0x02, 0x03]))
+        let plan = ConversionPlan()
+        plan.outputURL = out
+        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 0, shardCount: 1)
+        let checks = await PostConvertVerifier().run(plan: plan, skipPythonValidate: true)
+        XCTAssertTrue(checks.contains { $0.id == .tokenizerFiles && $0.status == .pass },
+                      "tokenizer.model (sentencepiece) alone should satisfy tokenizerFiles check")
+    }
+
     // MARK: - Helpers
 
     /// Writes a minimal valid JANG output directory with: config.json, jang_config.json,
