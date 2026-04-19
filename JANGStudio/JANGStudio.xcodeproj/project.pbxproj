@@ -7,8 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2CA760527194D4934549CBB9 /* WizardCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55E86AE1E8A9CA41738204F /* WizardCoordinator.swift */; };
+		33F6AA5CCCA39B8E97910D8A /* SourceStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60D58AD503750EE0B4438BE /* SourceStep.swift */; };
 		3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */; };
+		3C7221B8650EEAA9127455F4 /* ProfileStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5751F4B69FFAD203B180FD6B /* ProfileStep.swift */; };
+		42CC99F4C90F03FD1B6E9B47 /* RunStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2546D3DCECBF31D92E956B39 /* RunStep.swift */; };
 		43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = E694F8C56C73EE3B6ADC6A9F /* ConversionPlan.swift */; };
+		52C5372E44CFC54CA4BD9955 /* ArchitectureStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2756E7878FE746A12702C7B0 /* ArchitectureStep.swift */; };
+		54499F2A52093FDEC1EE83C6 /* VerifyStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = B58A4B8396CA45A4D0FB138F /* VerifyStep.swift */; };
 		5CF3EB0BD85E74F7C4A75946 /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570938F731FB414081F9CBED /* PythonRunner.swift */; };
 		61AB1FE690E52ECD9BF4F047 /* broken_output in Resources */ = {isa = PBXBuildFile; fileRef = D88E45BF47B4C6BE9011652A /* broken_output */; };
 		6B9F115F2F6B1C5BF471445D /* PreflightRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */; };
@@ -51,11 +57,14 @@
 		17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONLProgressParser.swift; sourceTree = "<group>"; };
 		1B32BA9D400197078C4A2AAC /* PostConvertVerifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostConvertVerifierTests.swift; sourceTree = "<group>"; };
 		24FFE334F18C9B1B5E7232E9 /* VerifyCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifyCheck.swift; sourceTree = "<group>"; };
+		2546D3DCECBF31D92E956B39 /* RunStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunStep.swift; sourceTree = "<group>"; };
+		2756E7878FE746A12702C7B0 /* ArchitectureStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchitectureStep.swift; sourceTree = "<group>"; };
 		41F8868FB54726B5242BF9A7 /* PostConvertVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostConvertVerifier.swift; sourceTree = "<group>"; };
 		47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleResolverTests.swift; sourceTree = "<group>"; };
 		4AFCA6EF17ACDF8C518375DA /* JANGStudio.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = JANGStudio.entitlements; sourceTree = "<group>"; };
 		4BD8CB3ED2CD8F9F8B6E9963 /* golden_convert_events.jsonl */ = {isa = PBXFileReference; path = golden_convert_events.jsonl; sourceTree = "<group>"; };
 		570938F731FB414081F9CBED /* PythonRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonRunner.swift; sourceTree = "<group>"; };
+		5751F4B69FFAD203B180FD6B /* ProfileStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStep.swift; sourceTree = "<group>"; };
 		585147A25208BDB4C34E4EDF /* JANGStudio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JANGStudio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5B4B6490B253FA54266EA0EF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversionPlanTests.swift; sourceTree = "<group>"; };
@@ -67,6 +76,9 @@
 		993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreflightRunnerTests.swift; sourceTree = "<group>"; };
 		9BFBF624AEDB08DD5F8CDCD7 /* good_output */ = {isa = PBXFileReference; lastKnownFileType = folder; name = good_output; path = Tests/JANGStudioTests/Fixtures/good_output; sourceTree = SOURCE_ROOT; };
 		A3A7379AF4D578977A7F232C /* PreflightCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreflightCheck.swift; sourceTree = "<group>"; };
+		A55E86AE1E8A9CA41738204F /* WizardCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WizardCoordinator.swift; sourceTree = "<group>"; };
+		B58A4B8396CA45A4D0FB138F /* VerifyStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifyStep.swift; sourceTree = "<group>"; };
+		B60D58AD503750EE0B4438BE /* SourceStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceStep.swift; sourceTree = "<group>"; };
 		C6D3A1C8A36AEE5B62A33F67 /* .keep */ = {isa = PBXFileReference; path = .keep; sourceTree = "<group>"; };
 		C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JANGStudioApp.swift; sourceTree = "<group>"; };
 		D751476D77F0C9FC588A5A0B /* JANGStudioTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -95,6 +107,7 @@
 				AD8AA33483E82D038BB0CC9C /* Resources */,
 				B6BABCDD952B5EE87961EB17 /* Runner */,
 				F2D353DF44343308C3C8507A /* Verify */,
+				485B288C7E005D4814B3A408 /* Wizard */,
 			);
 			path = JANGStudio;
 			sourceTree = "<group>";
@@ -114,6 +127,15 @@
 			path = Tests/JANGStudioTests;
 			sourceTree = "<group>";
 		};
+		485B288C7E005D4814B3A408 /* Wizard */ = {
+			isa = PBXGroup;
+			children = (
+				A55E86AE1E8A9CA41738204F /* WizardCoordinator.swift */,
+				8B56A0F88A356FC608A109FE /* Steps */,
+			);
+			path = Wizard;
+			sourceTree = "<group>";
+		};
 		4CB2EEEB2FF6014E22F26C31 /* JANGStudioUITests */ = {
 			isa = PBXGroup;
 			children = (
@@ -130,6 +152,18 @@
 				6828352632D9B1B484170875 /* ProgressEvent.swift */,
 			);
 			path = Models;
+			sourceTree = "<group>";
+		};
+		8B56A0F88A356FC608A109FE /* Steps */ = {
+			isa = PBXGroup;
+			children = (
+				2756E7878FE746A12702C7B0 /* ArchitectureStep.swift */,
+				5751F4B69FFAD203B180FD6B /* ProfileStep.swift */,
+				2546D3DCECBF31D92E956B39 /* RunStep.swift */,
+				B60D58AD503750EE0B4438BE /* SourceStep.swift */,
+				B58A4B8396CA45A4D0FB138F /* VerifyStep.swift */,
+			);
+			path = Steps;
 			sourceTree = "<group>";
 		};
 		A485AB6BA3487317E7410904 /* App */ = {
@@ -331,6 +365,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				52C5372E44CFC54CA4BD9955 /* ArchitectureStep.swift in Sources */,
 				73695D60002F4B8E2C27CE72 /* BundleResolver.swift in Sources */,
 				43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */,
 				8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */,
@@ -338,9 +373,14 @@
 				98D7410C9F766F583CE8623C /* PostConvertVerifier.swift in Sources */,
 				EA46E2BFBBBAE46976D29566 /* PreflightCheck.swift in Sources */,
 				FD263D5758D9380EB2DF7C4E /* PreflightRunner.swift in Sources */,
+				3C7221B8650EEAA9127455F4 /* ProfileStep.swift in Sources */,
 				D62D076907E51839A85394A7 /* ProgressEvent.swift in Sources */,
 				5CF3EB0BD85E74F7C4A75946 /* PythonRunner.swift in Sources */,
+				42CC99F4C90F03FD1B6E9B47 /* RunStep.swift in Sources */,
+				33F6AA5CCCA39B8E97910D8A /* SourceStep.swift in Sources */,
 				E1742144DDF72A4CB64AF44B /* VerifyCheck.swift in Sources */,
+				54499F2A52093FDEC1EE83C6 /* VerifyStep.swift in Sources */,
+				2CA760527194D4934549CBB9 /* WizardCoordinator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
