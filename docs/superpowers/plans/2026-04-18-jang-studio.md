@@ -142,9 +142,33 @@ Updated as each phase lands. See each task block for detailed step-by-step statu
 - `generation_config.json` warn-but-not-block
 - Arch classes covered: llama, qwen3_5_moe, qwen3_5_moe (VL), qwen3_5_moe (FP8), minimax_m2 (BF16 + FP8), glm_moe_dsa, deepseek_v32
 
-### ⬜ Phase 6 — Python bundle + codesign + notarize (not started)
+### ✅ Phase 6 — Python bundle + codesign + notarize (complete 2026-04-19)
 
-### ⬜ Phase 7 — CI + DMG (not started)
+4 commits. Bundle verified at 305 MB with working `jang` CLI smoke test.
+
+| SHA | Commit |
+|---|---|
+| `8c997fb` | build(jang-studio): build-python-bundle.sh — hermetic python 3.11 + jang[mlx,vlm] |
+| `f214c76` | build(jang-studio): codesign-runtime.sh — deep-sign bundled python + app |
+| `26ddcba` | build(jang-studio): notarize.sh — xcrun notarytool + stapler wrapper |
+| `7b526b6` | build(jang-studio): trim bundle — install mlx-vlm --no-deps (skip cv2/pyarrow) |
+
+**What's shippable:**
+- `Scripts/build-python-bundle.sh` — idempotent (skips if bundle already exists + smoke-tests clean). Downloads python-build-standalone 3.11.10 (aarch64-apple-darwin, install_only), builds & pip-installs the local `jang` wheel with `[mlx]`, then `mlx-vlm --no-deps`, then `transformers/tokenizers/sentencepiece` explicitly. Strips tests/docs/caches/idlelib/tkinter. Ad-hoc codesigns all `.dylib`/`.so`. Fails if bundle exceeds 450 MB cap.
+- `Scripts/codesign-runtime.sh` — deep-signs every `.dylib`/`.so` under `Contents/Resources/python` in leaf-first order, then signs the outer `.app` with hardened runtime + entitlements. Verifies with `codesign --verify --deep --strict` + Gatekeeper pre-check. Requires `$APPLE_DEV_ID_APP` env var (CI-only).
+- `Scripts/notarize.sh` — zips, submits via `xcrun notarytool submit --wait`, staples the ticket, re-verifies with Gatekeeper. Requires `$APPLE_ID` + `$APPLE_TEAM_ID` + `$APPLE_APP_PASSWORD` env vars (CI-only).
+- `project.yml` — `copyFiles` stanza places `build/python/` into `Contents/Resources/python` during build.
+
+**Bundle contents** (305 MB total, top 5):
+- mlx: 153 MB · transformers: 44 MB · numpy: 17 MB · tokenizers: 8 MB · hf_xet: 7 MB
+
+**Deliberate omissions** (mlx-vlm inference-only deps, 232 MB saved): cv2 (OpenCV, webcam input), pyarrow (datasets backend), datasets (training-time), fastapi/uvicorn (mlx-vlm's server mode). If a future code path imports from these, it will `ImportError` at runtime — currently `jang_tools` only imports `mlx_vlm.utils` and `mlx_vlm.tokenizer_utils`, neither of which need them.
+
+**preBuildScripts** (project.yml wiring): deliberately NOT enabled for local builds — the bundle takes ~3 min on first run and blocks Xcode iteration. Real build path is either:
+1. Developer: manually run `Scripts/build-python-bundle.sh` once after cloning, then `xcodebuild` picks up the existing `build/python/`.
+2. CI (Phase 7): explicit `build-python-bundle.sh` step before `xcodebuild` in the release workflow.
+
+### ⬜ Phase 7 — CI + signed DMG (not started)
 
 ### ⬜ Phase 8 — Documentation (not started)
 
