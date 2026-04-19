@@ -88,7 +88,59 @@ Updated as each phase lands. See each task block for detailed step-by-step statu
 
 **Decision:** Spec's original §4.2 had 12 verifier rows; implementation shipped with 10. Dropped `sizeWithinEstimate` (warn-only, nice-to-have) and `inspectSucceeds` (redundant with `schemaValid`). Close the gap cleanly rather than leave dead enum cases.
 
-### ⬜ Phase 5 — Wizard UI (not started)
+### ✅ Phase 5 — Wizard UI + full coverage matrix audit (complete 2026-04-19)
+
+13 commits. 44 tests green (41 XCTest unit + 3 XCUITest).
+
+| SHA | Commit |
+|---|---|
+| `88d36f5` | WizardCoordinator + 5-step sidebar scaffold |
+| `c5efaee` | Step 1 — source picker + inspect-source detection |
+| `0064704` | Step 2 — architecture summary + advanced overrides |
+| `da83d40` | Step 3 — profile picker + live preflight |
+| `c2cd87c` | Step 4 — live run with phase/tick/log streams |
+| `cbd5d78` | Step 5 — verification checklist + Finish |
+| `565936f` | DiagnosticsBundle zip for bug reports |
+| `b588495` | XCUITest verifies 5-step sidebar renders |
+| `4c4ef02` + `8b59e9d` + `b36fc60` | inspect-source + ArchitectureSummary propagate `is_video_vl` |
+| `27f9acb` | Verifier gains video preprocessor, generation_config, layer count, chat_template.json |
+| `c7b4a98` | Extract CLIArgsBuilder from RunStep for testability |
+| `179f11c` | Audit suite covers video-VL, dense, sentencepiece, chat_template.json |
+
+**Wizard UI:**
+- `NavigationSplitView` sidebar with 5 locked/active/complete step icons
+- Step 1: `NSOpenPanel` folder picker → calls `inspect-source --json` → summary card
+- Step 2: detected arch + collapsible force-dtype/force-blocksize overrides
+- Step 3: JANG/JANGTQ tabs (JANGTQ disabled on non-whitelist), all 15+3 profiles, method + hadamard toggles, live preflight panel
+- Step 4: macro + fine progress bars, JSONL log stream, cancel button, Copy Diagnostics on failure
+- Step 5: 12-row verifier checklist, Reveal in Finder / Copy Path / Convert another / Finish
+
+**Verifier now covers 12 rows:**
+1. `jang_config.json` exists + JSON-valid
+2. format=="jang" + format_version 2.x+
+3. `jang validate` schema check (shelled out)
+4. `capabilities` stamp non-empty
+5. Chat template — inline OR `.jinja` OR `.json` (3-way OR)
+6. Tokenizer files — (`tokenizer.json` OR `tokenizer.model`) + `tokenizer_config.json` + `special_tokens_map.json`
+7. Shards match `model.safetensors.index.json`
+8. `preprocessor_config.json` when VL
+8b. `video_preprocessor_config.json` when video-VL
+9. `modeling_*.py` + `configuration_*.py` when MiniMax-class
+10. Tokenizer class concrete (not "TokenizersBackend" — Osaurus-compat warn)
+11. `generation_config.json` present (warn — HF fallback is OK)
+12. `num_hidden_layers > 0` in `config.json` (sanity)
+
+**Audit matrix (`CoverageMatrixTests` + `CLIArgsBuilderTests`):**
+- Every JANG profile (15) × every arch class × preflight gate + args routing
+- Every JANGTQ profile (3) accepted on whitelisted archs (qwen3_5_moe, minimax_m2), rejected on all others
+- Dense (llama) path tested for every JANG profile; JANGTQ rejected on dense
+- Image-VL path (preprocessor_config.json required)
+- Video-VL path (video_preprocessor_config.json required)
+- Chat template alternatives: inline, `.jinja`, `.json` — all three accepted
+- Tokenizer alternatives: `.json` (BPE) or `.model` (sentencepiece)
+- MiniMax custom `.py` files required when `minimax_m2`
+- `generation_config.json` warn-but-not-block
+- Arch classes covered: llama, qwen3_5_moe, qwen3_5_moe (VL), qwen3_5_moe (FP8), minimax_m2 (BF16 + FP8), glm_moe_dsa, deepseek_v32
 
 ### ⬜ Phase 6 — Python bundle + codesign + notarize (not started)
 
