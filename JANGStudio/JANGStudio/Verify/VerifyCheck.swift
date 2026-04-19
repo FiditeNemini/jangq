@@ -4,7 +4,7 @@ import Foundation
 enum VerifyID: String, CaseIterable {
     case jangConfigExists, jangConfigFormat, schemaValid, capabilitiesPresent,
          chatTemplate, tokenizerFiles, shardsMatchIndex, vlPreprocessors,
-         miniMaxCustomPy, tokenizerClassConcrete, sizeWithinEstimate, inspectSucceeds
+         miniMaxCustomPy, tokenizerClassConcrete
 }
 
 struct VerifyCheck: Identifiable, Equatable {
