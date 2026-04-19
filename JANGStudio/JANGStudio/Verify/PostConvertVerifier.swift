@@ -2,7 +2,7 @@
 import Foundation
 
 struct PostConvertVerifier {
-    func run(plan: ConversionPlan, skipPythonValidate: Bool = false) async -> [VerifyCheck] {
+    @MainActor func run(plan: ConversionPlan, skipPythonValidate: Bool = false) async -> [VerifyCheck] {
         guard let out = plan.outputURL else {
             return [.init(id: .jangConfigExists, title: "jang_config.json exists",
                           status: .fail, required: true, hint: "No output dir")]
