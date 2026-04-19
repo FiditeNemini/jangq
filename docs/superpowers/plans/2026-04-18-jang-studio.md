@@ -90,7 +90,7 @@ Updated as each phase lands. See each task block for detailed step-by-step statu
 
 ### ✅ Phase 5 — Wizard UI + full coverage matrix audit (complete 2026-04-19)
 
-13 commits. 44 tests green (41 XCTest unit + 3 XCUITest).
+13 commits. 41 tests green (40 XCTest unit + 1 XCUITest).
 
 | SHA | Commit |
 |---|---|
