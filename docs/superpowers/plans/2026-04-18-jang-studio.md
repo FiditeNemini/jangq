@@ -12,6 +12,77 @@
 
 ---
 
+## Progress Log
+
+Updated as each phase lands. See each task block for detailed step-by-step status.
+
+### ✅ Phase 1 — Python Progress Protocol + inspect-source (complete 2026-04-18)
+
+7 commits, 150 pytest tests green. Backend ready for any GUI/CLI consumer.
+
+| SHA | Commit |
+|---|---|
+| `c001e25` | test: ProgressEmitter JSONL schema and throttling contract |
+| `3146db0` | feat: ProgressEmitter for dual text + JSONL reporting |
+| `ba942dd` | feat(cli): --progress=json and --quiet-text global flags |
+| `faf4f2d` | feat(convert): emit phase + tick events via ProgressEmitter |
+| `88c482d` | feat(jangtq): JSONL progress flags for qwen35/minimax converters |
+| `41bb74d` | feat(cli): inspect-source subcommand for GUI integration |
+| `5d1a566` | test: golden JSONL fixture for Swift parser tests |
+
+**New public API:**
+- `python -m jang_tools --progress=json --quiet-text convert <src> -o <out> -p JANG_4K` emits JSONL events on stderr
+- Same flags for `convert_qwen35_jangtq` and `convert_minimax_jangtq`
+- New `python -m jang_tools inspect-source --json <dir>` returns single-line JSON with model_type, is_moe, num_experts, dtype, jangtq_compatible, is_vl, total_bytes, shard_count
+
+### ✅ Phase 2 — Xcode scaffold + core models (complete 2026-04-18)
+
+4 commits, 10 Swift unit tests green.
+
+| SHA | Commit |
+|---|---|
+| `cf733f3` | chore(jang-studio): xcodegen scaffold + empty SwiftUI app |
+| `2bd789b` | feat(jang-studio): ConversionPlan model with JANGTQ gating + persistence |
+| `35bc4e2` | feat(jang-studio): JSONL v1 parser with version + tolerance |
+| `48404ea` | feat(jang-studio): BundleResolver with dev-mode override |
+
+**What's shippable:**
+- macOS 15 SwiftUI app builds clean (Xcode 26.2, Swift 6)
+- `ConversionPlan` persists to UserDefaults, enforces `{qwen3_5_moe, minimax_m2}` JANGTQ whitelist
+- `JSONLProgressParser` v1 with 6 payload types, malformed-line tolerance, version-mismatch rejection
+- `BundleResolver` with `$JANGSTUDIO_PYTHON_OVERRIDE` dev-mode escape hatch
+
+### ✅ Phase 3 — PythonRunner actor (complete 2026-04-19)
+
+3 commits, 13 Swift unit tests green. Two real bugs caught and fixed mid-phase.
+
+| SHA | Commit |
+|---|---|
+| `8476582` | feat(jang-studio): PythonRunner with async JSONL streaming |
+| `6a3bf08` | fix(jang-studio): restore actor-isolated launch so cancel() can SIGTERM |
+| `6270214` | test(jang-studio): cancellation lands SIGTERM within 3s |
+
+**Bugs caught by two-stage review:**
+- Initial Swift 6 refactor made `launch` static, dropping `self.process = proc` — cancel() became a no-op. Fixed.
+- Plan's `proc.waitUntilExit()` deadlocked the actor (blocking sync call held isolation so `cancel()` could never fire `terminate()`). Replaced with `withCheckedContinuation` + `terminationHandler`. Now cancels in ~0.21s (target was < 3.5s).
+
+**What's shippable:**
+- `actor PythonRunner` streams JSONL events via `AsyncThrowingStream<ProgressEvent, Error>`
+- `cancel()` sends SIGTERM → waits 3s → SIGKILL fallback
+- `ProcessError(code:lastStderr:)` thrown on non-zero exit with last 256 chars of stderr
+
+### 🟡 Phase 4 — Preflight + Verifier (in progress)
+
+### ⬜ Phase 5 — Wizard UI (not started)
+
+### ⬜ Phase 6 — Python bundle + codesign + notarize (not started)
+
+### ⬜ Phase 7 — CI + DMG (not started)
+
+### ⬜ Phase 8 — Documentation (not started)
+
+---
+
 ## File Structure (what gets created/modified)
 
 ### `jang-tools/` (Python side — Phase 1)
