@@ -322,7 +322,13 @@ def _classify_architecture(
     # VL models nest config under text_config — check both levels
     tc = config.get("text_config", {})
     def _cfg(key, default=0):
-        return config.get(key, tc.get(key, default))
+        # vmlx#65: HF configs may spell "this attribute is absent" as
+        # `"num_local_experts": null` instead of omitting the key. dict.get
+        # with a default does NOT replace explicit None values, so the
+        # comparison `None > 1` crashed conversion for Gemma-4-E2B and
+        # similar dense models. Coerce None → default.
+        v = config.get(key, tc.get(key, default))
+        return default if v is None else v
 
     # --- Detect vision encoder ---
     # Check model_type, architecture string, and vision_config presence
