@@ -9,7 +9,9 @@
 /* Begin PBXBuildFile section */
 		2CA760527194D4934549CBB9 /* WizardCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55E86AE1E8A9CA41738204F /* WizardCoordinator.swift */; };
 		33F6AA5CCCA39B8E97910D8A /* SourceStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60D58AD503750EE0B4438BE /* SourceStep.swift */; };
+		361E49E2886C5FDEA36281E6 /* CLIArgsBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7B997A8EC3B7474A12CA184 /* CLIArgsBuilder.swift */; };
 		3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */; };
+		3BAE0452A404B4F7316D7DD9 /* CoverageMatrixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CC6104D9F16F4EA5D5BDCBD /* CoverageMatrixTests.swift */; };
 		3C7221B8650EEAA9127455F4 /* ProfileStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5751F4B69FFAD203B180FD6B /* ProfileStep.swift */; };
 		42CC99F4C90F03FD1B6E9B47 /* RunStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2546D3DCECBF31D92E956B39 /* RunStep.swift */; };
 		43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = E694F8C56C73EE3B6ADC6A9F /* ConversionPlan.swift */; };
@@ -18,6 +20,7 @@
 		555B7323A39B9BD97A766B44 /* DiagnosticsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A5660F31C79379125E9A6E4 /* DiagnosticsBundle.swift */; };
 		5CF3EB0BD85E74F7C4A75946 /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570938F731FB414081F9CBED /* PythonRunner.swift */; };
 		61AB1FE690E52ECD9BF4F047 /* broken_output in Resources */ = {isa = PBXBuildFile; fileRef = D88E45BF47B4C6BE9011652A /* broken_output */; };
+		69E48802F67A8560875697D3 /* CLIArgsBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 277EB647F5B498995EECE22B /* CLIArgsBuilderTests.swift */; };
 		6B9F115F2F6B1C5BF471445D /* PreflightRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */; };
 		73695D60002F4B8E2C27CE72 /* BundleResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1161C47A976A61EB4165DBF0 /* BundleResolver.swift */; };
 		8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */; };
@@ -63,7 +66,9 @@
 		24FFE334F18C9B1B5E7232E9 /* VerifyCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifyCheck.swift; sourceTree = "<group>"; };
 		2546D3DCECBF31D92E956B39 /* RunStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunStep.swift; sourceTree = "<group>"; };
 		2756E7878FE746A12702C7B0 /* ArchitectureStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchitectureStep.swift; sourceTree = "<group>"; };
+		277EB647F5B498995EECE22B /* CLIArgsBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIArgsBuilderTests.swift; sourceTree = "<group>"; };
 		3A5660F31C79379125E9A6E4 /* DiagnosticsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsBundle.swift; sourceTree = "<group>"; };
+		3CC6104D9F16F4EA5D5BDCBD /* CoverageMatrixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageMatrixTests.swift; sourceTree = "<group>"; };
 		3D18912DEAFDE1D0067DF29B /* DiagnosticsBundleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsBundleTests.swift; sourceTree = "<group>"; };
 		41F8868FB54726B5242BF9A7 /* PostConvertVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostConvertVerifier.swift; sourceTree = "<group>"; };
 		47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleResolverTests.swift; sourceTree = "<group>"; };
@@ -86,6 +91,7 @@
 		AE4D059F65E05E1AB8E6BD29 /* WizardFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WizardFlowTests.swift; sourceTree = "<group>"; };
 		B58A4B8396CA45A4D0FB138F /* VerifyStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifyStep.swift; sourceTree = "<group>"; };
 		B60D58AD503750EE0B4438BE /* SourceStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceStep.swift; sourceTree = "<group>"; };
+		B7B997A8EC3B7474A12CA184 /* CLIArgsBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIArgsBuilder.swift; sourceTree = "<group>"; };
 		C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JANGStudioApp.swift; sourceTree = "<group>"; };
 		D751476D77F0C9FC588A5A0B /* JANGStudioTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D88E45BF47B4C6BE9011652A /* broken_output */ = {isa = PBXFileReference; lastKnownFileType = folder; name = broken_output; path = Tests/JANGStudioTests/Fixtures/broken_output; sourceTree = SOURCE_ROOT; };
@@ -123,7 +129,9 @@
 			children = (
 				9041F5409595020F642815F2 /* .keep */,
 				47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */,
+				277EB647F5B498995EECE22B /* CLIArgsBuilderTests.swift */,
 				5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */,
+				3CC6104D9F16F4EA5D5BDCBD /* CoverageMatrixTests.swift */,
 				3D18912DEAFDE1D0067DF29B /* DiagnosticsBundleTests.swift */,
 				FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */,
 				1B32BA9D400197078C4A2AAC /* PostConvertVerifierTests.swift */,
@@ -194,6 +202,7 @@
 			isa = PBXGroup;
 			children = (
 				1161C47A976A61EB4165DBF0 /* BundleResolver.swift */,
+				B7B997A8EC3B7474A12CA184 /* CLIArgsBuilder.swift */,
 				3A5660F31C79379125E9A6E4 /* DiagnosticsBundle.swift */,
 				17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */,
 				570938F731FB414081F9CBED /* PythonRunner.swift */,
@@ -371,7 +380,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				CE348E62858A4F31F5D68179 /* BundleResolverTests.swift in Sources */,
+				69E48802F67A8560875697D3 /* CLIArgsBuilderTests.swift in Sources */,
 				92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */,
+				3BAE0452A404B4F7316D7DD9 /* CoverageMatrixTests.swift in Sources */,
 				B42A3411A8AD04D61E2AE441 /* DiagnosticsBundleTests.swift in Sources */,
 				3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */,
 				CF1F4BFE4733DB3C025BEA58 /* PostConvertVerifierTests.swift in Sources */,
@@ -386,6 +397,7 @@
 			files = (
 				52C5372E44CFC54CA4BD9955 /* ArchitectureStep.swift in Sources */,
 				73695D60002F4B8E2C27CE72 /* BundleResolver.swift in Sources */,
+				361E49E2886C5FDEA36281E6 /* CLIArgsBuilder.swift in Sources */,
 				43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */,
 				555B7323A39B9BD97A766B44 /* DiagnosticsBundle.swift in Sources */,
 				8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */,
