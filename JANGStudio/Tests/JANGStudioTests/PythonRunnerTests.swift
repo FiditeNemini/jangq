@@ -35,6 +35,17 @@ final class PythonRunnerTests: XCTestCase {
         }
     }
 
+    func test_cancelSIGTERMLandsWithinThreeSeconds() async throws {
+        // Long-running fake: 60s sleep
+        let slow = try! makeTempScript("sleep 60")
+        let runner = PythonRunner(executableOverride: slow, extraArgs: [])
+        let t0 = Date()
+        Task { try? await Task.sleep(for: .milliseconds(200)); await runner.cancel() }
+        for try await _ in runner.run() {}
+        let elapsed = Date().timeIntervalSince(t0)
+        XCTAssertLessThan(elapsed, 3.5, "cancel took \(elapsed)s")
+    }
+
     private func makeTempScript(_ body: String) throws -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("ts-\(UUID().uuidString).sh")

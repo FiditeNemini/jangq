@@ -70,7 +70,12 @@ actor PythonRunner {
             return
         }
 
-        proc.waitUntilExit()
+        // Wait for termination off the actor thread so cancel() can acquire
+        // the actor and call proc.terminate() while we are waiting.
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            proc.terminationHandler = { _ in done.resume() }
+        }
+
         _ = await stdoutTask.result
         let lastErrTail = (try? await stderrTask.value) ?? ""
 
