@@ -71,7 +71,22 @@ Updated as each phase lands. See each task block for detailed step-by-step statu
 - `cancel()` sends SIGTERM → waits 3s → SIGKILL fallback
 - `ProcessError(code:lastStderr:)` thrown on non-zero exit with last 256 chars of stderr
 
-### 🟡 Phase 4 — Preflight + Verifier (in progress)
+### ✅ Phase 4 — Preflight + Verifier (complete 2026-04-19)
+
+3 commits, 19 Swift tests green.
+
+| SHA | Commit |
+|---|---|
+| `5c72780` | feat(jang-studio): PreflightRunner — 10 gate checks before Start |
+| `28cd26b` | feat(jang-studio): PostConvertVerifier — 10-row output checklist |
+| `4dad334` | refactor(jang-studio): drop unused VerifyID cases sizeWithinEstimate/inspectSucceeds |
+
+**What's shippable:**
+- `PreflightRunner.run(plan:) -> [PreflightCheck]` — 10 checks (source/config/output/disk/RAM/JANGTQ arch/JANGTQ dtype/bf16-for-512-experts/hadamard-vs-2bit/python-healthy). `fail` blocks Start; `warn` lets it through.
+- `PostConvertVerifier.run(plan:skipPythonValidate:) async -> [VerifyCheck]` — 10 checks (jang_config+schema+capabilities, chat template, tokenizer files, shards match index, VL preprocessors if VL, MiniMax custom .py if minimax_m2, tokenizer class concrete). Required-failure blocks Finish.
+- Two golden fixtures: `good_output/` (every check passes) and `broken_output/` (chat template missing + shard count mismatch).
+
+**Decision:** Spec's original §4.2 had 12 verifier rows; implementation shipped with 10. Dropped `sizeWithinEstimate` (warn-only, nice-to-have) and `inspectSucceeds` (redundant with `schemaValid`). Close the gap cleanly rather than leave dead enum cases.
 
 ### ⬜ Phase 5 — Wizard UI (not started)
 
