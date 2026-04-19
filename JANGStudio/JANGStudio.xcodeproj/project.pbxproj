@@ -271,6 +271,7 @@
 			buildConfigurationList = C73A87BCC2E34056120D63A6 /* Build configuration list for PBXNativeTarget "JANGStudio" */;
 			buildPhases = (
 				AA9B30409B6CE70BCA852885 /* Sources */,
+				61428D773459DA0899DD4E33 /* Embed Python Bundle */,
 			);
 			buildRules = (
 			);
@@ -365,6 +366,27 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		61428D773459DA0899DD4E33 /* Embed Python Bundle */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Embed Python Bundle";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nSRC=\"$SRCROOT/build/python\"\nDST=\"$CODESIGNING_FOLDER_PATH/Contents/Resources/python\"\nif [ ! -d \"$SRC\" ]; then\n  echo \"warning: Python bundle missing at $SRC. Run Scripts/build-python-bundle.sh once.\"\n  exit 0\nfi\nmkdir -p \"$DST\"\nrsync -a --delete \"$SRC/\" \"$DST/\"\necho \"note: Embedded Python bundle copied to $DST\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		9C44E762F59E59B0FCA635D9 /* Sources */ = {

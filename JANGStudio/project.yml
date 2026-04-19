@@ -37,10 +37,19 @@ targets:
         com.apple.security.cs.disable-library-validation: true
         com.apple.security.files.user-selected.read-write: true
     dependencies: []
-    copyFiles:
-      - destination: resources
-        subpath: python
-        files: [{path: build/python}]
+    postCompileScripts:
+      - script: |
+          set -e
+          SRC="$SRCROOT/build/python"
+          DST="$CODESIGNING_FOLDER_PATH/Contents/Resources/python"
+          if [ ! -d "$SRC" ]; then
+            echo "warning: Python bundle missing at $SRC. Run Scripts/build-python-bundle.sh once."
+            exit 0
+          fi
+          mkdir -p "$DST"
+          rsync -a --delete "$SRC/" "$DST/"
+          echo "note: Embedded Python bundle copied to $DST"
+        name: "Embed Python Bundle"
     scheme:
       testTargets: [JANGStudioTests, JANGStudioUITests]
       gatherCoverageData: true
