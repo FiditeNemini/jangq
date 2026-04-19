@@ -9,9 +9,11 @@
 /* Begin PBXBuildFile section */
 		3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */; };
 		43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = E694F8C56C73EE3B6ADC6A9F /* ConversionPlan.swift */; };
+		73695D60002F4B8E2C27CE72 /* BundleResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1161C47A976A61EB4165DBF0 /* BundleResolver.swift */; };
 		8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */; };
 		92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */; };
 		9480E209FB0E63DFC3C755D1 /* JSONLProgressParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */; };
+		CE348E62858A4F31F5D68179 /* BundleResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */; };
 		D62D076907E51839A85394A7 /* ProgressEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6828352632D9B1B484170875 /* ProgressEvent.swift */; };
 		FEC1431FD8D0953599C2EFB3 /* golden_convert_events.jsonl in Resources */ = {isa = PBXBuildFile; fileRef = 09F5FDF4434AA3EE0A055A4A /* golden_convert_events.jsonl */; };
 /* End PBXBuildFile section */
@@ -35,7 +37,9 @@
 
 /* Begin PBXFileReference section */
 		09F5FDF4434AA3EE0A055A4A /* golden_convert_events.jsonl */ = {isa = PBXFileReference; path = golden_convert_events.jsonl; sourceTree = "<group>"; };
+		1161C47A976A61EB4165DBF0 /* BundleResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleResolver.swift; sourceTree = "<group>"; };
 		17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONLProgressParser.swift; sourceTree = "<group>"; };
+		47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleResolverTests.swift; sourceTree = "<group>"; };
 		4AFCA6EF17ACDF8C518375DA /* JANGStudio.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = JANGStudio.entitlements; sourceTree = "<group>"; };
 		585147A25208BDB4C34E4EDF /* JANGStudio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JANGStudio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5B4B6490B253FA54266EA0EF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -66,6 +70,7 @@
 			isa = PBXGroup;
 			children = (
 				9041F5409595020F642815F2 /* .keep */,
+				47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */,
 				5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */,
 				FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */,
 				65A4A1ADE592042CE25311E7 /* Fixtures */,
@@ -120,6 +125,7 @@
 		B6BABCDD952B5EE87961EB17 /* Runner */ = {
 			isa = PBXGroup;
 			children = (
+				1161C47A976A61EB4165DBF0 /* BundleResolver.swift */,
 				17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */,
 			);
 			path = Runner;
@@ -267,6 +273,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CE348E62858A4F31F5D68179 /* BundleResolverTests.swift in Sources */,
 				92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */,
 				3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */,
 			);
@@ -276,6 +283,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				73695D60002F4B8E2C27CE72 /* BundleResolver.swift in Sources */,
 				43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */,
 				8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */,
 				9480E209FB0E63DFC3C755D1 /* JSONLProgressParser.swift in Sources */,
