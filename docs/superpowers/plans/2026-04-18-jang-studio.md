@@ -170,6 +170,26 @@ Updated as each phase lands. See each task block for detailed step-by-step statu
 
 ### ⬜ Phase 7 — CI + signed DMG (not started)
 
+### ✅ Phase 7 — CI + signed DMG on tag (complete 2026-04-19)
+
+1 commit. `.github/workflows/jang-studio.yml` validated.
+
+| SHA | Commit |
+|---|---|
+| `f3fc17b` | ci(jang-studio): build/test on PRs; signed DMG release on jang-studio-v* tag |
+
+**What's shippable:**
+- **build-test job** — runs on every push to main + every PR touching `JANGStudio/**` or `jang-tools/**`. Runs pytest (jang-tools), builds wheel, runs `build-python-bundle.sh`, generates Xcode project, runs Swift XCTest suite (`-only-testing:JANGStudioTests`), uploads test results as artifact on both pass AND fail.
+- **release job** — runs only on `jang-studio-v*` tag push. Imports Developer ID cert from `APPLE_DEV_ID_CERT_P12` secret into a temp keychain, builds Release .app with ad-hoc signing, runs `codesign-runtime.sh` to deep-sign + hardened-runtime-sign, runs `notarize.sh` to submit + wait + staple the app, creates DMG via `create-dmg`, notarizes + staples the DMG, publishes to GitHub Releases.
+- **Required repo secrets** (set before first tag):
+  - `APPLE_DEV_ID_CERT_P12` — base64-encoded .p12 of Developer ID Application cert
+  - `APPLE_DEV_ID_CERT_PW` — .p12 passphrase
+  - `APPLE_DEV_ID_APP` — signing identity string (`Developer ID Application: Jinho Jang (TEAMID)`)
+  - `APPLE_ID` — Apple account email
+  - `APPLE_TEAM_ID` — 10-char team ID
+  - `APPLE_APP_PASSWORD` — app-specific password
+- **Concurrency:** build-test runs cancel on new pushes to same ref; release runs don't (one tag = one release).
+
 ### ⬜ Phase 8 — Documentation (not started)
 
 ---
