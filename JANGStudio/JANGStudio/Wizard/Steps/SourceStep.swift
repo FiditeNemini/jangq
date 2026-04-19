@@ -82,6 +82,8 @@ enum SourceDetector {
         let total_bytes: Int64
         let shard_count: Int
         let is_vl: Bool
+        let is_video_vl: Bool
+        let has_generation_config: Bool
         let jangtq_compatible: Bool
     }
 
@@ -105,6 +107,8 @@ enum SourceDetector {
             default: .unknown
         }
         return .init(modelType: info.model_type, isMoE: info.is_moe, numExperts: info.num_experts,
-                     isVL: info.is_vl, dtype: dtype, totalBytes: info.total_bytes, shardCount: info.shard_count)
+                     isVL: info.is_vl, isVideoVL: info.is_video_vl,
+                     hasGenerationConfig: info.has_generation_config,
+                     dtype: dtype, totalBytes: info.total_bytes, shardCount: info.shard_count)
     }
 }

@@ -18,23 +18,28 @@ final class ConversionPlanTests: XCTestCase {
         XCTAssertFalse(p.isStep1Complete)
         p.sourceURL = URL(fileURLWithPath: "/tmp/x")
         XCTAssertFalse(p.isStep1Complete)
-        p.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false, dtype: .bf16, totalBytes: 0, shardCount: 1)
+        p.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
+                           isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1)
         XCTAssertTrue(p.isStep1Complete)
     }
 
     func test_isJANGTQAllowed_matrix() {
         let p = ConversionPlan()
-        p.detected = .init(modelType: "llama", isMoE: false, numExperts: 0, isVL: false, dtype: .bf16, totalBytes: 0, shardCount: 1)
+        p.detected = .init(modelType: "llama", isMoE: false, numExperts: 0, isVL: false,
+                           isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1)
         XCTAssertFalse(p.isJANGTQAllowed)
 
-        p.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false, dtype: .bf16, totalBytes: 0, shardCount: 1)
+        p.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
+                           isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1)
         XCTAssertTrue(p.isJANGTQAllowed)
 
-        p.detected = .init(modelType: "minimax_m2", isMoE: true, numExperts: 256, isVL: false, dtype: .fp8, totalBytes: 0, shardCount: 1)
+        p.detected = .init(modelType: "minimax_m2", isMoE: true, numExperts: 256, isVL: false,
+                           isVideoVL: false, hasGenerationConfig: true, dtype: .fp8, totalBytes: 0, shardCount: 1)
         XCTAssertTrue(p.isJANGTQAllowed)
 
         // GLM deferred to v1.1
-        p.detected = .init(modelType: "glm_moe_dsa", isMoE: true, numExperts: 256, isVL: false, dtype: .fp8, totalBytes: 0, shardCount: 1)
+        p.detected = .init(modelType: "glm_moe_dsa", isMoE: true, numExperts: 256, isVL: false,
+                           isVideoVL: false, hasGenerationConfig: true, dtype: .fp8, totalBytes: 0, shardCount: 1)
         XCTAssertFalse(p.isJANGTQAllowed)
     }
 

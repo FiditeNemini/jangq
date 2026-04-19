@@ -26,7 +26,8 @@ final class PreflightRunnerTests: XCTestCase {
         let plan = ConversionPlan()
         plan.sourceURL = src
         plan.outputURL = tmp.appendingPathComponent("out")
-        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0, isVL: false, dtype: .bf16, totalBytes: 0, shardCount: 0)
+        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
         plan.family = .jangtq
         plan.profile = "JANGTQ2"
         let checks = PreflightRunner().run(plan: plan)
@@ -39,7 +40,8 @@ final class PreflightRunnerTests: XCTestCase {
         let plan = ConversionPlan()
         plan.sourceURL = src
         plan.outputURL = src   // same!
-        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false, dtype: .bf16, totalBytes: 0, shardCount: 0)
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
         let checks = PreflightRunner().run(plan: plan)
         XCTAssertTrue(checks.contains { $0.id == .outputUsable && $0.status == .fail })
     }
@@ -50,7 +52,8 @@ final class PreflightRunnerTests: XCTestCase {
         let plan = ConversionPlan()
         plan.sourceURL = src
         plan.outputURL = tmp.appendingPathComponent("out")
-        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false, dtype: .bf16, totalBytes: 0, shardCount: 0)
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
         plan.profile = "JANG_2S"
         plan.hadamard = true
         let checks = PreflightRunner().run(plan: plan)

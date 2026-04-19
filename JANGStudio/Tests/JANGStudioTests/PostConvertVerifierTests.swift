@@ -12,17 +12,21 @@ final class PostConvertVerifierTests: XCTestCase {
         let url = fixture("good_output")
         let plan = ConversionPlan()
         plan.outputURL = url
-        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false, dtype: .bf16, totalBytes: 0, shardCount: 1)
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1)
         let checks = await PostConvertVerifier().run(plan: plan, skipPythonValidate: true)
         let requiredFails = checks.filter { $0.required && $0.status == .fail }
         XCTAssertTrue(requiredFails.isEmpty, "unexpected required fails: \(requiredFails.map(\.id))")
+        XCTAssertTrue(checks.contains { $0.id == .generationConfig && $0.status == .pass },
+                      "good output should have generation_config.json")
     }
 
     func test_brokenOutputFlagsChatTemplateAndShardMismatch() async throws {
         let url = fixture("broken_output")
         let plan = ConversionPlan()
         plan.outputURL = url
-        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false, dtype: .bf16, totalBytes: 0, shardCount: 2)
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 2)
         let checks = await PostConvertVerifier().run(plan: plan, skipPythonValidate: true)
         let failedIDs = checks.filter { $0.status == .fail }.map { $0.id }
         XCTAssertTrue(failedIDs.contains(.chatTemplate))

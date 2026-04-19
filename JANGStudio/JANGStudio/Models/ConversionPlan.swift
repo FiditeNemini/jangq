@@ -12,6 +12,8 @@ struct ArchitectureSummary: Codable, Equatable {
     let isMoE: Bool
     let numExperts: Int
     let isVL: Bool
+    let isVideoVL: Bool
+    let hasGenerationConfig: Bool
     let dtype: SourceDtype
     let totalBytes: Int64
     let shardCount: Int

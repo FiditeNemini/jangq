@@ -82,6 +82,14 @@ struct PostConvertVerifier {
                                 hint: ok ? nil : "Missing preprocessor_config.json for VL model"))
         }
 
+        // #8b Video VL preprocessor — only required when detected.isVideoVL
+        if plan.detected?.isVideoVL == true {
+            let ok = FileManager.default.fileExists(atPath: out.appendingPathComponent("video_preprocessor_config.json").path)
+            checks.append(.init(id: .videoVLPreprocessor, title: "Video VL preprocessor config",
+                                status: ok ? .pass : .fail, required: true,
+                                hint: ok ? nil : "Missing video_preprocessor_config.json for video-VL model"))
+        }
+
         // #9 MiniMax custom .py
         if plan.detected?.modelType == "minimax_m2" {
             let files = (try? FileManager.default.contentsOfDirectory(atPath: out.path)) ?? []
@@ -99,6 +107,12 @@ struct PostConvertVerifier {
         checks.append(.init(id: .tokenizerClassConcrete, title: "Tokenizer class concrete",
                             status: classOK ? .pass : .warn, required: false,
                             hint: classOK ? nil : "tokenizer_class=\(cls) — Osaurus serving may fail"))
+
+        // #11 generation_config.json — HF consumers expect this. Warn only (HF will fall back to defaults).
+        let hasGenCfg = FileManager.default.fileExists(atPath: out.appendingPathComponent("generation_config.json").path)
+        checks.append(.init(id: .generationConfig, title: "generation_config.json present",
+                            status: hasGenCfg ? .pass : .warn, required: false,
+                            hint: hasGenCfg ? nil : "HF downstream loaders may fall back to unexpected defaults"))
 
         return checks
     }
