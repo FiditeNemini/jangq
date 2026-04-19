@@ -10,6 +10,12 @@
 
 ---
 
+<p align="center">
+  <a href="JANGStudio/README.md"><b>JANG Studio</b></a> — native macOS wizard for converting HuggingFace models to JANG and JANGTQ formats. Five-step flow with live logs, preflight gate, and 12-row post-convert verifier. Ships as a signed DMG.
+</p>
+
+---
+
 > **App Support:** [MLX Studio](https://mlx.studio) has full native JANG support. [oMLX](https://github.com/jundot/omlx) has added JANG integration ([PR #364](https://github.com/jundot/omlx/pull/364)). LM Studio, Ollama, and Inferencer do not support JANG yet — ask your favorite app's creators to add support, or use `pip install "jang[mlx]"`.
 
 ---
