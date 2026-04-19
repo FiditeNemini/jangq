@@ -190,7 +190,32 @@ Updated as each phase lands. See each task block for detailed step-by-step statu
   - `APPLE_APP_PASSWORD` — app-specific password
 - **Concurrency:** build-test runs cancel on new pushes to same ref; release runs don't (one tag = one release).
 
-### ⬜ Phase 8 — Documentation (not started)
+### ✅ Phase 8 — Documentation (complete 2026-04-19)
+
+4 commits. 5 new docs + 1 top-level README edit.
+
+| SHA | Commit |
+|---|---|
+| `58c4a8a` | docs(jang-studio): README.md |
+| `f2e81f7` | docs(jang-studio): PROGRESS_PROTOCOL v1 spec |
+| `d360c00` | docs(jang-studio): USER_GUIDE + TROUBLESHOOTING + CONTRIBUTING |
+| `bb47f33` | docs: link JANG Studio from top-level README |
+
+**What's shippable:**
+- `JANGStudio/README.md` — install instructions, system requirements, profile cheat sheet, links to all other docs
+- `JANGStudio/docs/PROGRESS_PROTOCOL.md` — JSONL v1 schema spec (for anyone wanting to replace the Swift GUI with another frontend)
+- `JANGStudio/docs/USER_GUIDE.md` — step-by-step wizard walkthrough, all 10 preflight rows + 12 verifier rows enumerated
+- `JANGStudio/docs/TROUBLESHOOTING.md` — 12-row common-errors table (disk full, OOM, missing chat template, stale notarization cache, dev-mode python override, etc.)
+- `JANGStudio/docs/CONTRIBUTING.md` — dev-mode setup with `$JANGSTUDIO_PYTHON_OVERRIDE`, xcodegen regen, running tests, building signed Release .app locally, file layout diagram
+- Top-level `/Users/eric/jang/README.md` — JANG Studio banner + link added between existing MLX Studio block and JANG logo
+
+---
+
+## 🎉 ALL PHASES COMPLETE
+
+**Totals:** 8 phases. 47 commits on `jang-spec-plan5-bundle-python-validation`. 151 pytest + 40 XCTest unit + 1 XCUITest green. Bundle verified at 305 MB. CI workflow + 3 shipping scripts + 5 docs + end-to-end 5-step wizard UI.
+
+**Next action for Eric:** review the branch, merge to `main`, push an initial `jang-studio-v1.0.0-rc1` tag to test the CI release path once Apple Developer secrets are configured.
 
 ---
 
