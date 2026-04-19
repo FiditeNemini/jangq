@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1CEB46204156970095D0BC96 /* DiagnosticsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64334F237853F9D895E70A5E /* DiagnosticsBundle.swift */; };
+		1D05418C040F671C28CA6BAA /* DiagnosticsBundleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F074EFEAB2C8FC4B87E731DB /* DiagnosticsBundleTests.swift */; };
 		2CA760527194D4934549CBB9 /* WizardCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55E86AE1E8A9CA41738204F /* WizardCoordinator.swift */; };
 		33F6AA5CCCA39B8E97910D8A /* SourceStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60D58AD503750EE0B4438BE /* SourceStep.swift */; };
 		3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */; };
@@ -54,6 +56,8 @@
 
 /* Begin PBXFileReference section */
 		1161C47A976A61EB4165DBF0 /* BundleResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleResolver.swift; sourceTree = "<group>"; };
+		64334F237853F9D895E70A5E /* DiagnosticsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsBundle.swift; sourceTree = "<group>"; };
+		F074EFEAB2C8FC4B87E731DB /* DiagnosticsBundleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsBundleTests.swift; sourceTree = "<group>"; };
 		17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONLProgressParser.swift; sourceTree = "<group>"; };
 		1B32BA9D400197078C4A2AAC /* PostConvertVerifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostConvertVerifierTests.swift; sourceTree = "<group>"; };
 		24FFE334F18C9B1B5E7232E9 /* VerifyCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifyCheck.swift; sourceTree = "<group>"; };
@@ -118,6 +122,7 @@
 				9041F5409595020F642815F2 /* .keep */,
 				47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */,
 				5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */,
+				F074EFEAB2C8FC4B87E731DB /* DiagnosticsBundleTests.swift */,
 				FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */,
 				1B32BA9D400197078C4A2AAC /* PostConvertVerifierTests.swift */,
 				993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */,
@@ -187,6 +192,7 @@
 			isa = PBXGroup;
 			children = (
 				1161C47A976A61EB4165DBF0 /* BundleResolver.swift */,
+				64334F237853F9D895E70A5E /* DiagnosticsBundle.swift */,
 				17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */,
 				570938F731FB414081F9CBED /* PythonRunner.swift */,
 			);
@@ -354,6 +360,7 @@
 			files = (
 				CE348E62858A4F31F5D68179 /* BundleResolverTests.swift in Sources */,
 				92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */,
+				1D05418C040F671C28CA6BAA /* DiagnosticsBundleTests.swift in Sources */,
 				3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */,
 				CF1F4BFE4733DB3C025BEA58 /* PostConvertVerifierTests.swift in Sources */,
 				6B9F115F2F6B1C5BF471445D /* PreflightRunnerTests.swift in Sources */,
@@ -368,6 +375,7 @@
 				52C5372E44CFC54CA4BD9955 /* ArchitectureStep.swift in Sources */,
 				73695D60002F4B8E2C27CE72 /* BundleResolver.swift in Sources */,
 				43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */,
+				1CEB46204156970095D0BC96 /* DiagnosticsBundle.swift in Sources */,
 				8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */,
 				9480E209FB0E63DFC3C755D1 /* JSONLProgressParser.swift in Sources */,
 				98D7410C9F766F583CE8623C /* PostConvertVerifier.swift in Sources */,

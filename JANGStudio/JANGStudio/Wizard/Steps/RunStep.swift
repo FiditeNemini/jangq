@@ -39,6 +39,14 @@ struct RunStep: View {
             } else if coord.plan.run == .failed {
                 Label("Conversion failed — see log", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
                 Button("Retry") { Task { await start() } }
+                Button("Copy Diagnostics") {
+                    let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
+                    let events = logs.filter { $0.hasPrefix("{") }
+                    if let url = try? DiagnosticsBundle.write(plan: coord.plan, logLines: logs, eventLines: events,
+                                                              verify: [], to: desktop) {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                }
             }
         }
         .padding()
