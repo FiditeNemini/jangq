@@ -11,6 +11,7 @@
 		3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */; };
 		43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = E694F8C56C73EE3B6ADC6A9F /* ConversionPlan.swift */; };
 		5CF3EB0BD85E74F7C4A75946 /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570938F731FB414081F9CBED /* PythonRunner.swift */; };
+		6B9F115F2F6B1C5BF471445D /* PreflightRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */; };
 		73695D60002F4B8E2C27CE72 /* BundleResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1161C47A976A61EB4165DBF0 /* BundleResolver.swift */; };
 		8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */; };
 		92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */; };
@@ -18,6 +19,8 @@
 		CE348E62858A4F31F5D68179 /* BundleResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */; };
 		D40090D0FEB1DDA976ED672E /* PythonRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8034E6B623B47CCA640CE7BE /* PythonRunnerTests.swift */; };
 		D62D076907E51839A85394A7 /* ProgressEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6828352632D9B1B484170875 /* ProgressEvent.swift */; };
+		EA46E2BFBBBAE46976D29566 /* PreflightCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3A7379AF4D578977A7F232C /* PreflightCheck.swift */; };
+		FD263D5758D9380EB2DF7C4E /* PreflightRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E007B276BE6D5E6BBD83A3F /* PreflightRunner.swift */; };
 		FEC1431FD8D0953599C2EFB3 /* golden_convert_events.jsonl in Resources */ = {isa = PBXBuildFile; fileRef = 09F5FDF4434AA3EE0A055A4A /* golden_convert_events.jsonl */; };
 /* End PBXBuildFile section */
 
@@ -51,8 +54,11 @@
 		5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversionPlanTests.swift; sourceTree = "<group>"; };
 		65E6BD1572E3801538830D75 /* JANGStudioUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6828352632D9B1B484170875 /* ProgressEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressEvent.swift; sourceTree = "<group>"; };
+		7E007B276BE6D5E6BBD83A3F /* PreflightRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreflightRunner.swift; sourceTree = "<group>"; };
 		8034E6B623B47CCA640CE7BE /* PythonRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonRunnerTests.swift; sourceTree = "<group>"; };
 		9041F5409595020F642815F2 /* .keep */ = {isa = PBXFileReference; path = .keep; sourceTree = "<group>"; };
+		993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreflightRunnerTests.swift; sourceTree = "<group>"; };
+		A3A7379AF4D578977A7F232C /* PreflightCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreflightCheck.swift; sourceTree = "<group>"; };
 		C6D3A1C8A36AEE5B62A33F67 /* .keep */ = {isa = PBXFileReference; path = .keep; sourceTree = "<group>"; };
 		C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JANGStudioApp.swift; sourceTree = "<group>"; };
 		D751476D77F0C9FC588A5A0B /* JANGStudioTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -68,6 +74,7 @@
 				4ECBC55FCA16B1D98FEA2703 /* Models */,
 				AD8AA33483E82D038BB0CC9C /* Resources */,
 				B6BABCDD952B5EE87961EB17 /* Runner */,
+				F2D353DF44343308C3C8507A /* Verify */,
 			);
 			path = JANGStudio;
 			sourceTree = "<group>";
@@ -79,6 +86,7 @@
 				47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */,
 				5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */,
 				FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */,
+				993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */,
 				8034E6B623B47CCA640CE7BE /* PythonRunnerTests.swift */,
 				65A4A1ADE592042CE25311E7 /* Fixtures */,
 			);
@@ -158,6 +166,15 @@
 				4CB2EEEB2FF6014E22F26C31 /* JANGStudioUITests */,
 				D6942F5C3170FEFB5C318950 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		F2D353DF44343308C3C8507A /* Verify */ = {
+			isa = PBXGroup;
+			children = (
+				A3A7379AF4D578977A7F232C /* PreflightCheck.swift */,
+				7E007B276BE6D5E6BBD83A3F /* PreflightRunner.swift */,
+			);
+			path = Verify;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -286,6 +303,7 @@
 				CE348E62858A4F31F5D68179 /* BundleResolverTests.swift in Sources */,
 				92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */,
 				3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */,
+				6B9F115F2F6B1C5BF471445D /* PreflightRunnerTests.swift in Sources */,
 				D40090D0FEB1DDA976ED672E /* PythonRunnerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -298,6 +316,8 @@
 				43E8A33E0484F8C7A117929D /* ConversionPlan.swift in Sources */,
 				8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */,
 				9480E209FB0E63DFC3C755D1 /* JSONLProgressParser.swift in Sources */,
+				EA46E2BFBBBAE46976D29566 /* PreflightCheck.swift in Sources */,
+				FD263D5758D9380EB2DF7C4E /* PreflightRunner.swift in Sources */,
 				D62D076907E51839A85394A7 /* ProgressEvent.swift in Sources */,
 				5CF3EB0BD85E74F7C4A75946 /* PythonRunner.swift in Sources */,
 			);
