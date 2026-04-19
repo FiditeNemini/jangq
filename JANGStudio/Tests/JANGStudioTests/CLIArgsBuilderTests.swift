@@ -2,6 +2,7 @@
 import XCTest
 @testable import JANGStudio
 
+@MainActor
 final class CLIArgsBuilderTests: XCTestCase {
     private func plan(src: String = "/tmp/src",
                       out: String = "/tmp/out",
