@@ -5,11 +5,12 @@
 # What it does:
 #   1. Downloads python-build-standalone (Astral) aarch64-apple-darwin tarball
 #   2. Extracts to build/python/
-#   3. Builds + pip-installs the local jang-tools wheel with [mlx,vlm] extras
+#   3. Builds + pip-installs the local jang-tools wheel with [mlx] extras,
+#      then mlx-vlm --no-deps (skips cv2/pyarrow/datasets), then transformers stack
 #   4. Strips tests/docs/caches and unused stdlib (idlelib, tkinter, ensurepip)
 #   5. Ad-hoc codesigns every .dylib / .so (real signing happens in codesign-runtime.sh)
 #   6. Runs a smoke test: python3 -m jang_tools --version
-#   7. Fails the build if total size exceeds 300 MB
+#   7. Fails the build if total size exceeds 450 MB
 #
 # Output: build/python/ (relative to JANGStudio/) containing a self-contained
 # interpreter + site-packages with jang, mlx, mlx-lm, mlx-vlm, numpy, safetensors,
@@ -25,7 +26,7 @@ JANG_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_ROOT="$JANG_ROOT/JANGStudio/build/python"
 STANDALONE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.11.10+20241016-aarch64-apple-darwin-install_only.tar.gz"
 WHEEL_DIR="$JANG_ROOT/jang-tools/dist"
-MAX_MB=700
+MAX_MB=450
 
 # Idempotency: if the bundle already exists and smoke-tests OK, skip.
 if [ -x "$BUILD_ROOT/bin/python3" ]; then
@@ -53,10 +54,20 @@ if [ -z "$WHEEL" ]; then
 fi
 echo "[bundle] wheel: $WHEEL"
 
-echo "[bundle] pip installing jang[mlx,vlm] into bundled site-packages"
+echo "[bundle] pip installing jang[mlx] (primary stack)"
 "$BUILD_ROOT/bin/python3" -m pip install --quiet --no-compile --disable-pip-version-check \
     --target "$BUILD_ROOT/lib/python3.11/site-packages" \
-    "${WHEEL}[mlx,vlm]"
+    "${WHEEL}[mlx]"
+
+echo "[bundle] pip installing mlx-vlm --no-deps (skips cv2/pyarrow/datasets — inference-only deps)"
+"$BUILD_ROOT/bin/python3" -m pip install --quiet --no-compile --disable-pip-version-check \
+    --target "$BUILD_ROOT/lib/python3.11/site-packages" \
+    --no-deps "mlx-vlm>=0.1"
+
+echo "[bundle] pip installing transformers/tokenizers/sentencepiece (needed by jang_tools tokenizer detection)"
+"$BUILD_ROOT/bin/python3" -m pip install --quiet --no-compile --disable-pip-version-check \
+    --target "$BUILD_ROOT/lib/python3.11/site-packages" \
+    "transformers>=4.40" "tokenizers>=0.19" "sentencepiece>=0.2"
 
 echo "[bundle] stripping tests, docs, caches, unused stdlib"
 find "$BUILD_ROOT" -type d \( -name "__pycache__" -o -name "tests" -o -name "test" \) -prune -exec rm -rf {} + 2>/dev/null || true
