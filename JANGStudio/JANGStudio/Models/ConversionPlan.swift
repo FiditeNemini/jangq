@@ -17,6 +17,20 @@ struct ArchitectureSummary: Codable, Equatable {
     let dtype: SourceDtype
     let totalBytes: Int64
     let shardCount: Int
+
+    init(modelType: String, isMoE: Bool, numExperts: Int, isVL: Bool,
+         isVideoVL: Bool = false, hasGenerationConfig: Bool = false,
+         dtype: SourceDtype, totalBytes: Int64, shardCount: Int) {
+        self.modelType = modelType
+        self.isMoE = isMoE
+        self.numExperts = numExperts
+        self.isVL = isVL
+        self.isVideoVL = isVideoVL
+        self.hasGenerationConfig = hasGenerationConfig
+        self.dtype = dtype
+        self.totalBytes = totalBytes
+        self.shardCount = shardCount
+    }
 }
 
 struct ArchitectureOverrides: Codable, Equatable {
