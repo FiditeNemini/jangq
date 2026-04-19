@@ -66,10 +66,15 @@ targets:
   JANGStudioUITests:
     type: bundle.ui-testing
     platform: macOS
-    sources: [Tests/JANGStudioUITests]
+    sources:
+      - path: Tests/JANGStudioUITests
+      - path: Tests/JANGStudioTests/Fixtures/fake_convert.sh
+        buildPhase: resources
     dependencies: [{target: JANGStudio}]
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        ENABLE_HARDENED_RUNTIME: NO
