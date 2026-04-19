@@ -61,6 +61,8 @@ def cmd_inspect_source(args) -> None:
         "shard_count": len(list(src.glob("*.safetensors"))),
         "jangtq_compatible": model_type in _JANGTQ_V1_WHITELIST,
         "is_vl": bool((src / "preprocessor_config.json").exists()),
+        "is_video_vl": bool((src / "video_preprocessor_config.json").exists()),
+        "has_generation_config": bool((src / "generation_config.json").exists()),
     }
     if args.json:
         print(json.dumps(summary, indent=None, separators=(",", ":")))

@@ -19,6 +19,20 @@ def test_inspect_source_prints_valid_json():
     assert data["dtype"] in ("bfloat16", "float16", "float8_e4m3fn", "unknown")
     assert "jangtq_compatible" in data
     assert data["jangtq_compatible"] is True   # qwen3_5_moe is in the v1 whitelist
+    assert "is_video_vl" in data
+    assert data["is_video_vl"] is False   # tiny_qwen fixture has no video_preprocessor_config.json
+    assert "has_generation_config" in data
+
+
+def test_inspect_source_video_vl_false_for_non_video_fixture():
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "inspect-source", "--json", str(FIXTURE)],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(r.stdout)
+    assert data["is_video_vl"] is False
+    assert "num_hidden_layers" in data
+    assert data["num_hidden_layers"] == 2   # tiny_qwen fixture value
 
 
 def test_inspect_source_missing_config_errors(tmp_path):
