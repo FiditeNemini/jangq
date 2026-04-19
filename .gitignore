@@ -30,6 +30,8 @@ gemma4_*.md
 
 # Scripts (private experiments)
 scripts/
+# Allow JANGStudio build scripts (build-python-bundle, codesign, notarize)
+!JANGStudio/Scripts/
 crack_*.py
 probe_*.py
 benchmark_*.py
