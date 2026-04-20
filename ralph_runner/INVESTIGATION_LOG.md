@@ -5573,3 +5573,48 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: extend M190 refactor-pattern to other line-number-dependent tests. Candidates: any `offenders.append(line_no)` site across the repo (grep for pattern). Proactive 4-bump-rule enforcement.
 
 **Next iteration should pick:** jang-server CORS posture (real security finding, not fixed in iter-126/127), OR extend the rate-limit dependency to /retry + /admin/purge endpoints (quick win), OR apply the M190 structural-slicing pattern to any other moving-line allowlists in the test suite.
+
+---
+
+## 2026-04-20 iteration 128 — M191 jang-server CORS posture (wildcard → env-driven allowlist)
+
+**Angle:** Iter-127 forecast top-priority: jang-server CORS posture. Pre-M191 the server shipped with `allow_origins=["*"]`, `allow_methods=["*"]`, `allow_headers=["*"]` — the standard "just works" CORS default from FastAPI quickstarts. Real security finding iter-126 noticed during M189 work but explicitly deferred (not in scope for body-size middleware).
+
+**Deep trace walkthrough:**
+1. **Audited the auth scheme first to size the CSRF threat.** `check_auth` (line 642) reads `Authorization: Bearer <token>` header OR `?api_key=<token>` query param. With `allow_credentials` defaulting to False in Starlette's CORSMiddleware, browsers strip cookies and Authorization headers on cross-origin wildcard-origin requests → credentialed CSRF via cookies is blocked. Query-param auth bypasses the strip BUT requires the attacker to already have the API key (so CSRF-via-victim's-browser is not the attack; the attack is browser-side simple-request leak of responses to any origin that knows a key).
+2. **Identified the real threats even with credentials-off:**
+   - (a) response READS leak to any origin for unauthed endpoints (iter-114 M179 moved auth onto all GETs, but error messages still leak path hints and env fragments via Pydantic validation errors).
+   - (b) query-param-auth simple requests bypass the cookie strip, so if a key leaks anywhere (log, copy-paste, Slack screenshot), ANY origin can exercise the API.
+   - (c) attack surface expansion — `allow_methods=["*"]` means any new route with PATCH/PUT is automatically cross-origin accessible even if the auth scheme wasn't designed for browser cross-origin use.
+3. **Picked principle of least privilege.** Default restrictive (localhost only), opt-in wildcard via `JANG_CORS_ORIGINS="*"` env var. Methods restricted to GET/POST/DELETE/OPTIONS (what routes use). Headers restricted to Content-Type + Authorization (what handlers read).
+4. **Pulled the middleware config into module-level constants** (`CORS_ORIGINS`, `CORS_METHODS`, `CORS_HEADERS`). Makes them greppable, pin-testable, and more obvious in code review than inline `["*"]` literals. Matches the pattern iter-126 used for `MAX_BODY_BYTES`.
+5. **Wrote 6 pin tests.** The last test (`test_cors_middleware_uses_the_restricted_constants`) is the important one — it pins that the middleware REFERENCES the constants, not reintroduces inline wildcards. A future edit that changes `allow_origins=CORS_ORIGINS` back to `allow_origins=["*"]` while leaving `CORS_ORIGINS` alone would slip past the other 5 tests. This test catches that specific footgun.
+6. **Ran suite.** 40/40 pass (was 34, +6). No regressions.
+
+**Meta-lesson — permissive defaults shift the security burden to every operator, forever.** Default `allow_origins=["*"]` was probably written to "just work" in development. The cost: every production deployment inherits an attack surface until the operator remembers to tighten it — and most won't. **Rule: for security-relevant config, pick the RESTRICTIVE default and require operators to opt in to broader access.** Inverse of M189's "reasonable default" rule — "reasonable" there meant "common", but for security, "reasonable" means "safe". Industry pattern: nginx `default_server` restrictive, ssh `PermitRootLogin no`, modern web frameworks shipping CSP on by default.
+
+**Meta-lesson — tighten origins + methods + headers as a single unit.** I initially thought just fixing `allow_origins` was the fix. Then realized `allow_methods=["*"]` and `allow_headers=["*"]` independently expand the attack surface. A malicious origin even on a tight allowlist can still issue PATCH/PUT or use arbitrary custom headers if those remain wildcards. **Rule: CORS is a triad; fix all three in one change. Audit the triad as a unit.** Tests that check only `allow_origins` tighten 1/3 of the attack surface — green tests, false confidence.
+
+**Meta-lesson — the "middleware uses constants" pin test is the anti-regression keystone.** Five tests check `CORS_ORIGINS`/`CORS_METHODS`/`CORS_HEADERS` constants individually. None catch a future edit that swaps `allow_origins=CORS_ORIGINS` → `allow_origins=["*"]` while leaving the constants alone. The sixth test (`test_cors_middleware_uses_the_restricted_constants`) pins the reference at the middleware call site — closing the loophole. **Rule: when a named constant "configures" something, add a test that pins the CONSUMER references the constant. The constant alone isn't enough — the consumer could stop using it.** Parallels iter-118 M183's lesson: you can't just test the producer; you must test the consumer too.
+
+**Items touched:**
+- M191 [x] — CORS tightened. 6 new regression tests including an anti-regression pin at the consumer site.
+
+**Commit:** (this iteration)
+
+**Verification:** 40 jang-server tests pass (was 34, +6).
+
+**Closed-status tally:** 144 (iter 127) + M191 = 145 items touched, all closed. Zero known bugs as of iter-128 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (high priority — security continuation):** audit jang-server's query-param auth. Tokens in `?api_key=` leak into (1) server access logs, (2) browser history, (3) Referer headers on outbound links, (4) proxy logs. Should require Authorization header and deprecate query-param fallback — operator migration path + 1-iter grace.
+- **NEW:** extend the rate-limit dependency to /retry + /admin/purge (carried from iter-127 forecast; /retry can spawn subprocess work = real DoS vector).
+- **NEW (security):** logging audit — grep jang-server's log calls for token/secret shapes. iter-118 M183 covers SOURCE; this would cover RUNTIME (log lines at format-time).
+- **NEW:** apply M190 structural-slicing pattern to other moving-line allowlists. grep tests/ for `range(...)` in allowlist context.
+
+**Next iteration should pick:** query-param auth audit (security continuation, naturally extends M191's CORS thinking), OR extend rate-limit to /retry+/admin/purge (simpler closed-form fix), OR runtime-log secrets audit.

@@ -665,11 +665,32 @@ app = FastAPI(
     version="2.0.0",
 )
 
+# M191 (iter 127): tighten CORS from wildcard to env-driven allowlist.
+# Pre-M191 the server shipped with allow_origins=allow_methods=
+# allow_headers=["*"], which let any origin issue any method with any
+# header — a browser CSRF vector was dampened only by the default
+# allow_credentials=False (browsers strip cookies/auth headers on
+# wildcard origins), BUT response READS leak to any origin if the
+# endpoint forgets auth or exposes data via error messages. Principle
+# of least privilege: make the operator OPT IN to broader access.
+#
+# JANG_CORS_ORIGINS: comma-separated origin allowlist. Default localhost
+# only (safe for dev). Set to "*" explicitly to opt back in to the old
+# wildcard behavior for truly public APIs.
+# Methods + headers are restricted to the ones this server actually
+# uses: GET/POST/DELETE for routes, OPTIONS for preflight; Content-Type
+# + Authorization for auth. No PATCH, PUT, TRACE, CONNECT, or custom
+# X-Foo headers — none are handled by any route.
+_cors_origins_env = os.environ.get("JANG_CORS_ORIGINS", "http://localhost,http://127.0.0.1")
+CORS_ORIGINS = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+CORS_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
+CORS_HEADERS = ["Content-Type", "Authorization"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_methods=CORS_METHODS,
+    allow_headers=CORS_HEADERS,
 )
 
 
