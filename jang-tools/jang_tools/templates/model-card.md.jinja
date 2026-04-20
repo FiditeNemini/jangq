@@ -6,18 +6,18 @@ tags:
   - mlx
   - apple-silicon
   - quantized
-{%- if is_vl %}
+{% if is_vl %}
   - vision-language
-{%- endif %}
-{%- if is_video_vl %}
+{% endif %}
+{% if is_video_vl %}
   - video
-{%- endif %}
-{%- if has_tool_parser %}
+{% endif %}
+{% if has_tool_parser %}
   - tool-use
-{%- endif %}
-{%- if has_reasoning %}
+{% endif %}
+{% if has_reasoning %}
   - reasoning
-{%- endif %}
+{% endif %}
 quantization_config:
   family: {{ family }}
   profile: {{ profile }}
