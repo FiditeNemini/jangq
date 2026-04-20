@@ -798,6 +798,22 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `test_sourceStep_applyRecommendation_derives_family_from_profile`: ensures the replacement `plan.profile.hasPrefix("JANGTQ")` check is present.
       **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift:253-280`. 165 Swift tests pass (was 163, +2). Python 314 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M145 (applyRecommendation extension: hadamard/method/forceDtype preservation)** — iter-66 M144 coupled family+profile. iter-67 extends the same "preserve if user manually changed it" seed-default pattern to the remaining unconditional overwrites.
+      **Pre-iter-67 remaining unconditional overwrites:**
+      - `plan.method = recMethod` — wipes user's RTN/MSE-all pick on re-pick.
+      - `plan.hadamard = rec.recommended.hadamard` — wipes user's manual toggle.
+      - `plan.overrides.forceDtype = ft` — wipes user's manual Force dtype override (when rec supplies one, e.g. on 512+ expert models).
+      **Concrete pathologies:**
+      - Hadamard: user picks source A → profile=JANG_2L → applyRecommendation sets hadamard=false (correct, low-bit). User goes to ProfileStep and for some reason ticks hadamard ON (experimental). Re-picks source → hadamard silently flipped back to false.
+      - Method: user ticks RTN for faster convert on a quick test. Re-picks source → silently back to MSE. 10× slow convert starts, user wonders why.
+      - forceDtype: user forces fp16 on a smaller MoE for speed (they know their hardware is safe). Re-picks similar source → rec says bfloat16 → silently overwritten back.
+      **Fix (iter 67):**
+      - `method` guarded by `plan.method == seedMethod` where `seedMethod` is parsed from `settings.defaultMethod` via the same case table applyDefaults uses.
+      - `hadamard` guarded by `plan.hadamard == settings.defaultHadamardEnabled`.
+      - `forceDtype` guarded by `plan.overrides.forceDtype == nil` (seed default is nil — no Settings seed for this field).
+      **Tests (+3) in WizardStepContinueGateTests.swift:** source-inspection pins that each guard is present — `if plan.method == seedMethod`, `if plan.hadamard == settings.defaultHadamardEnabled`, `if plan.overrides.forceDtype == nil`. Matches iter-54/56/58 test style.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift:285-335`. 168 Swift tests pass (was 165, +3). Python 314 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

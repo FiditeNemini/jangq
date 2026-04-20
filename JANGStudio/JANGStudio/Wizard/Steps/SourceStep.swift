@@ -282,19 +282,49 @@ struct SourceStep: View {
         // else: user manually picked a profile in ProfileStep. Preserve
         // BOTH profile and family to keep them in sync.
 
-        // Method
+        // M145 (iter 67): extend iter-66 M144's "user hasn't touched"
+        // preservation to method, hadamard, and forceDtype. Pre-iter-67
+        // these three fields were ALL unconditionally overwritten every
+        // time the user re-picked a source — silently wiping any manual
+        // ProfileStep choices the user made (e.g., toggling Hadamard off
+        // for a 2-bit profile, switching to RTN method for speed, forcing
+        // bfloat16). Same UX pathology as the pre-iter-65 profile bug.
+        //
+        // "User hasn't touched" signal = field still matches what
+        // applyDefaults seeded it with (from settings.default*).
+
+        // Method: preserve if user manually picked something different
+        // from their Settings default.
         let recMethod: QuantMethod = switch rec.recommended.method {
         case "rtn": .rtn
         case "mse-all": .mseAll
         default: .mse
         }
-        plan.method = recMethod
+        let seedMethod: QuantMethod = switch settings.defaultMethod.lowercased() {
+        case "rtn": .rtn
+        case "mse-all", "mseall", "mse_all": .mseAll
+        case "mse": .mse
+        default: .mse   // applyDefaults leaves method untouched on unknown; seed with init default
+        }
+        if plan.method == seedMethod {
+            plan.method = recMethod
+        }
 
-        // Hadamard
-        plan.hadamard = rec.recommended.hadamard
+        // Hadamard: preserve if user manually toggled from their Settings
+        // default. Pre-iter-67 a user who turned hadamard off for a 2-bit
+        // convert got it silently re-enabled on source re-pick.
+        if plan.hadamard == settings.defaultHadamardEnabled {
+            plan.hadamard = rec.recommended.hadamard
+        }
 
-        // Force dtype — only set if recommendation has one
-        if let forceDtypeStr = rec.recommended.forceDtype {
+        // Force dtype — only set if recommendation has one AND the user
+        // hasn't already chosen an override. Pre-iter-67 this overwrote
+        // any user-set forceDtype when rec supplied one (which it does
+        // for 512+ expert MoE models — so a user who manually forced fp16
+        // for speed on a smaller variant got bfloat16 slammed back on
+        // re-pick).
+        if plan.overrides.forceDtype == nil,
+           let forceDtypeStr = rec.recommended.forceDtype {
             let forceDtype: SourceDtype? = switch forceDtypeStr {
             case "bfloat16": .bf16
             case "float16": .fp16

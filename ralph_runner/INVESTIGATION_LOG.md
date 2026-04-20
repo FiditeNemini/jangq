@@ -2749,3 +2749,45 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 - **NEW**: "coupled fields" audit class — grep the codebase for fields that must change together. family+profile is one; blockSize+method might be another.
 
 **Next iteration should pick:** M145 (hadamard/method/forceDtype user-choice preservation) OR coupled-fields grep-audit.
+
+## 2026-04-20 iteration 67 — M145 extend preservation to hadamard/method/forceDtype
+
+**Angle:** Iter-66 forecast. Iter-65 preserved profile, iter-66 coupled family to profile, iter-67 handles the three remaining unconditional overwrites.
+
+**Deep trace walkthrough:**
+1. **Field matrix post-iter-66:**
+   ```
+   family:          derived from profile atomically ✓
+   profile:         conditional (iter-65 seed-default)
+   method:          unconditional ← this iter
+   hadamard:        unconditional ← this iter
+   forceDtype:      unconditional (if rec supplies) ← this iter
+   forceBlockSize:  conditional (nil-check) ✓
+   ```
+2. **Apply same `user-hasn't-touched` pattern** — compare current value to what `applyDefaults` would have seeded from Settings. If they match, user hasn't touched, overwrite OK. Otherwise preserve.
+3. **method:** Settings stores `defaultMethod` as raw string ("mse", "rtn", "mse-all"). `applyDefaults` parses to QuantMethod. The fix re-runs the same parsing into `seedMethod`, then compares `plan.method == seedMethod`.
+4. **hadamard:** Settings stores `defaultHadamardEnabled` as Bool directly. Simple `plan.hadamard == settings.defaultHadamardEnabled` check.
+5. **forceDtype:** no Settings seed for this field — applyDefaults doesn't touch `overrides.forceDtype`. Init default is nil. "User hasn't touched" = still nil. `if plan.overrides.forceDtype == nil` guard.
+6. **Subtle: method's `default: .mse` fallback.** `applyDefaults` has `default: break` on unknown settings string — leaves method at init default. My `seedMethod` parser has `default: .mse` — which matches init. So consistent behavior.
+
+**Why this isn't scope creep:** iter-66 established the design decision (preserve user's manual choices). iter-67 completes it — without it, the fix is half-done and users still silently lose hadamard/method/forceDtype adjustments on re-pick. Taking one iter to finish the set keeps the fix coherent.
+
+**Items touched:**
+- M145 [x] — `hadamard`, `method`, `forceDtype` now preserved when user manually changed them.
+
+**Commit:** (this iteration)
+
+**Verification:** 168 Swift tests pass (was 165, +3 for M145 preservation pins). Python 314 + ralph 73 unchanged.
+
+**Closed-status tally:** 79 (iter 66) + M145 = 80 closed / 100 total = **80.0% closure rate.**
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW**: "coupled-fields grep-audit" generalizing iter-66 M144 — find more pairs of semantically-linked fields in ConversionPlan + AppSettings that must update atomically.
+- **NEW**: audit ArchitectureStep.swift and ProfileStep.swift for any other places that mutate `plan.*` fields — make sure changes from ProfileStep aren't silently reverted elsewhere.
+
+**Next iteration should pick:** coupled-fields audit (generalize iter-66) OR ArchitectureStep mutation sweep.

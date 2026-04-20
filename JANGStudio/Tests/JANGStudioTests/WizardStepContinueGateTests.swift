@@ -225,6 +225,40 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M145 (iter 67): hadamard / method / forceDtype preservation
+    //
+    // Pre-M145 all three were unconditionally overwritten on every
+    // re-pick — silently wiping user's ProfileStep adjustments. Extend
+    // iter-66 M144's pattern to all fields that applyDefaults seeds.
+
+    func test_sourceStep_method_preservation_uses_settings_default_method() throws {
+        let src = try stepSource("SourceStep.swift")
+        // method overwrite must now be guarded by comparing plan.method
+        // to what settings.defaultMethod would have seeded.
+        XCTAssertTrue(
+            src.contains("if plan.method == seedMethod"),
+            "applyRecommendation must preserve method when user manually changed it. See M145 iter 67."
+        )
+    }
+
+    func test_sourceStep_hadamard_preservation_uses_settings_default() throws {
+        let src = try stepSource("SourceStep.swift")
+        XCTAssertTrue(
+            src.contains("if plan.hadamard == settings.defaultHadamardEnabled"),
+            "applyRecommendation must preserve hadamard when user manually toggled it. See M145 iter 67."
+        )
+    }
+
+    func test_sourceStep_forceDtype_preservation_via_nil_guard() throws {
+        let src = try stepSource("SourceStep.swift")
+        // forceDtype was previously overwritten when rec had one. Now:
+        // only set if user hasn't already chosen an override (nil).
+        XCTAssertTrue(
+            src.contains("if plan.overrides.forceDtype == nil"),
+            "applyRecommendation must preserve forceDtype when user set an override. See M145 iter 67."
+        )
+    }
+
     func test_sourceStep_applyRecommendation_uses_settings_default() throws {
         let src = try stepSource("SourceStep.swift")
         // The literal hardcoded comparison must be gone.
