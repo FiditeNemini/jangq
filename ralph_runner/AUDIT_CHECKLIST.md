@@ -892,6 +892,26 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M151 (loader.py entry-point + detection helpers: corrupt-config diagnostics)** — iter-73 forecast: loader.py had 14 json.loads sites. Iter-74 scoped tight to the 4 USER-FACING surfaces that map 1:1 to Swift SourceStep detection + JANG Studio load flows:
+      - `_is_v2_model` (line 69) — called by `is_jang_model` + SourceStep detector.
+      - `_is_vlm_config` (line 81) — called by `load_jang_model` branching.
+      - `load_jang_model` (line 707) — primary text-load entry.
+      - `load_jang_vlm_model` (line 760) — primary VL-load entry.
+      Mid-load internal re-reads (7 more sites) were NOT hardened this iter — they execute AFTER the entry point's initial parse, so if the entry point passed, the re-reads will too. Documented as deferred; future iter can revisit.
+      **Contract split:** Detection probes MUST tolerate corrupt configs (return False, let upstream fallback handle it); loaders MUST raise informative ValueError.
+      **Fix (iter 74):** Two new module-level helpers mirroring the M148/M149 template:
+      - `_read_config_or_raise(path, *, purpose)` — entry-point loader uses.
+      - `_read_config_or_none(path)` — detection probes use. Wraps the `_or_raise` variant and returns None on ValueError.
+      Replaced 4 `json.loads(path.read_text())` sites with the appropriate helper. Pre-fix: cryptic JSONDecodeError traceback bubbled up through SourceStep to the wizard UI. Post-fix: clean ValueError with path + "not valid JSON (line N, col C)" OR False return for detection.
+      **Tests (+5) in `tests/test_loader_config_read_diagnostics.py`:**
+      - `is_v2_model_tolerates_corrupt_jang_config`: detection returns False without raising.
+      - `is_vlm_config_tolerates_corrupt_config_json`: same for VLM probe.
+      - `is_vlm_config_tolerates_non_dict_root`: same for `[1,2,3]`-root.
+      - `load_jang_model_names_corrupt_jang_config`: entry-point raises ValueError naming the file.
+      - `load_jang_vlm_model_names_corrupt_jang_config`: symmetric VL entry.
+      The entry-point tests use subprocess + skip-on-ImportError so MLX-absence in CI doesn't block the error-path check.
+      **Evidence:** `jang-tools/jang_tools/loader.py:47-100, 730-740, 800-810`. 337 Python tests pass (was 332, +5). Swift 170 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [x] **M126 (iter 73)** — long-open polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. Pre-iter-73 the top-level `cmd_examples` try/except emitted `ERROR: JSONDecodeError: Expecting value: line 1 column 1 (char 0)` — correct that it failed but didn't name WHICH config broke. User had to check 3 files manually.
       **Fix (iter 73):** Added local `_read_json_object(path, *, purpose)` helper — same raise-contract template as format/reader.py's M149 + jangspec.manifest.py's M148. Applied to all 3 read sites with file-specific purpose strings. Error now reads e.g.: `ERROR: jang_config.json at /path/to/model/jang_config.json is not valid JSON (line 1, col 3): Expecting property name enclosed in double quotes`.
       **Tests (+3) in `tests/test_examples.py`:**

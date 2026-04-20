@@ -44,6 +44,53 @@ def _find_config_path(model_path: Path) -> Optional[Path]:
     return None
 
 
+def _read_config_or_raise(path: Path, *, purpose: str) -> dict:
+    """M151 (iter 74): entry-point config reader that raises ValueError
+    with file-path + purpose context on failure.
+
+    Mirrors the template crystallized in M148 (jangspec.manifest),
+    M149 (format.reader), and M126 (examples) — same raise-contract,
+    local copy to avoid cross-subpackage imports. Used by
+    ``load_jang_model`` / ``load_jang_vlm_model`` / the detection
+    helpers so corrupt config.json / jang_config.json produces a
+    clean message instead of a cryptic JSONDecodeError traceback.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"could not read {purpose} at {path}: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{purpose} at {path} is not valid JSON "
+            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{purpose} at {path} has a top-level {type(data).__name__}, "
+            f"expected a JSON object"
+        )
+    return data
+
+
+def _read_config_or_none(path: Path) -> Optional[dict]:
+    """Detection-helper variant: returns None on ANY read/parse failure
+    instead of raising. Used by ``_is_v2_model`` / ``_is_vlm_config``
+    which are part of the "can we handle this at all?" probe surface —
+    they must tolerate corrupt files and return False upstream, not
+    crash the entire wizard's source-detection step.
+
+    Pre-M151 these functions did bare ``json.loads`` and raised on
+    corrupt JSON, which propagated cryptic tracebacks up to Swift's
+    SourceStep detector.
+    """
+    try:
+        return _read_config_or_raise(path, purpose="config")
+    except ValueError:
+        return None
+
+
 def is_jang_model(model_path: str | Path) -> bool:
     """Check if a directory contains a JANG model."""
     return _find_config_path(Path(model_path)) is not None
@@ -63,13 +110,16 @@ def _is_v2_model(model_path: Path) -> bool:
     has_jang = any(model_path.glob("*.jang.safetensors"))
     if has_standard and not has_jang:
         return True
-    # Check format_version in config
+    # Check format_version in config. M151 (iter 74): tolerate corrupt
+    # config so detection can return False cleanly instead of crashing the
+    # caller with a cryptic JSONDecodeError.
     config_path = _find_config_path(model_path)
     if config_path:
-        cfg = json.loads(config_path.read_text())
-        version = cfg.get("format_version", "1.0")
-        if version.startswith("2"):
-            return True
+        cfg = _read_config_or_none(config_path)
+        if cfg is not None:
+            version = cfg.get("format_version", "1.0")
+            if version.startswith("2"):
+                return True
     return False
 
 
@@ -78,7 +128,12 @@ def _is_vlm_config(model_path: Path) -> bool:
     config_path = model_path / "config.json"
     if not config_path.exists():
         return False
-    config = json.loads(config_path.read_text())
+    # M151 (iter 74): detection must not crash on corrupt config — return
+    # False so callers (Swift SourceStep, is_jang_model probes) handle the
+    # corrupt-file case via the standard "not a VLM" path.
+    config = _read_config_or_none(config_path)
+    if config is None:
+        return False
     return "vision_config" in config
 
 
@@ -704,7 +759,9 @@ def load_jang_vlm_model(model_path: str | Path):
     if not config_path:
         raise FileNotFoundError(f"No JANG config found in {path}")
 
-    jang_cfg = json.loads(config_path.read_text())
+    # M151 (iter 74): use _read_config_or_raise so corrupt jang_config
+    # produces a clean ValueError naming the file + decode location.
+    jang_cfg = _read_config_or_raise(config_path, purpose="JANG config")
     fmt = jang_cfg.get("format")
     # M130 (iter 52): peer-helper parity with load_jang_model's format guard.
     # The text path uses a split check that gives a clearer "missing field"
@@ -757,7 +814,9 @@ def load_jang_model(model_path: str | Path):
     if not config_path:
         raise FileNotFoundError(f"No JANG config found in {path}")
 
-    jang_cfg = json.loads(config_path.read_text())
+    # M151 (iter 74): use _read_config_or_raise so corrupt jang_config
+    # produces a clean ValueError naming the file + decode location.
+    jang_cfg = _read_config_or_raise(config_path, purpose="JANG config")
     fmt = jang_cfg.get("format")
     if not fmt:
         raise ValueError(

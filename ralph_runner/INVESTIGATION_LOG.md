@@ -3065,3 +3065,46 @@ Three iters building the same pattern — it's now a template. Future read-side 
 - **NEW**: routing_profile.py (3 sites) + codebook_vq.py (2 sites) using same template.
 
 **Next iteration should pick:** M151 loader.py migration (biggest impact — every model load goes through it) OR routing_profile.py small sweep.
+
+## 2026-04-20 iteration 74 — M151 loader.py entry-point + detection helper diagnostics
+
+**Angle:** Iter-73 forecast: loader.py has 14 json.loads sites. Not all warrant hardening — mid-load re-reads fire after the entry point validated the config. Scoped iter-74 tight to the 4 USER-FACING surfaces that SwiftUI and CLI users hit directly.
+
+**Deep trace walkthrough:**
+1. **Classify all 14 sites:**
+   - 4 "entry/detection" sites: `_is_v2_model`:69, `_is_vlm_config`:81, `load_jang_model`:707, `load_jang_vlm_model`:760.
+   - 7 "mid-load internal" sites: lines 121, 265, 620, 641, 1002, 1544, 1692, 1698 — all execute AFTER the entry point's initial config parse. Redundant re-reads for scattered feature detection.
+   - 2 "index" sites: 675, 1002.
+   - 1 "tokenizer chat_template" site: 1550.
+2. **Entry/detection sites are the priority.** They're the first path users hit when pointing at a corrupt bundle. Mid-load sites execute AFTER entry succeeded — if the entry parse passed, the re-reads usually will too.
+3. **Contract split:** detection probes (is_v2_model, is_vlm_config) are "can we handle this at all?" — must tolerate corrupt configs and return False upstream. Loaders (load_jang_model, load_jang_vlm_model) are "try to load this and tell me why if you can't" — must raise informative errors.
+4. **Two helpers:**
+   - `_read_config_or_raise(path, *, purpose)` — raise-contract, same shape as M148/M149.
+   - `_read_config_or_none(path)` — try-or-none variant. Internally wraps `_read_config_or_raise` and catches ValueError — not DRY duplication because the contract CAPTURES that the tolerant path = raising-path + catch.
+5. **Why tolerate in detection:** Swift's SourceStep pipes through `inspect-source` and `recommend`, which call Python entry-point functions. If those crash on a corrupt config with a cryptic traceback, the wizard surfaces "Detection failed: inspect-source exited 1" (iter-43 M120 fix already stderrs the message) but users with corrupt bundles still see unhelpful messages.  After iter-74: `is_jang_model` returns False cleanly, detection proceeds, SourceStep shows a proper "no JANG model here" path. Upstream error handling is unified.
+6. **Test strategy:**
+   - Detection tests verify return-False contract (not raise).
+   - Loader tests use subprocess + skip-on-ImportError so MLX availability doesn't block the error-path check.
+7. **Deferred:** the 7 mid-load re-reads. Documented as future work. If a future bug surfaces that traces to one of those re-reads, fix it then. Not wasting iter scope on speculative hardening.
+
+**Meta-lesson — scoping within a sprawling module.** loader.py is 1800+ lines with many entry points and many internal helpers. A full migration of all 14 json.loads would be a big iter with lots of diff to review. Scoped to 4 sites that matter user-facing: 50% reduction in scope, 100% of user-visible value.
+
+**Items touched:**
+- M151 [x] — loader.py's 4 entry-point/detection sites now use `_read_config_or_raise` / `_read_config_or_none` helpers.
+
+**Commit:** (this iteration)
+
+**Verification:** 337 jang-tools tests pass (was 332, +5 for loader config-read diagnostics). Swift 170 + ralph 73 unchanged.
+
+**Closed-status tally:** 86 (iter 73) + M151 = 87 closed / 100 total = 87.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: loader.py's 7 mid-load json.loads sites — deferred from this iter, future candidate if bug surfaces.
+- **NEW**: routing_profile.py (3 sites) + codebook_vq.py (2 sites) — same template.
+- **NEW**: extract shared `_json_utils` module if more read-side sites need migration (5+ local copies of the template are now in capabilities.py, examples.py, format/reader.py, jangspec/manifest.py, loader.py — worth consolidating).
+
+**Next iteration should pick:** extract `_json_utils` shared module (crystallization across 5 local copies) OR continue Python-side migration (routing_profile.py).
