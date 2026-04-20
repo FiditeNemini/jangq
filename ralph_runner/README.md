@@ -1,0 +1,61 @@
+# Ralph Runner
+
+Autonomous test harness for JANG Studio. Converts small test models through every JANG and JANGTQ profile on Mac Studio, audits each output, and flags regressions.
+
+## Quick start
+
+```bash
+# Activate tier 1 and run next pending combo
+cd /Users/eric/jang && python3 -m ralph_runner.runner --tier 1
+python3 -m ralph_runner.runner --next
+
+# Check status
+python3 -m ralph_runner.runner --status
+```
+
+## How it works
+
+1. Reads `models.yaml` + `profiles.yaml` to build a (model, profile) matrix.
+2. SSHes to `macstudio`, rsyncs the local `jang-tools/` source tree.
+3. For each combo: downloads source model (if needed), runs `python3 -m jang_tools convert`, saves result.
+4. Writes per-run JSON + logs to `results/<date>/<slug>/`.
+5. State is tracked in `results/state.json` — each combo is `pending` / `running` / `green` / `failed` / `skipped`.
+
+## Adding a new test model
+
+Append to `models.yaml` under the appropriate tier:
+
+```yaml
+- hf_repo: org/model-id
+  family: dense | moe | moe_hybrid_ssm | moe_mla | vl_image | vl_video
+  archs: [model_type_as_in_config_json]
+  approx_gb: 2.5
+  has_chat_template: true
+```
+
+## Skipping a known-broken combo
+
+Add `skip: "reason"` to the model entry:
+
+```yaml
+- hf_repo: org/broken-model
+  skip: "fails preflight — config.json missing num_hidden_layers; upstream bug"
+```
+
+## Ralph Loop integration
+
+This runner is designed for the Ralph Loop pattern — each `--next` invocation is one iteration.
+Feed `PROMPT.md` as the Ralph Loop prompt to run autonomously until `ALL GREEN`.
+
+```bash
+# Reset and re-activate (after fixing a bug)
+python3 -m ralph_runner.runner --reset
+python3 -m ralph_runner.runner --tier 1
+
+# Run one combo at a time
+python3 -m ralph_runner.runner --next
+```
+
+## See the full design
+
+`docs/superpowers/specs/2026-04-19-ralph-loop-production-readiness-design.md`
