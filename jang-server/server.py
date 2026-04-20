@@ -870,6 +870,15 @@ async def stream_job(job_id: str):
                 subs = _sse_subscribers.get(job_id, [])
                 if queue in subs:
                     subs.remove(queue)
+                # M180 (iter 115): when last subscriber leaves, drop the
+                # dict key entirely. Pre-M180 the empty list lingered as
+                # a ghost entry — slow-drip memory leak over thousands of
+                # job submissions because /admin/purge cleaned _jobs but
+                # not _sse_subscribers. Cleaning here at the natural
+                # last-subscriber-leaves moment keeps the dict bounded
+                # by active subscriptions, not historical job count.
+                if not subs and job_id in _sse_subscribers:
+                    del _sse_subscribers[job_id]
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -991,6 +1000,15 @@ def purge_old_jobs(hours: int = CLEANUP_HOURS):
         for jid in to_remove:
             del _jobs[jid]
             removed += 1
+
+    # M180 (iter 115): defense-in-depth — also drop _sse_subscribers
+    # entries for purged jobs. The SSE event-generator's `finally`
+    # block normally cleans up when subscribers disconnect, but a
+    # subscriber that hasn't disconnected by purge time would leave a
+    # stale entry pointing at a purged job. Belt-and-suspenders.
+    with _sse_lock:
+        for jid in to_remove:
+            _sse_subscribers.pop(jid, None)
 
     # Also purge from DB
     conn = sqlite3.connect(str(DB_PATH))
