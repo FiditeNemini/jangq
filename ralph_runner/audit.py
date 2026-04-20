@@ -65,18 +65,29 @@ def _load_vlm(model_dir: Path):
     # For JANG v2 VLMs, load_jang_model dispatches to _load_jang_v2_vlm
     # (mlx_vlm skeleton + instant mmap weights). This handles idefics3,
     # qwen3_vl, etc. without needing a model-specific loader.
+    #
+    # M119 (iter 106): cascading-fallback loaders previously swallowed
+    # each attempt's exception silently via `except Exception: pass`.
+    # When the final fallback ALSO failed, the user saw the final
+    # exception with no trace of the prior two attempts — hard to debug
+    # "which loader path is broken this week." Now each intermediate
+    # failure logs a single-line stderr note before falling through.
+    # Matches iter-35 M107 / iter-90 M167's actionable-diagnostic pattern.
+    import sys as _sys
     try:
         from jang_tools.loader import load_jang_model
         return load_jang_model(str(model_dir))
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[ralph.audit] _load_vlm: load_jang_model failed ({type(_e).__name__}: {_e}); trying JANGTQ VLM path", file=_sys.stderr)
     # JANGTQ-specific path (for JANGTQ-format VLMs)
     try:
         from jang_tools.load_jangtq_vlm import load_jangtq_vlm_model
         return load_jangtq_vlm_model(str(model_dir))
-    except Exception:
-        pass
-    # Last resort: raw mlx_vlm.load
+    except Exception as _e:
+        print(f"[ralph.audit] _load_vlm: load_jangtq_vlm_model failed ({type(_e).__name__}: {_e}); falling back to raw mlx_vlm.load", file=_sys.stderr)
+    # Last resort: raw mlx_vlm.load. If THIS fails, the exception
+    # propagates to the audit row which captures it in the structured
+    # fail result.
     from mlx_vlm import load
     return load(str(model_dir))
 

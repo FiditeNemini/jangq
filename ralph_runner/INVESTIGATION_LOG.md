@@ -4617,3 +4617,52 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: sweep remaining Python modules for other anti-patterns that have syntactic signatures (naked `except:` without Exception, `pass` after `print(e)` etc.).
 
 **Next iteration should pick:** M119 audit.py dual-invariant sweep (applies the iter-105 refinement), OR a fresh audit angle.
+
+---
+
+## 2026-04-20 iteration 106 — M119 closure: ralph_runner dual-invariant + fix 2 cascading-fallback swallows
+
+**Angle:** Iter-105 forecast: apply the dual-invariant pattern to M119 (ralph_runner except Exception sites).
+
+**Deep trace walkthrough:**
+1. **Scoped the sweep:** grep'd `except Exception` across `ralph_runner/*.py`. 36 sites total — 34 in audit.py (one per audit row), 2 in runner.py.
+2. **Classified into 3 categories** (smaller taxonomy than jang-tools because ralph_runner has less surface):
+   - Audit-row error isolation — each `@register_audit` row wraps its own exception so a crash in row N doesn't kill the sweep. Equivalent to M113 cat 4.
+   - Subprocess probe fallbacks — runner.py tool-existence checks.
+   - CLI top-level catch.
+3. **Wrote the dual-invariant tests** matching iter-105's structure. Put in `ralph_runner/tests/`.
+4. **Precise test found 2 bare silent-swallows** in `audit.py:_load_vlm`. Inspected:
+   - audit.py:71 — `except Exception: pass` after `load_jang_model(...)`
+   - audit.py:77 — `except Exception: pass` after `load_jangtq_vlm_model(...)`
+   - audit.py:80 — final fallback `from mlx_vlm import load`
+5. **Evaluated whether to fix.** Cascading-fallback pattern is legitimately safe (the final path raises if all three fail). But the silent swallows lose debug info — when a user reports "VLM audit failed," we have no trace of which intermediate path fell through. **Cost of fix: 2 stderr log lines.** **Benefit: visible cascade in stderr for future debugging.** Fixed.
+6. **Applied iter-35 M107 / iter-90 M167 pattern.** Each intermediate `except` now logs a single-line `[ralph.audit] _load_vlm: <path> failed (<type>: <msg>); trying <next>` before falling through. Final path still raises naturally; the audit-row wrapper handles it into a structured fail result.
+7. **Verified the tests pass** and full suite still green (75 ralph_runner tests + 2 new invariants).
+
+**Meta-lesson — "not strictly a bug" is still worth fixing when the fix is cheap.** M119's bare swallows were audit-safe (cascading fallback, final raises if all fail). But two stderr lines add debugging value at zero runtime cost. Rule: when deciding whether to fix a minor swallowed error, ask **"would the log line save 10+ minutes of debugging next time this fails?"** If yes, log it — cost is negligible relative to future diagnostic value.
+
+**Meta-lesson — dual-invariant pattern has portable shape across modules.** Three iters of dual-invariant work now:
+  - iter-105 M113 for jang-tools: 57 sites, 4 offenders, all allowlisted.
+  - iter-106 M119 for ralph_runner: 36 sites, 2 offenders, both fixed (not allowlisted because the fix was cheap).
+  - iter-104 M108 for JANGStudio Swift: 34 try? sites, coarse-only (no precise signature).
+The test shape is identical across the three: taxonomy docstring, coarse count, precise regex (where signature exists), allowlist-with-rationale for legitimate exceptions. Future application to other Python projects follows the same template.
+
+**Items touched:**
+- M119 [x] — dual invariant + 2 fixes + 2 new tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 2 new ralph_runner invariants pass. 75 ralph_runner tests pass (pre-existing require PYTHONPATH; not a regression).
+
+**Closed-status tally:** 123 (iter 105) + M119 = 124 items touched, all closed. Zero known bugs as of iter-106 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: sweep remaining Python projects in the monorepo — any that have the same `except Exception: pass` pattern? (Smelt project, dflash, etc.)
+- **NEW**: scan for naked `except:` (bare except, catches BaseException) — different class of anti-pattern.
+- **NEW**: M67 + M68 + M69 Ralph runner lock-file edges — long-open observations that could get closed.
+
+**Next iteration should pick:** sweep Smelt / dflash / other Python subprojects for the anti-pattern, OR M67/M68/M69 observation-docs close.
