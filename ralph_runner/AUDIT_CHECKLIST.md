@@ -892,6 +892,32 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M153 (Swift-side analog of M152: extract shared `PythonCLIInvoker`)** — Iter-51 M129 aligned the typed-error shapes across 5 adoption services (Recommendation/Examples/ModelCard/Capabilities/Profiles); iter-75 M152 established the "3+ local copies = extract" threshold Python-side; iter-76 applies the same crystallization to the Swift side.
+      **Pre-M153 state:** each of the 5 services had a nearly-identical 31-37-line private `invokeCLI(args:)` body — ProcessHandle + withTaskCancellationHandler + DispatchQueue + waitUntilExit dance + typed error on non-zero exit. **5 copies of the same M101 (iter-33) cross-layer cancel pattern.**
+      **Fix (iter 76):** New `JANGStudio/JANGStudio/Runner/PythonCLIInvoker.swift`:
+      ```swift
+      enum PythonCLIInvoker {
+          static func invoke(
+              args: [String],
+              errorFactory: @escaping @Sendable (Int32, String) -> Error
+          ) async throws -> Data
+      }
+      ```
+      Closure-based error factory keeps the helper service-agnostic — each service's typed error enum is captured at the call site, not leaked into the helper. Same M101 Task-cancel pattern, now in ONE place.
+      Each of the 5 service call sites shrunk from ~31-37 lines to:
+      ```swift
+      private static func invokeCLI(args: [String]) async throws -> Data {
+          try await PythonCLIInvoker.invoke(args: args) { code, stderr in
+              MyServiceError.cliError(code: code, stderr: stderr)
+          }
+      }
+      ```
+      **Migration impact:**
+      - ~160 lines of duplicated subprocess-cancellation code eliminated.
+      - Future changes to the Task-cancel pattern (e.g., adding a timeout, migrating off DispatchQueue, iOS-style transient-error retry) now touch ONE file instead of five.
+      **Tests:** Build succeeded post-migration. All 3 relevant test suites pass unchanged — `CapabilitiesServiceTests` 5/5, `ProfilesServiceTests` 7/7, `AdoptionServicesTests` 22/22. Total 34 existing tests verified the migration preserves behavior. No new direct tests for the helper itself (future iter could add, but service-level tests already exercise every code path through it).
+      **Evidence:** New file `JANGStudio/JANGStudio/Runner/PythonCLIInvoker.swift` (75 lines); migrated `RecommendationService.swift`, `ExamplesService.swift`, `ModelCardService.swift`, `CapabilitiesService.swift`, `ProfilesService.swift`. Regenerated `project.pbxproj`. 170 Swift tests pass (unchanged). Python 348 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [x] **M152 (crystallize shared `_json_utils` across 5 local copies of the template)** — iter-74 forecast: extract the shared helper. By iter-74's end, FIVE local copies of the same read-side-loader template existed:
       | Site | Function | Contract |
       | --- | --- | --- |

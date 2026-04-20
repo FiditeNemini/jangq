@@ -34,6 +34,7 @@
 		6D1E60F17B76C9066EAEADFC /* ExamplesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E8D05B41D11B2CF1DFB26F2 /* ExamplesService.swift */; };
 		73695D60002F4B8E2C27CE72 /* BundleResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1161C47A976A61EB4165DBF0 /* BundleResolver.swift */; };
 		8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */; };
+		83996BFAB6CC4FC91EB1D101 /* PythonCLIInvoker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68500C2831E621A2FA30AB41 /* PythonCLIInvoker.swift */; };
 		8D94FAB61E6661A3E56B0F81 /* CapabilitiesServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70BDD0C1E07DF29BE7178909 /* CapabilitiesServiceTests.swift */; };
 		913885FBEFFAD974B1C3D518 /* golden_convert_events.jsonl in Resources */ = {isa = PBXBuildFile; fileRef = 4BD8CB3ED2CD8F9F8B6E9963 /* golden_convert_events.jsonl */; };
 		92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */; };
@@ -112,6 +113,7 @@
 		5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversionPlanTests.swift; sourceTree = "<group>"; };
 		65E6BD1572E3801538830D75 /* JANGStudioUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6828352632D9B1B484170875 /* ProgressEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressEvent.swift; sourceTree = "<group>"; };
+		68500C2831E621A2FA30AB41 /* PythonCLIInvoker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonCLIInvoker.swift; sourceTree = "<group>"; };
 		70BDD0C1E07DF29BE7178909 /* CapabilitiesServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitiesServiceTests.swift; sourceTree = "<group>"; };
 		72D077557A5F5B98F08D9071 /* InferenceRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InferenceRunnerTests.swift; sourceTree = "<group>"; };
 		7DBFFA8816FEFBC7EFF5FF5D /* PublishService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PublishService.swift; sourceTree = "<group>"; };
@@ -273,6 +275,7 @@
 				E15422D1BC7171E8BB13BA57 /* ModelCardService.swift */,
 				CB6996C22CD2CF0F5D29A975 /* ProfilesService.swift */,
 				7DBFFA8816FEFBC7EFF5FF5D /* PublishService.swift */,
+				68500C2831E621A2FA30AB41 /* PythonCLIInvoker.swift */,
 				570938F731FB414081F9CBED /* PythonRunner.swift */,
 				D04AD44A81E1DAF14ED12741 /* RecommendationService.swift */,
 			);
@@ -516,6 +519,7 @@
 				D62D076907E51839A85394A7 /* ProgressEvent.swift in Sources */,
 				25C84B0C74922EE8949D4919 /* PublishService.swift in Sources */,
 				205C14AFA0822C693EADFF4E /* PublishToHuggingFaceSheet.swift in Sources */,
+				83996BFAB6CC4FC91EB1D101 /* PythonCLIInvoker.swift in Sources */,
 				5CF3EB0BD85E74F7C4A75946 /* PythonRunner.swift in Sources */,
 				268698DABB093D7C391FC033 /* RecommendationService.swift in Sources */,
 				42CC99F4C90F03FD1B6E9B47 /* RunStep.swift in Sources */,

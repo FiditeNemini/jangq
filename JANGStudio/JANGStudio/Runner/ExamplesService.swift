@@ -69,34 +69,9 @@ enum ExamplesService {
     }
 
     private nonisolated static func invoke(args: [String]) async throws -> Data {
-        // M101 (iter 33): Task-cancel propagation — see ModelCardService.invoke.
-        let handle = ProcessHandle()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { cont in
-                DispatchQueue.global().async {
-                    do {
-                        let proc = Process()
-                        proc.executableURL = BundleResolver.pythonExecutable
-                        proc.arguments = args
-                        let out = Pipe(); let err = Pipe()
-                        proc.standardOutput = out
-                        proc.standardError = err
-                        try proc.run()
-                        handle.set(process: proc)
-                        proc.waitUntilExit()
-                        if proc.terminationStatus != 0 {
-                            let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                            cont.resume(throwing: ExamplesServiceError.cliError(code: proc.terminationStatus, stderr: stderr))
-                            return
-                        }
-                        cont.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
-                    } catch {
-                        cont.resume(throwing: error)
-                    }
-                }
-            }
-        } onCancel: {
-            handle.cancel()
+        // M153 (iter 76): migrated to shared PythonCLIInvoker.
+        try await PythonCLIInvoker.invoke(args: args) { code, stderr in
+            ExamplesServiceError.cliError(code: code, stderr: stderr)
         }
     }
 }

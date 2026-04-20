@@ -3161,3 +3161,51 @@ Three iters building the same pattern — it's now a template. Future read-side 
 - Continue Python-side migration: routing_profile.py, codebook_vq.py have smaller counts but consistent hardening is a win.
 
 **Next iteration should pick:** M153 Swift invokeCLI extract (direct analog to iter-75 M152 on the other side of the boundary) OR a fresh category.
+
+## 2026-04-20 iteration 76 — M153 Swift invokeCLI crystallization (Python-side analog of M152)
+
+**Angle:** Iter-75 forecast: extract Swift `invokeCLI` helper. 5 adoption services share the same M101 (iter-33) cross-layer cancel pattern. Same "3+ local copies" threshold as iter-75 M152 on the Python side.
+
+**Deep trace walkthrough:**
+1. **Inventory of duplicated bodies:**
+   - RecommendationService.swift: 33 lines.
+   - ExamplesService.swift: 31 lines.
+   - ModelCardService.swift: 35 lines.
+   - CapabilitiesService.swift: 37 lines.
+   - ProfilesService.swift: 37 lines.
+   - Total: ~175 lines of near-identical subprocess + cancel dance.
+2. **Diff analysis:** the only functional difference across the 5 is the typed-error enum thrown on non-zero exit (`RecommendationServiceError.cliError`, `ExamplesServiceError.cliError`, etc.). Structural body is identical.
+3. **Design — closure-based error factory.** A single helper that captures each service's error enum at the call site:
+   ```swift
+   static func invoke(
+       args: [String],
+       errorFactory: @escaping @Sendable (Int32, String) -> Error
+   ) async throws -> Data
+   ```
+   `@Sendable` lets the closure cross the DispatchQueue boundary cleanly under Swift 6 concurrency.
+4. **Why not protocol-based.** A protocol with `associatedtype ServiceError: Error` is more type-safe but forces each service to conform AND changes the call-site shape. Closure is simpler + equally type-safe at the call site.
+5. **Migration preserved function names.** Each service's private `invoke(args:)` / `invokeCLI(args:)` entry kept its existing name + signature. Body shrunk from 33-37 lines to 3 lines. Public contract unchanged → no tests needed updating.
+6. **Regenerate xcodegen:** adding a new .swift to Runner/ means `project.pbxproj` needs update (iter-56 M134 already documented this rule). Ran `xcodegen generate`.
+7. **Test verification:** 3 test suites directly exercise the migrated services (`CapabilitiesServiceTests`, `ProfilesServiceTests`, `AdoptionServicesTests`). All 34 pass. No test regressions.
+
+**Meta-lesson — cross-boundary crystallization.** Iter-75 M152 extracted Python-side `_json_utils`. Iter-76 M153 extracted Swift-side `PythonCLIInvoker`. Both crossed the "3+ local copies" threshold at the same time; fixing them in adjacent iters meant the codebase now has ONE canonical implementation of each pattern (read-side JSON loading on Python side, Python-subprocess invocation on Swift side). Future maintenance touches one file instead of five.
+
+**Items touched:**
+- M153 [x] — New `PythonCLIInvoker` helper. 5 service call sites migrated. ~160 lines of dup eliminated. project.pbxproj regenerated.
+
+**Commit:** (this iteration)
+
+**Verification:** Build succeeded. 34 tests across 3 service suites pass unchanged. Python 348 + ralph 73 unchanged.
+
+**Closed-status tally:** 88 (iter 75) + M153 = 89 closed / 100 total = 89.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW M154 candidate**: add direct tests for `PythonCLIInvoker.invoke` — cancellation propagation, error factory invocation, successful data return. Existing service tests exercise it indirectly but a dedicated test file would pin the contract.
+- Python-side continuation: loader.py has 7 mid-load json.loads sites that iter-74 scoped out. Same helper available now; migration is cheap.
+- Continue peer-helper audit: are there other 3+-copy patterns in the Swift codebase? Pipe-drain code in PythonRunner + PublishService + InferenceRunner might be a candidate.
+
+**Next iteration should pick:** M154 dedicated PythonCLIInvoker tests (closes the contract) OR Pipe-drain peer-helper audit.
