@@ -225,6 +225,28 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M188 (jang-server SSE concurrent-connection cap — complements M187)** — Iter-125 closes a DoS gap iter-124 M187's rate-limiter doesn't cover. M187 caps the OPEN-call rate (e.g., 30 streams/minute per IP). But SSE streams are LONG-LIVED — a client can open at the rate limit and accumulate thousands of open streams over time. Each consumes a file descriptor + asyncio task + _sse_subscribers entry. Process FD limits (typically 1024-4096 default on macOS/Linux) become the real cap; hitting them bricks the whole server.
+      **Fix (iter 125):** added per-IP + global concurrent-stream caps. Two env vars: `JANG_SSE_MAX_PER_IP` (default 10) + `JANG_SSE_MAX_GLOBAL` (default 200). Stream open path:
+      1. Acquire `_sse_count_lock`.
+      2. Check global open count (sum of all IP counts) against `SSE_MAX_GLOBAL` — reject 429 if exceeded.
+      3. Check per-IP count against `SSE_MAX_PER_IP` — reject 429 if exceeded.
+      4. Increment IP counter.
+      5. Release lock + proceed to setup queue + return StreamingResponse.
+      **Pair with decrement** in event_generator's `finally` block. Drops the dict key when count hits 0 (matches iter-115 M180 ghost-key pattern). Without the matching decrement, a client who opens N streams + closes them ALL would still show N in the per-IP count, locking them out of new streams forever — silent monotonic accumulation bug.
+      **429 messages** explain WHICH cap was hit (per-IP vs global) so the client can react appropriately. Per-IP says "close existing streams or wait"; global says "try again in a minute" (other clients holding streams might close).
+      **Tests (+4) in new `jang-server/tests/test_sse_connection_limit.py`:**
+      - `test_sse_connection_caps_defined` — env vars + rationale defined.
+      - `test_stream_job_checks_ip_count_before_accept` — preamble checks both caps.
+      - `test_event_generator_decrements_counter_in_finally` — pin the decrement + dict-cleanup so the M180 ghost-key class can't reappear here.
+      - `test_sse_caps_documented_in_source` — comments mention "file descriptor" so future tuning sees the WHY.
+      **Test gotcha caught + fixed:** initial test substring-search window was 3000 chars from the function start; the decrement lives past that. Bumped to 5000 with a comment explaining the function's grown body (M188 preamble + M180 cleanup + M188 decrement). Iter-104 M108 / iter-115's "moving line numbers" lesson applied to substring-window sizes too.
+      **Evidence:** `jang-server/server.py:262-280, 901-940, 974-980`. 29 jang-server tests pass (was 25, +4).
+      **Meta-lesson — open-rate limit ≠ concurrent-count limit.** Two distinct DoS vectors with two distinct mitigations:
+       - **Open-rate** (iter-124 M187): how fast can a client establish new connections? → token bucket / sliding window.
+       - **Concurrent-count** (iter-125 M188): how many open connections can a client hold simultaneously? → counter + cap.
+      Long-lived connections (SSE, WebSocket, gRPC streams) need BOTH. Short-lived requests (typical REST POST/GET) only need open-rate. **Rule for any new endpoint: classify connection lifetime — long-lived needs both limits, short-lived needs only the rate limit.**
+      **Meta-lesson — paired increment/decrement state needs explicit pin tests.** The bug "monotonic counter never decrements" is exactly the kind of thing that PASSES every functional test until your client hits SSE_MAX_PER_IP after a few hours of normal usage. The pin test asserts `_sse_open_counts[ip]` AND `- 1` appear in the function body — catches a future refactor that drops the decrement. Same M180 class as the ghost-key cleanup.
+      **Commit:** (this iteration)
 - [x] **M187 (jang-server rate-limiting on POST /estimate + POST /jobs)** — Iter-124 added a per-IP sliding-window rate limiter to jang-server's high-cost POST endpoints. Pre-M187 a single client could flood:
       - **POST /estimate** — each call hits the HF API (`HfApi.model_info`). An auth'd attacker could exhaust the server's HF rate-limit budget, breaking `/estimate` for every other user.
       - **POST /jobs** — creates DB rows + runs validation (HFRepoValidator, duplicate detection, per-user limit check). MAX_JOBS_PER_USER bounds CONCURRENT jobs but not creation RATE — flooding rejected submissions still consumes CPU.

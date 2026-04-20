@@ -5445,3 +5445,46 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: final JANGQuantizer.swiftpm sweep (Models / Theme / JANGQuantizerApp).
 
 **Next iteration should pick:** SSE-connection-count limit (concrete DoS angle, complements M187), OR extend rate-limit to /retry+/admin/purge, OR pivot to JANGStudio Swift / fresh angle.
+
+---
+
+## 2026-04-20 iteration 125 — M188 jang-server SSE concurrent-connection cap
+
+**Angle:** Iter-124 forecast: SSE concurrent-count limit complementing M187's open-rate limit.
+
+**Deep trace walkthrough:**
+1. **Identified the gap M187 doesn't cover.** M187 caps the OPEN-call rate but not COUNT of long-lived streams. A client can open at the rate limit (30/min default) and accumulate streams over time — each consumes an FD + asyncio task + queue entry. Process FD limits (1024-4096 on macOS/Linux defaults) become the real cap.
+2. **Designed dual cap:** per-IP + global. Per-IP prevents single-client abuse; global prevents many-clients-each-just-under-cap from collectively exhausting FDs. Defaults err generous (10 per IP, 200 global) — operators can tighten via env vars.
+3. **Increment/decrement pairing** — increment under lock in the endpoint preamble (BEFORE accepting); decrement in the event_generator's finally block. Drop the dict key when count hits 0 (matches iter-115 M180 ghost-key cleanup). Without the matching decrement, a client who opens N streams + closes them ALL would still show N in the per-IP count — silent monotonic accumulation that locks the IP out forever.
+4. **Two distinct 429 messages** — per-IP says "close existing streams or wait"; global says "try again in a minute." Different remediation for different cap.
+5. **Tests pin both caps + the decrement.** Substring-search caught a window-size gotcha — initial 3000-char window was too small because the function body grew with the M188 preamble (M188 cap-check + M180 subscriber cleanup + M188 decrement). Bumped to 5000 with a comment.
+
+**Meta-lesson — open-rate limit ≠ concurrent-count limit.** Two distinct DoS vectors:
+  - **Open-rate** (M187): how fast can a client establish new connections? → token bucket / sliding window.
+  - **Concurrent-count** (M188): how many open connections can a client HOLD simultaneously? → counter + cap.
+  Long-lived connections (SSE, WebSocket, gRPC streams) need BOTH. Short-lived requests (typical REST POST/GET) only need open-rate. **Rule for any new endpoint: classify connection lifetime — long-lived needs both limits, short-lived needs only rate.** Most production HTTP servers ship with one or the other (or neither); having both is what closes the actual DoS surface.
+
+**Meta-lesson — paired increment/decrement state needs explicit pin tests.** The bug "monotonic counter never decrements" PASSES every functional test until your client hits the cap after hours of normal usage. The pin test asserts `_sse_open_counts[ip]` AND `- 1` appear in the function body. Catches a future refactor that drops the decrement. **Rule: anywhere counter-style state is incremented, write a test that pins both the increment AND decrement code locations + the dict-cleanup pattern (matches M180).**
+
+**Meta-lesson — substring-search test windows need to grow with code.** Iter-111's allowlist range, iter-118's bare-pass window, iter-125's substring-search 3000→5000. Same recurring annoyance: as code grows, fixed-size windows that target specific functions become too narrow. **Rule: when writing source-inspection tests that grep a windowed slice, prefer the WHOLE function body (find-from-`def`-to-next-top-level-`def`) over a fixed char count.** Marginally more code, but immune to growth-induced false negatives.
+
+**Items touched:**
+- M188 [x] — per-IP + global SSE concurrent-count caps. 4 new regression tests + paired counter cleanup.
+
+**Commit:** (this iteration)
+
+**Verification:** 29 jang-server tests pass (was 25, +4).
+
+**Closed-status tally:** 141 (iter 124) + M188 = 142 items touched, all closed. Zero known bugs as of iter-125 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: extend M187 rate limit to /retry+/admin/purge endpoints.
+- **NEW**: refactor source-inspection test windowing to "whole function body" pattern (codifies iter-125 meta-lesson).
+- **NEW**: continue jang-server security sweep — request-body size limits (no max upload size today)?
+
+**Next iteration should pick:** request-body size limits on jang-server (final security gap), OR codify the "whole function body" source-inspection pattern as a test helper.

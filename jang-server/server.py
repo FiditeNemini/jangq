@@ -259,6 +259,22 @@ _worker_started = False
 _sse_subscribers: dict[str, list[asyncio.Queue]] = {}
 _sse_lock = threading.Lock()
 
+# M188 (iter 125): SSE concurrent-connection caps. Iter-124 M187's
+# rate limiter bounds the OPEN-call rate, but not the COUNT of
+# long-lived streams. A client could open at the rate limit until
+# they accumulate thousands of open streams — each consuming a file
+# descriptor + asyncio task + queue. Process FD limits (typically
+# 1024-4096 on macOS/Linux defaults) become the real cap, and
+# hitting them bricks the whole server.
+#
+# Track open streams per-IP + globally. Reject new SSE opens with
+# 429 when either cap is hit. Tunable via env: defaults err generous.
+SSE_MAX_PER_IP = int(os.environ.get("JANG_SSE_MAX_PER_IP", "10"))
+SSE_MAX_GLOBAL = int(os.environ.get("JANG_SSE_MAX_GLOBAL", "200"))
+
+_sse_open_counts: dict[str, int] = {}   # {ip: open_stream_count}
+_sse_count_lock = threading.Lock()
+
 
 # ── Rate limiting ──────────────────────────────────────────────
 # M187 (iter 124): simple sliding-window rate limiter keyed by client
@@ -899,12 +915,34 @@ def get_job_logs(job_id: str):
 # ── SSE stream ──────────────────────────────────────────────
 
 @app.get("/jobs/{job_id}/stream", dependencies=[Depends(check_auth)])
-async def stream_job(job_id: str):
+async def stream_job(job_id: str, request: Request):
     """Server-sent events stream for real-time job updates."""
     with _lock:
         job = _jobs.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+
+    # M188 (iter 125): cap concurrent streams per-IP + globally so
+    # one client can't exhaust file descriptors. Increment under lock
+    # BEFORE accepting; the matching decrement lives in the
+    # event_generator's finally block.
+    ip = request.client.host if request.client else "unknown"
+    with _sse_count_lock:
+        global_count = sum(_sse_open_counts.values())
+        ip_count = _sse_open_counts.get(ip, 0)
+        if global_count >= SSE_MAX_GLOBAL:
+            raise HTTPException(
+                429,
+                f"Server SSE limit reached ({SSE_MAX_GLOBAL} concurrent "
+                f"streams). Try again in a minute.",
+            )
+        if ip_count >= SSE_MAX_PER_IP:
+            raise HTTPException(
+                429,
+                f"Per-IP SSE limit reached ({SSE_MAX_PER_IP} concurrent "
+                f"streams from this client). Close existing streams or wait.",
+            )
+        _sse_open_counts[ip] = ip_count + 1
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=50)
     with _sse_lock:
@@ -936,6 +974,17 @@ async def stream_job(job_id: str):
                 # by active subscriptions, not historical job count.
                 if not subs and job_id in _sse_subscribers:
                     del _sse_subscribers[job_id]
+            # M188 (iter 125): decrement the per-IP open-stream count.
+            # The increment ran outside this finally block (during the
+            # endpoint preamble); without this matching decrement the
+            # per-IP count would grow monotonically and lock the IP
+            # out forever after SSE_MAX_PER_IP closed streams. Drop
+            # the dict key when count hits 0 to prevent the same kind
+            # of slow-drip ghost-entry leak M180 fixed for subscribers.
+            with _sse_count_lock:
+                _sse_open_counts[ip] = _sse_open_counts.get(ip, 1) - 1
+                if _sse_open_counts.get(ip, 0) <= 0:
+                    _sse_open_counts.pop(ip, None)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
