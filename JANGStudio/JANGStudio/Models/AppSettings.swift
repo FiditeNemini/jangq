@@ -125,8 +125,21 @@ final class AppSettings {
 
     func persist() {
         let snapshot = Snapshot(from: self)
-        if let data = try? JSONEncoder().encode(snapshot) {
+        do {
+            let data = try JSONEncoder().encode(snapshot)
             UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+        } catch {
+            // M111 (iter 37): previously `try?` silently swallowed encode
+            // failures — if encoding broke (schema migration edge-case,
+            // non-finite Double slipping in via a future Settings field),
+            // the user's settings wouldn't persist and nobody would know
+            // why. UserDefaults keeps the old blob intact (we didn't call
+            // .set on failure) so data-loss is bounded, but visibility is
+            // critical for diagnostics. Log to stderr so Copy Diagnostics
+            // captures it (per M107 pattern + iter 14's scrubSensitive
+            // pipeline).
+            FileHandle.standardError.write(
+                Data("[AppSettings] persist failed: \(error)\n".utf8))
         }
         mirrorLeafConsumerKeys()
     }

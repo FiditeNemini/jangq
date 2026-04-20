@@ -1433,3 +1433,80 @@ Or return to domain-specific bugs: M87 Mistral 4 RoPE, M97 partial HF cleanup, M
 - Unchecked array subscript access `arr[0]` without bounds check
 - Nested `try?` inside if-let (second pass after iter 35)
 Or a domain item: M87, M97, M106, Cat D.
+
+---
+
+## 2026-04-20 iteration 37 — grep-audit continues: 2 more bug classes swept (M111 + M112)
+
+**Angle:** 8th iter in the grep-audit meta-loop. Ran multiple grep classes this iter to see if any new latent bugs surface before the well runs dry. Data point on yield decay.
+
+**Deep trace walkthrough:**
+
+**Class 1 (nested `try?` in if-let — second pass after iter-36 drive-by):**
+1. `grep "if let.*try\?"` — 3 hits.
+2. `InferenceRunner.swift:158` — tries to detect error-JSON shape; falls through to normal decode on malformed. Legitimate parse-tolerance.
+3. `PostConvertVerifier.swift:64` — verifier's documented tolerate-missing-files pattern. Legitimate.
+4. **`AppSettings.swift:128`** — `if let data = try? JSONEncoder().encode(snapshot) { UserDefaults.standard.set(data, forKey: ...) }`. Silent failure on encode error. Settings don't persist AND nobody knows. **M111 bug.**
+5. Fix: explicit do/catch + stderr log on failure. UserDefaults data-loss was already bounded (we never called .set on failure) but visibility mattered — iter-14's Copy Diagnostics pipeline captures stderr for bug reports.
+
+**Class 2 (DispatchQueue.main.async / Task @MainActor — cross-isolation hops):**
+1. `grep "DispatchQueue.main.async"` — 0 hits. Clean.
+2. `grep "Task \{ @MainActor"` — 3 hits, all legitimate UI state hops from async contexts. Clean.
+
+**Class 3 (array subscript literals):**
+1. `grep "\[[0-9]+\]"` (filtered for non-test) — 2 hits: PublishService.swift:50-51 `parts[0] / parts[1]`. Both guarded by `parts.count != 2` early-return on line 47. Clean.
+
+**Class 4 (try! / fatalError / preconditionFailure — crash-app patterns):**
+1. `grep "try!"` — 0. Clean.
+2. `grep "fatalError"` — 0. Clean.
+3. `grep "preconditionFailure"` — 0. Clean.
+4. Impressive — app has zero explicit abort points in production code.
+
+**Class 5 (TODO/FIXME/HACK/XXX quality debt markers):**
+1. `grep "TODO\|FIXME\|HACK\|XXX"` — 0. Clean. Nobody left debt markers.
+
+**Class 6 (Thread.sleep in async contexts):**
+1. `grep "Thread.sleep"` — 2 hits, both in tests. In sync test code `Thread.sleep` is acceptable (no async context to preempt). Clean.
+
+**Class 7 (Python `except Exception:` swallowing):**
+1. `grep -n "except Exception"` in jang_tools/ — 25+ hits.
+2. Most are legitimate: wrap + re-raise with context, or cleanup handlers.
+3. **`inference.py:_load_vlm`** caught EVERY error from JANGTQ path and silently fell through to mlx_vlm. This masked the exact M45 bug (load_jangtq_vlm → load_jangtq_vlm_model rename) in iter 20. **M112 bug.**
+4. Fix: narrow to `except ImportError` — only fall back when jang_tools module isn't installed. Every other JANGTQ loader exception propagates with full context so users see the real problem instead of confusing mlx_vlm fallback errors.
+
+**Items touched:**
+- M111 [x] — AppSettings.persist encode failure now logged (not silent).
+- M112 [x] — inference.py _load_vlm narrowed from except-all to except-ImportError.
+
+**Commit:** (this iteration)
+
+**Verification:** 260 Python + 122 Swift tests pass unchanged.
+
+**Closed-status tally:** 50 (prior) + M111 + M112 = 52 closed / 87 total = 60% closure rate. **60% milestone crossed.**
+
+**Grep-audit meta-loop yield across 8 iters:**
+| Iter | Class | Hits | Real bugs |
+|------|-------|------|-----------|
+| 30 M96 | onTermination | 1 | 1 |
+| 31 M98 | onTermination | 1 | 1 |
+| 32 M100 | TaskCancel | 1 | 1 |
+| 33 M101 | withCheckedContinuation sweep | 9 | 7 |
+| 34 M105 | waitUntilExit | 2 | 1 |
+| 35 M107 | try? on user actions | 30 | 3 |
+| 36 M109 | force-unwraps | 2 | 2 |
+| 37 M111/M112 | nested try? + Python except-all | 28 | 2 |
+| — | DispatchQueue / Task @MainActor | 3 | 0 |
+| — | array subscript literals | 2 | 0 |
+| — | try! / fatalError / precondition | 0 | 0 |
+| — | TODO/FIXME/HACK | 0 | 0 |
+| — | Thread.sleep in async | 2 (tests) | 0 |
+
+**Signal from yield decay:** the PRODUCTIVE bug classes are turning up diminishing real-bug counts (iter 37: 2 real bugs from 6 attempted classes). Combined with the "zero findings on try!/fatalError/TODO/DispatchQueue.main.async/array-subscript" signal, **the Swift production code is reaching grep-audit saturation.** Still finding real bugs, but the well is running lower.
+
+**This is a positive outcome, not exhaustion:** 8 iters of grep-audit closed 17 real production bugs across 5 distinct bug classes (concurrency cancel, silent failure, crash paths, bare exception catches, Python narrowing). The codebase is materially more robust than iter-29 state.
+
+**Next iteration should pick:** One more grep-audit attempt to confirm saturation, OR rotate back to domain-specific bugs (M87 Mistral 4 RoPE, M97 partial HF cleanup, M106 DiagnosticsBundle main-thread, Cat D `feedback_model_checklist.md`). Candidates for one last grep class:
+- `@MainActor` missing on types that do UI work
+- `DispatchQueue.global().async { ... cont.resume` racing
+- ralph_runner Python side (untouched by the Swift-focused sweeps)
+- Non-cancel-safe `try! await` in Python async code (none expected since jang_tools is sync)

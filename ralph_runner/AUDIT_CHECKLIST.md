@@ -436,6 +436,18 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Evidence:** `TestInferenceSheet.swift:15, 45-54, 272-283`, `UsageExamplesSheet.swift:11, 24-32, 152-171`, `RunStep.swift:51-68`. 122 Swift tests pass unchanged.
       **Commit:** (this iteration)
 - [ ] **M108** — Remaining `try?` sites in the Swift codebase (~27 after iter-35 fixed 3) are largely in parse-tolerance contexts (PostConvertVerifier reads files that may or may not exist), Task.sleep ignores (standard pattern), and subprocess-write-to-stream helpers. Spot-check periodically. Spawned for awareness; not a concrete bug today.
+- [x] **M111 (iter 37 continuation of try? sweep)** — Grepped for `if let ... = try? ...` nested patterns (iter 36 drive-by showed iter-35's sweep missed the "nested try? inside if-let" shape). Found 3 sites; only 1 was a real silent-failure: `AppSettings.persist` encoded via `if let data = try? JSONEncoder().encode(snapshot) { ... }`. If encoding failed (schema-migration edge-case, future non-finite Double), settings wouldn't persist AND nobody would know. UserDefaults preserved the old blob (we never called .set on failure) so data-loss is bounded, but visibility mattered for diagnostics.
+      **Fix:** explicit `do/catch` around the encode + UserDefaults.set. On failure, log to stderr — Copy Diagnostics (iter 14's scrubSensitive pipeline) captures stderr, so bug reports include the error.
+      **Other 2 hits were legitimate parse-tolerance:**
+      - InferenceRunner.swift:158 — tries to detect an error-JSON shape; if malformed, falls through to normal decode.
+      - PostConvertVerifier.swift:64 — verifier's expected-to-tolerate-missing-files pattern.
+      **Evidence:** `AppSettings.swift:126-146`. 122 Swift tests + 260 jang-tools pass unchanged.
+      **Commit:** (this iteration)
+- [x] **M112 (Python-side silent-error class)** — Grepped for `except Exception:` in jang_tools. Found 25+ sites, most are legitimate (wrap + re-raise with context). One real silent failure: `inference.py:_load_vlm` caught EVERY error from `load_jangtq_vlm_model(...)` and fell through to `mlx_vlm.load`. This was the exact anti-pattern that masked iter-20's M45 (load_jangtq_vlm → load_jangtq_vlm_model rename). The rename was fixed then, but the except-all fallback pattern stayed — next similar bug would be masked AGAIN.
+      **Fix (iter 37):** narrow the except to `ImportError` (the only legitimate fallback case — jang_tools module not present). Every OTHER exception from the JANGTQ loader is a real problem (corrupted shard, missing file, kernel error) and propagates up with full context. User sees the real JANGTQ error instead of a confusing mlx_vlm fallback error.
+      **Evidence:** `inference.py:37-64`. 260 jang-tools tests pass unchanged.
+      **Commit:** (this iteration)
+- [ ] **M113** — Other `except Exception:` sites in jang_tools. Spot-check didn't find more silent-errors, but the pattern is worth flagging periodically. Examples: loader.py:201 / 233 / 504 / 540 / 586 wrap exception during tensor conversion — mostly add context + re-raise. Safe-but-keep-an-eye-on.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button
       - `RunStep.swift:74` — `.desktopDirectory` for "Copy Diagnostics" button

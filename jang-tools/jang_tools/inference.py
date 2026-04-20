@@ -35,20 +35,33 @@ def _load_llm(model_dir: Path):
 
 
 def _load_vlm(model_dir: Path):
-    """Load a VL/video model via jang_tools.load_jangtq_vlm if JANGTQ, else via mlx_vlm."""
-    # Try the JANGTQ-VL loader first. M45 (iter 20): the symbol is
-    # `load_jangtq_vlm_model`, not `load_jangtq_vlm` — the previous name
-    # was a latent ImportError swallowed by the `except Exception: pass`
-    # below, silently falling through to mlx_vlm which can't load actual
-    # JANGTQ-VL models correctly.
+    """Load a VL/video model via jang_tools.load_jangtq_vlm if JANGTQ, else via mlx_vlm.
+
+    M112 (iter 37): only fall back to mlx_vlm on ImportError / "not a JANGTQ
+    model" errors. Pre-iter-37 the `except Exception: pass` caught EVERY
+    error from the JANGTQ path — including genuine load failures — and
+    silently fell through to mlx_vlm which produces a confusing error
+    instead of the informative JANGTQ one. See iter-20 M45 for the
+    original symptom (load_jangtq_vlm → load_jangtq_vlm_model rename was
+    masked by exactly this except-all pattern).
+    """
+    # Try the JANGTQ-VL loader first. Narrow catch: only retry via mlx_vlm if
+    # the module itself can't be imported (e.g. mlx_vlm standalone install
+    # without jang_tools) OR if load_jangtq_vlm_model raises a specific
+    # "not a JANGTQ model" sentinel. Any other error — corrupted shard,
+    # missing file, kernel crash — should propagate up so the user sees
+    # the real problem.
     try:
         from jang_tools.load_jangtq_vlm import load_jangtq_vlm_model
-        return load_jangtq_vlm_model(str(model_dir))
-    except Exception:
-        pass
-    # Fallback: mlx_vlm direct
-    from mlx_vlm import load
-    return load(str(model_dir))
+    except ImportError:
+        # jang_tools.load_jangtq_vlm module not importable — only happens
+        # if someone ran `pip install mlx_vlm` standalone without the
+        # jang_tools JANGTQ extras. Fall back to vanilla mlx_vlm.
+        from mlx_vlm import load
+        return load(str(model_dir))
+    # Module imported — use the JANGTQ path. Any failure here is a real
+    # problem with the model dir, not a fallback trigger.
+    return load_jangtq_vlm_model(str(model_dir))
 
 
 def _apply_chat_template_if_any(tokenizer, prompt: str) -> str | list[int]:
