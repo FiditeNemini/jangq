@@ -5667,3 +5667,64 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW:** audit jang-server's background task cleanup on process shutdown — does `finally` run for SSE connections on SIGTERM? Orphaned connections would re-leak via FD exhaustion on restart.
 
 **Next iteration should pick:** runtime-log secrets audit (natural M192 follow-on — covers the SECOND-most-common token leak vector after URLs), OR extend rate-limit to /retry+/admin/purge (quick win), OR audit error-response info leaks.
+
+---
+
+## 2026-04-20 iteration 130 — M193 runtime-log secret redaction (subprocess + webhook + traceback)
+
+**Angle:** Iter-129 forecast priority: runtime-log secrets. If M192 closed URL-based leaks, logs are the NEXT most-likely leak vector. Grep'd `log.info/warning/error/debug` usage across server.py, then traced each call's input back to its source.
+
+**Deep trace walkthrough:**
+1. **Enumerated all `log.` call sites.** 9 explicit `log.info/warning` calls + `job.log()` method which also calls `log.info(f"[{self.id}] {msg}")`. The `job.log()` method is called from both trusted sites (queue worker status) AND untrusted sites (subprocess stdout forwarding + exception paths).
+2. **Traced `job.log()` call sites.** Four high-risk:
+   - `_LogCapture.write` (line 1786): subprocess stdout verbatim. convert_model.py calls huggingface_hub → HF client raises exceptions embedding the failing URL with query params when it hits an auth error. Those tracebacks flow into `job.log_lines` AND module logger.
+   - `_fire_webhook` success path: `job.log(f"Webhook delivered to {job.webhook_url}")`. Slack webhook URLs ARE secrets; logging them verbatim is a plain-text credential dump.
+   - `_fire_webhook` failure path: `job.log(f"Webhook failed: {e}")`. urllib.request errors often contain the request URL.
+   - The main exception handler: `job.log(f"FAILED: {e}")` + `job.error = f"{e}\n{traceback.format_exc()}"`. Exception messages from HF/transformers include URLs + param strings.
+3. **Traced the 4 `log.warning` sites:** restore_jobs DB row error, estimate HF fetch error, recommend HF fetch error, architecture check error. All format `{_e}` verbatim; `_e` is whatever the underlying library raised.
+4. **Designed the helper.** `redact_for_log(s)` with 5 regex patterns matching the common secret shapes:
+   - HF tokens (matches iter-117 M182 pattern)
+   - OpenAI keys (sk-* / sk-proj-*)
+   - Bearer auth headers (`Bearer X.Y.Z`)
+   - Known-secret webhook URLs (Slack, Discord): strip path+query, keep host
+   - Generic query-string secrets (`?api_key=`, `?token=`, etc.): strip the VALUE portion after `=`, keep the parameter name for diagnostics
+5. **Chose TARGETED redaction over blanket wrapping.** Over-redaction hides legit debugging info (model IDs, profile names, file paths). Applied only to sites that touch untrusted strings (subprocess output, user-supplied URLs, exception messages). Clean-origin logs stay unwrapped. Test suite pins the high-risk sites so a future edit can't silently drop the wrapper.
+6. **Tests:** 6 unit tests (each pattern + idempotency + clean-string preservation), 3 source-inspection pins at the specific call sites. The pins anchor with `rfind` to skip past my own M193 rationale comment block at the top of the file (which quotes the patterns + site names).
+7. **Ran suite.** 57/57 pass (was 46, +11).
+
+**Meta-lesson — layered secret-leak defenses: SOURCE / URL / LOG.** Three iters, three layers, three invariants:
+- M182 (iter 117) catches SOURCE leaks: grep repo for secret shapes.
+- M192 (iter 129) catches URL leaks: query-param auth restricted to GET + docs hygiene.
+- M193 (iter 130) catches LOG leaks: wrapper at targeted sites.
+Each catches a different attacker access path (repo-read, URL-intercept, log-read). **Rule: for credential hygiene, design layered defenses per boundary — source, transit, at-rest storage, logs. A single "don't leak secrets" invariant isn't sufficient; each boundary has its own attacker profile.** Missing any layer creates a silent gap. Parallel to iter-114's layered-auth thinking: auth on EVERY sensitive endpoint, not just POSTs.
+
+**Meta-lesson — targeted redaction > blanket wrapping.** Blanket-wrapping the logger at basicConfig level would catch everything BUT also:
+- Hide legit debugging info (model IDs, profile choices, file paths) from operator investigations.
+- Make the security property invisible to reviewers (can't tell which logs are "sensitive" from the call site).
+- Force maintainers to work around the wrapper when they want raw output in dev.
+Targeted redaction at specific high-risk sites is visible, auditable, and maintainable. **Rule: apply security filtering at the boundary where untrusted input enters the logged string, not as a blanket catch-all. Pin the targeted sites via source-inspection tests; keep clean-origin sites unwrapped.**
+
+**Meta-lesson — source-inspection tests need anchors that are resilient to their own rationale comments.** My first draft of `test_webhook_delivery_log_uses_redact_for_log` used `content.find("Webhook delivered to")` and found the phrase in MY OWN M193 rationale comment 1800 lines above the actual code site. The snippet check looked at the comment, which didn't mention `redact_for_log` (because the comment is about WHY, not the call-site fix). False positive → false-red test → 10 minutes diagnosing my own broken anchor. **Rule: when pinning a specific call site via source inspection, assume rationale comments at the top of the file will quote the same phrase. Use `rfind` (if the code is always below the comments), or switch to a more precise anchor that includes surrounding code (e.g., `'job.log(f"Webhook delivered'`). Never anchor on a bare user-facing phrase.** Parallels iter-127 M190's lesson: line-number anchors are brittle; structural anchors are robust.
+
+**Items touched:**
+- M193 [x] — added `redact_for_log` helper + applied to 7 high-risk sites. 11 new regression tests (6 unit + 2 semantics + 3 source-inspection pins).
+
+**Commit:** (this iteration)
+
+**Verification:** 57 jang-server tests pass (was 46, +11).
+
+**Closed-status tally:** 146 (iter 129) + M193 = 147 items touched, all closed. Zero known bugs as of iter-130 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (cleanup — discovered during iter-130):** `check_rate_limit` shadows the module-level `log` logger with a local deque variable. Lines 311-326 assign `log = _rate_limit_log.setdefault(ip, deque())`. No current bug (no `log.info` called inside the function), but a future maintainer who adds debug logging inside the function would get AttributeError. Rename local to `ip_log` or `rate_log`.
+- **NEW:** extend the rate-limit dependency to /retry + /admin/purge (carried from iter-127 — /retry can spawn subprocess work = real DoS vector).
+- **NEW (security):** audit jang-server's 4xx/5xx response bodies for info leaks. Path fragments, env hints, Python tracebacks. HTTPException detail messages are user-visible.
+- **NEW:** apply `redact_for_log` to `ProcessPool`/spawn-time logging too — subprocess-spawn events might include env dumps.
+- **NEW (security — JANGStudio):** audit JANGStudio's `PythonRunner` log pipeline for the same class of leak. Swift-side log accumulation in `JobStore` also goes to XPC + disk.
+
+**Next iteration should pick:** error-response info leaks audit (natural M193 follow-on — now that logs are clean, what about response bodies visible to unauthed attackers who hit 401/403/500?), OR the `log` shadow bug in check_rate_limit (quick cleanup), OR extend redaction to JANGStudio's PythonRunner pipeline.

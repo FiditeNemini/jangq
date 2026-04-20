@@ -25,6 +25,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -98,6 +99,58 @@ PROFILE_DESCRIPTIONS = {
 
 log = logging.getLogger("jang-server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+# M193 (iter 130): runtime-log secret redaction.
+# Pre-M193 several log sites fed un-sanitized strings into both the
+# Python logger AND the job's log_lines buffer (exposed via GET /logs).
+# The leak vectors:
+#   1. Subprocess stdout/stderr from convert_model.py forwarded raw via
+#      _ProgressWriter.write → self.job.log(line) → log.info(...).
+#      If the subprocess ever prints an HF URL, exception with token in
+#      query string, or the token itself, it ends up in operator logs.
+#   2. Webhook URLs (like https://hooks.slack.com/services/T0/B0/XXX
+#      where XXX is effectively a write secret) logged verbatim at
+#      "Webhook delivered to {url}" sites.
+#   3. Exception messages (traceback.format_exc() + str(e)) often include
+#      URLs with tokens (huggingface_hub errors) or filesystem paths.
+#
+# Patterns (parallels iter-117 M182 repo-wide secrets sweep + iter-129
+# M192 docs test — layered redaction with per-site strictness):
+#   - HF tokens: `hf_[A-Za-z0-9_-]{20,}` → `hf_***REDACTED***`
+#   - OpenAI keys: `sk-[A-Za-z0-9_-]{20,}` → `sk-***REDACTED***`
+#   - Bearer tokens: `Bearer [A-Za-z0-9_\-\.]{16,}` → `Bearer ***REDACTED***`
+#   - Webhook secrets: slack/discord/generic webhooks — replace path+query
+#     so `https://hooks.slack.com/services/T0/B0/XXX?a=1` becomes
+#     `https://hooks.slack.com/***REDACTED***`.
+#   - ?api_key=/?token=/?access_token= query strings: strip the query.
+#
+# Designed to be a small helper: called at specific high-risk sites,
+# NOT blanket-applied to every log call (over-redaction hides legit
+# debugging info like model IDs and file paths).
+_SECRET_REDACTIONS = [
+    (re.compile(r"\bhf_[A-Za-z0-9_-]{20,}\b"), "hf_***REDACTED***"),
+    (re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"), "sk-***REDACTED***"),
+    (re.compile(r"\bBearer\s+[A-Za-z0-9_\-\.]{16,}\b"), "Bearer ***REDACTED***"),
+    # Match known webhook hosts + redact path+query.
+    (re.compile(r"https://(hooks\.slack\.com|discord(?:app)?\.com/api/webhooks)[^\s\"']*"),
+     lambda m: f"https://{m.group(1)}/***REDACTED***"),
+    # Strip common secret-bearing query strings anywhere in the URL.
+    (re.compile(r"([?&](?:api_key|token|access_token|auth)=)[^&\s\"']+"),
+     lambda m: f"{m.group(1)}***REDACTED***"),
+]
+
+
+def redact_for_log(s: str) -> str:
+    """Strip likely-secret substrings from a string before logging it.
+    See _SECRET_REDACTIONS for the pattern list + rationale. Idempotent
+    (re-applying doesn't change a redacted string because the sentinel
+    doesn't match any pattern)."""
+    if not s:
+        return s
+    for pattern, replacement in _SECRET_REDACTIONS:
+        s = pattern.sub(replacement, s)
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +542,7 @@ def _load_jobs_from_db():
             # M177 (iter 111): log DB-restore failures per iter-106 pattern.
             # A corrupt row shouldn't kill the whole restore, but operators
             # debugging "why is this old job missing?" need visibility.
-            log.warning(f"restore_jobs: skipping row (id={d.get('id', '?') if isinstance(locals().get('d'), dict) else '?'}): {type(_e).__name__}: {_e}")
+            log.warning(redact_for_log(f"restore_jobs: skipping row (id={d.get('id', '?') if isinstance(locals().get('d'), dict) else '?'}): {type(_e).__name__}: {_e}"))
 
 
 def _dict_to_job(d: dict) -> Job:
@@ -1113,7 +1166,7 @@ def estimate_size(req: EstimateRequest, request: Request):
         # corrupt cached config. config={} fallback is safe — downstream
         # _extract_param_count tolerates empty — but operators need
         # visibility into why enrichment fell through for a specific repo.
-        log.warning(f"estimate: HF config fetch failed for {req.model_id}: {type(_e).__name__}: {_e}")
+        log.warning(redact_for_log(f"estimate: HF config fetch failed for {req.model_id}: {type(_e).__name__}: {_e}"))
 
     # Try to extract param count
     num_params = _extract_param_count(config, info)
@@ -1162,7 +1215,7 @@ def recommend_profile(model_id: str):
         # M177 (iter 111): second HF config-fetch site — same rationale as
         # the estimate-endpoint fetch above. Fall through with config={}
         # but log so operators can see which model's config fetch failed.
-        log.warning(f"recommend: HF config fetch failed for {model_id}: {type(_e).__name__}: {_e}")
+        log.warning(redact_for_log(f"recommend: HF config fetch failed for {model_id}: {type(_e).__name__}: {_e}"))
 
     arch_info = _detect_arch_from_config(config)
     recommendations = _recommend_profiles(config, arch_info)
@@ -1277,10 +1330,13 @@ def _run_job(job: Job):
 
     except Exception as e:
         job.phase = JobPhase.FAILED
-        job.error = f"{e}\n{traceback.format_exc()}"
-        job.phase_detail = f"Failed during {job.phase.value}: {e}"
+        # M193 (iter 130): redact. Tracebacks can include URLs with
+        # tokens (huggingface_hub raises with the failing URL in its
+        # message) and phase_detail/log lines are exposed via GET /jobs.
+        job.error = redact_for_log(f"{e}\n{traceback.format_exc()}")
+        job.phase_detail = redact_for_log(f"Failed during {job.phase.value}: {e}")
         job.timing.total_elapsed_seconds = time.time() - job.timing.started_at
-        job.log(f"FAILED: {e}")
+        job.log(f"FAILED: {redact_for_log(str(e))}")
         _save_job(job)
         _notify_sse(job)
         _fire_webhook(job)
@@ -1420,7 +1476,7 @@ def _phase_detect(job: Job):
         # fallback disables the 512+experts+large-hidden bfloat16 override
         # heuristic — operator debugging "why isn't bfloat16 being forced
         # on this MoE?" needs to know the config read fell through.
-        log.warning(f"architecture check: config.json read failed at {source_path}: {type(_e).__name__}: {_e}")
+        log.warning(redact_for_log(f"architecture check: config.json read failed at {source_path}: {type(_e).__name__}: {_e}"))
     if arch.num_experts >= 512 and hidden >= 4096:
         job.architecture.bfloat16_override = True
         warnings.append("512+ experts + large hidden: bfloat16 activations forced")
@@ -1761,9 +1817,12 @@ def _fire_webhook(job: Job):
             method="POST",
         )
         urllib.request.urlopen(req, timeout=10)
-        job.log(f"Webhook delivered to {job.webhook_url}")
+        # M193 (iter 130): redact. Webhook URLs for Slack/Discord/etc
+        # carry the write secret in the path; plain-log leaks it.
+        job.log(f"Webhook delivered to {redact_for_log(job.webhook_url)}")
     except Exception as e:
-        job.log(f"Webhook failed: {e}")
+        # M193: exception messages can include the URL with token.
+        job.log(f"Webhook failed: {redact_for_log(str(e))}")
 
 
 # ---------------------------------------------------------------------------
@@ -1784,7 +1843,12 @@ class _LogCapture(io.TextIOBase):
             line = line.strip()
             if not line:
                 continue
-            self.job.log(line)
+            # M193 (iter 130): redact before logging. The convert_model
+            # subprocess can emit exception traces containing HF URLs
+            # with tokens, Bearer auth headers, or paths. Scrub here so
+            # those don't flow into job.log_lines (exposed via /logs) or
+            # the module logger.
+            self.job.log(redact_for_log(line))
             self._parse_line(line)
             _notify_sse(self.job)
         return len(s)
@@ -1843,7 +1907,12 @@ class _LogCapture(io.TextIOBase):
                 pass
         # Gate passthrough
         elif "Gate passthrough" in line:
-            self.job.log(line)
+            # M193 (iter 130): same line originated from subprocess;
+            # write() already redacted before calling _parse_line, but
+            # the original `line` kwarg here is the pre-parse version.
+            # Applying redact_for_log again is idempotent (replacements
+            # don't match their own sentinel).
+            self.job.log(redact_for_log(line))
         # [5/5] Writing...
         elif "[5/5]" in line:
             self.job.phase = JobPhase.WRITING
