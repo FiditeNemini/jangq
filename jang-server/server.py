@@ -260,6 +260,56 @@ _sse_subscribers: dict[str, list[asyncio.Queue]] = {}
 _sse_lock = threading.Lock()
 
 
+# ── Rate limiting ──────────────────────────────────────────────
+# M187 (iter 124): simple sliding-window rate limiter keyed by client
+# IP. Pre-M187 a single client could flood POST /estimate (each call
+# makes an HF API request — exhausts the server's HF rate-limit
+# budget) or POST /jobs (creates DB rows, runs validation work even
+# when MAX_JOBS_PER_USER rejects). Auth gates limit who can hit these
+# but don't bound rate per source.
+#
+# Tunable via env: JANG_RATE_LIMIT_WINDOW_S (default 60) +
+# JANG_RATE_LIMIT_MAX_REQUESTS (default 30 = 1 req every 2s averaged).
+# Defaults err generous — tighter values can land later if observed
+# abuse patterns warrant.
+RATE_LIMIT_WINDOW_S = int(os.environ.get("JANG_RATE_LIMIT_WINDOW_S", "60"))
+RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("JANG_RATE_LIMIT_MAX_REQUESTS", "30"))
+
+# {ip: deque[float] of recent request timestamps}. Bounded by window
+# expiry — old entries pop from the left as new ones arrive.
+_rate_limit_log: dict[str, deque[float]] = {}
+_rate_limit_lock = threading.Lock()
+
+
+def check_rate_limit(request: "Request") -> None:
+    """Apply a sliding-window per-IP rate limit. Raise 429 if exceeded.
+    Used as a FastAPI dependency on rate-prone endpoints (/estimate,
+    /jobs). Auth-gated endpoints get this BEFORE the auth check so
+    failed-auth attempts also count against the limit (defends against
+    auth-brute-force flooding). Public endpoints (/health, /profiles)
+    skip rate limiting to keep liveness probes cheap."""
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    cutoff = now - RATE_LIMIT_WINDOW_S
+    with _rate_limit_lock:
+        log = _rate_limit_log.setdefault(ip, deque())
+        # Drop entries older than the window.
+        while log and log[0] < cutoff:
+            log.popleft()
+        if len(log) >= RATE_LIMIT_MAX_REQUESTS:
+            # Reject — over budget.
+            retry_after = int(log[0] + RATE_LIMIT_WINDOW_S - now) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Rate limit exceeded: {RATE_LIMIT_MAX_REQUESTS} requests per "
+                    f"{RATE_LIMIT_WINDOW_S}s. Retry in {retry_after}s."
+                ),
+                headers={"Retry-After": str(retry_after)},
+            )
+        log.append(now)
+
+
 def _notify_sse(job: Job):
     """Push update to all SSE subscribers for this job."""
     with _sse_lock:
@@ -621,8 +671,8 @@ def startup():
 
 # ── Submit job ──────────────────────────────────────────────
 
-@app.post("/jobs", dependencies=[Depends(check_auth)])
-def create_job(req: JobRequest):
+@app.post("/jobs", dependencies=[Depends(check_rate_limit), Depends(check_auth)])
+def create_job(req: JobRequest, request: Request):
     """Submit a new quantization job."""
     profile = req.profile.upper()
     if profile not in VALID_PROFILES:
@@ -900,8 +950,8 @@ def list_profiles():
 
 # ── Size estimation ─────────────────────────────────────────
 
-@app.post("/estimate", dependencies=[Depends(check_auth)])
-def estimate_size(req: EstimateRequest):
+@app.post("/estimate", dependencies=[Depends(check_rate_limit), Depends(check_auth)])
+def estimate_size(req: EstimateRequest, request: Request):
     """Estimate output size and time for a model+profile without starting a job."""
     profile = req.profile.upper()
     if profile not in VALID_PROFILES:

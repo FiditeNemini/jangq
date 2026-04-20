@@ -225,6 +225,25 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M187 (jang-server rate-limiting on POST /estimate + POST /jobs)** — Iter-124 added a per-IP sliding-window rate limiter to jang-server's high-cost POST endpoints. Pre-M187 a single client could flood:
+      - **POST /estimate** — each call hits the HF API (`HfApi.model_info`). An auth'd attacker could exhaust the server's HF rate-limit budget, breaking `/estimate` for every other user.
+      - **POST /jobs** — creates DB rows + runs validation (HFRepoValidator, duplicate detection, per-user limit check). MAX_JOBS_PER_USER bounds CONCURRENT jobs but not creation RATE — flooding rejected submissions still consumes CPU.
+      MAX_CONCURRENT bounds total compute work, but neither endpoint had per-source rate limiting.
+      **Fix (iter 124):** added `check_rate_limit(request: Request) -> None` FastAPI dependency. Sliding-window per-IP, configurable via `JANG_RATE_LIMIT_WINDOW_S` (default 60s) + `JANG_RATE_LIMIT_MAX_REQUESTS` (default 30 = avg 1 req every 2s). Implementation: `dict[ip, deque[timestamps]]` with `popleft` for window expiry — sliding-window not fixed-counter (fixed counter would let clients burst at minute boundaries).
+      Rate-check fires BEFORE auth check (via `dependencies=[Depends(check_rate_limit), Depends(check_auth)]`) so failed-auth attempts also count against the limit — defends against auth-brute-force flooding too.
+      **429 response** carries `Retry-After` header with exact remaining seconds — matches RFC 6585.
+      **Public endpoints** (`/health`, `/profiles`) explicitly NOT rate-limited (test pins this) — keeps liveness probes cheap. Hostile flooding of `/health` is a network-layer concern (nginx/WAF).
+      **Tests (+5) in new `jang-server/tests/test_rate_limit.py`:**
+      - `test_check_rate_limit_function_exists`
+      - `test_check_rate_limit_uses_sliding_window` — pins `popleft` + `_rate_limit_log` literals so fixed-counter regressions fail.
+      - `test_rate_limit_applied_to_high_cost_endpoints` — parser asserts /estimate + /jobs include `check_rate_limit` Depends.
+      - `test_public_endpoints_skip_rate_limit` — guards over-correction.
+      - `test_rate_limit_env_vars_documented` — env-var names appear in source for operator discoverability.
+      Also widened iter-111 M177 allowlist range (line numbers shifted again from ~1150 to ~1207 due to rate-limit helper's ~50 lines added above).
+      **Evidence:** `jang-server/server.py:262-318, 633, 928`. 25 jang-server tests pass (was 20, +5).
+      **Meta-lesson — rate limits should fire BEFORE auth checks.** Putting `Depends(check_rate_limit)` before `Depends(check_auth)` means failed-auth attempts count against the limit too. This defends against auth-brute-force flooding (each guess costs the attacker rate-budget). Reverse order would let an attacker spray invalid keys at infinite rate. **Rule: in any FastAPI app, rate-limit deps must come BEFORE auth deps.**
+      **Meta-lesson — sliding window > fixed counter.** A fixed-counter ("at most N per minute, resets at minute :00") lets a client send N at :59 and another N at :00:01 = 2N in 2 seconds. Sliding window ("at most N in any 60s span") prevents the burst. Trivial impl difference (`deque + popleft` vs `int + time.minute`) but big behavioral difference. **Rule: when implementing rate limits, use sliding-window from the start.**
+      **Commit:** (this iteration)
 - [x] **M186 (JANGQuantizer.swiftpm QueueView — Cancel/Retry buttons silently swallowed errors)** — Iter-121 continued the JANGQuantizer.swiftpm sweep started in iter-120 M185. Found 2 more iter-35 M107-class silent-swallows in QueueView.swift's job-card action buttons:
       ```swift
       Button("Cancel") { Task { try? await api.cancelJob(job.jobId) } }
