@@ -3297,3 +3297,43 @@ Both are needed — location-based audit misses body-structure matches outside t
 - routing_profile.py + codebook_vq.py json.loads migration trivial with _json_utils.
 
 **Next iteration should pick:** loader.py mid-load migration (cheap cleanup now that _json_utils is canonical) OR another audit category.
+
+## 2026-04-20 iteration 79 — M156 PublishService.dryRun was a 7th invokeCLI copy
+
+**Angle:** Iter-78 meta-rule: "grep the WHOLE codebase for structural matches, not just the expected home directory." Iter-79 applies it with a simpler shape: `proc.waitUntilExit()`. 3 hits total. One canonical (PythonCLIInvoker) + one prose reference (PostConvertVerifier comment) + **one real 7th copy** in PublishService.
+
+**Deep trace walkthrough:**
+1. **The 7th copy's context:** PublishService has TWO subprocess-invoking paths:
+   - `publishWithProgress`: streaming upload with live JSONL progress events. Uses `AsyncThrowingStream` + `Task.detached { for try await line in pipe.bytes.lines { ... } }`. **Different pattern** — iter-76 intentionally scoped this out as "live stream drain."
+   - `invoke(args:token:)`: **dry-run** publish. One-shot CLI call. This is the iter-76 shape.
+2. **Why iter-76 missed it:** iter-76's grep pattern matched `invoke(args:)` function signatures. PublishService's dry-run was named `invoke(args:token:)` — extra parameter. Signature grep missed it even though the body is structurally identical.
+3. **Two structural differences** that need preservation:
+   - **Env-var threading:** `HF_HUB_TOKEN`, `PYTHONUNBUFFERED`, + `BundleResolver.childProcessEnvAdditions` (M62 iter-11). Passed via `proc.environment =` override.
+   - **Token-stderr redaction:** `stderrRaw.replacingOccurrences(of: token, with: "<redacted>")`. Security-critical — HF API errors can include the Authorization header; leaking a token in an error banner is a real confidentiality failure.
+4. **Fix structure — extend + migrate:**
+   - **Extend** `PythonCLIInvoker.invoke` with optional `env: [String: String]? = nil`. Default preserves iter-76 behavior (inherit parent env). When set, overrides via `proc.environment =`.
+   - **Migrate** PublishService.invoke: env construction stays at the call site (it's PublishService-specific); token redaction moves INTO the `errorFactory` closure where `token` captured from the outer scope. Result: 43 lines → 17 lines.
+5. **Why redaction moves into the factory, not the helper:** generic sanitization at the helper level would need a list of patterns or a regex arg — adding complexity. The typed errorFactory already runs at the call site, with full access to the token. Clean separation: helper handles subprocess I/O; call site handles semantic concerns.
+6. **Regression-guard test for env=nil.** A sloppy future refactor could make `env: [String: String] = [:]` (non-optional with empty default) — that would blank the subprocess env. Test verifies subprocess still has `$PATH` when env is omitted.
+
+**Meta-lesson — code-shape grep finds what signature grep misses.** Iter-76's peer-helper audit used signature matching (`invoke(args:)`). Iter-79's `proc.waitUntilExit()` is body-shape matching. The dry-run invoke had a different signature (extra token: parameter) and lived outside Runner/. Both audits needed.
+
+**Items touched:**
+- M156 [x] — PythonCLIInvoker.invoke gains env param; PublishService.dryRun invoke migrated. Total 7 invokeCLI copies now ZERO remaining.
+
+**Commit:** (this iteration)
+
+**Verification:** 7 PythonCLIInvokerTests pass (was 5, +2 env-param tests). 22 AdoptionServicesTests pass. 177 Swift tests. Python 348 + ralph 73 unchanged.
+
+**Closed-status tally:** 91 (iter 78) + M156 = 92 closed / 100 total = **92.0% closure rate.**
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: now that every one-shot CLI invoke is canonical, next audit target: iter-76 `Task.detached` stream-drain pattern in PythonRunner + PublishService. 2 copies — below 3+ threshold but getting closer. If a 3rd appears it's a clean extract.
+- Python-side: routing_profile.py / codebook_vq.py _json_utils migration (trivial now).
+- Deep-trace: walk every iter-15-era error-message in the production code to check if any still says "Error Domain=…" or raw exception-class names that M129-style typed errors would clean up.
+
+**Next iteration should pick:** routing_profile.py + codebook_vq.py json.loads migration (fast, uses mature _json_utils) OR fresh audit angle.

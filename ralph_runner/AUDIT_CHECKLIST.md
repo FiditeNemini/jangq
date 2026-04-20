@@ -892,6 +892,22 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M156 (PublishService.dryRun was a 7th invokeCLI copy — iter-78 meta-rule applied)** — Iter-78 meta-rule: "grep the WHOLE codebase for structural matches, not just the expected home directory." Iter-79 applied it with a simpler code-shape grep: `proc.waitUntilExit()`. 3 hits:
+      - `PythonCLIInvoker.swift:67` — canonical helper.
+      - `PublishService.swift:310` — 7th copy. **Hiding in plain sight.**
+      - `PostConvertVerifier.swift:219` — iter-19 M42 comment only (prose).
+      PublishService had TWO `invokeCLI`-style functions: `publishWithProgress` (streaming, iter-76 scoped this out as a different pattern — live stream drain) and `invoke(args:token:)` for dry-run. The dry-run variant is exactly the iter-76 one-shot shape, **plus** env-var threading (HF_HUB_TOKEN + PYTHONUNBUFFERED + childProcessEnvAdditions) and token-stderr redaction.
+      **Fix (iter 79) — in two parts:**
+      1. **Extended `PythonCLIInvoker.invoke` with optional `env: [String: String]? = nil` parameter.** Default nil preserves the iter-76 M153 inherit-env behavior for the 6 already-migrated callers. When set, `proc.environment = env` is applied.
+      2. **Migrated PublishService.dryRun invoke** to the shared helper. The env-var construction (HF_HUB_TOKEN + PYTHONUNBUFFERED + M62 env additions) stays at the call site since it's PublishService-specific. Token redaction moves INTO the errorFactory closure, where `token` is in scope and the typed error is wrapped around the sanitized stderr.
+      **Call-site shrink:** 43 lines → 17 lines. All env+token-security logic survives; only the plumbing vanishes.
+      **Tests (+2) in `PythonCLIInvokerTests.swift`:**
+      - `test_invoke_passes_env_to_subprocess`: script captures `$MY_TEST_VAR`, verifies passed-through value.
+      - `test_invoke_env_nil_preserves_parent_env_inheritance`: regression guard — default nil must NOT blank the env (would break every other caller's PATH inheritance).
+      **Verification:** 22 AdoptionServicesTests pass (includes publish dry-run tests). 7 PythonCLIInvokerTests (was 5, +2 for M156). Behavior preserved across the migration.
+      **Final invokeCLI-pattern tally:** started at 5 (iter-76) + 1 outlier SourceDetector (iter-78 M155) + 1 outlier dryRun (this iter M156) = 7 total copies, ALL migrated to the shared helper. Token security + env threading + cancel propagation all flow through the canonical `PythonCLIInvoker.invoke`.
+      **Evidence:** `JANGStudio/JANGStudio/Runner/PythonCLIInvoker.swift:39-58`, `JANGStudio/JANGStudio/Runner/PublishService.swift:285-306`. 177 Swift tests pass (was 175, +2). Python 348 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [x] **M155 (SourceDetector was a 6th invokeCLI copy iter-76 missed — migrate + typed error)** — Iter-77 forecast: Pipe-drain audit. Grepped `readDataToEndOfFile()` + `bytes.lines` across the Swift app. Found **SourceDetector.inspect was a 6th copy** of the iter-76 M153 pattern — iter-76 touched the 5 adoption services but SourceStep's embedded `SourceDetector` enum lived outside the Runner/ directory and got missed.
       **Extra find beyond just migration:** SourceDetector was also the LAST remaining `NSError(domain: "SourceDetector")` usage. iter-51 M129 cleaned up Capabilities/Profiles' NSError usages for typed errors; SourceDetector was missed then too because it's in Wizard/Steps/ not Runner/. Same NSError-stringified-into-banner anti-pattern M129 fixed.
       **Fix (iter 78):** Two changes:

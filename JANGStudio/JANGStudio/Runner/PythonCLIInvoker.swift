@@ -42,12 +42,20 @@ enum PythonCLIInvoker {
     ///     without needing an actual Python + model. Mirrors the
     ///     `executableOverride` pattern on PythonRunner / InferenceRunner
     ///     (iter-31 M98 / iter-32 M100).
+    ///   - env: optional environment-variable overrides merged on top of
+    ///     the inherited parent env. Used by PublishService (iter-79 M156)
+    ///     to thread HF_HUB_TOKEN into the subprocess without leaking via
+    ///     ``ps aux``-visible argv. When nil, subprocess inherits parent
+    ///     env unchanged (same behavior as iter-76 M153's original shape).
     ///   - errorFactory: closure invoked on non-zero exit. Receives the
     ///     terminationStatus and captured stderr; should return the
-    ///     service-specific typed error.
+    ///     service-specific typed error. Callers that need stderr
+    ///     sanitization (e.g., token redaction) do it inside this
+    ///     closure before wrapping the typed error.
     static func invoke(
         args: [String],
         executableOverride: URL? = nil,
+        env: [String: String]? = nil,
         errorFactory: @escaping @Sendable (Int32, String) -> Error
     ) async throws -> Data {
         let handle = ProcessHandle()
@@ -58,6 +66,9 @@ enum PythonCLIInvoker {
                         let proc = Process()
                         proc.executableURL = executableOverride ?? BundleResolver.pythonExecutable
                         proc.arguments = args
+                        if let env = env {
+                            proc.environment = env
+                        }
                         let out = Pipe()
                         let err = Pipe()
                         proc.standardOutput = out

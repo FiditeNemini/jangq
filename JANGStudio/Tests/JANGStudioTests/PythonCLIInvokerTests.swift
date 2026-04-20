@@ -111,6 +111,48 @@ final class PythonCLIInvokerTests: XCTestCase {
         XCTAssertTrue(argv.contains("gamma"))
     }
 
+    // ────────────── env param threads variables into subprocess ──────────────
+
+    func test_invoke_passes_env_to_subprocess() async throws {
+        // M156 (iter 79): env param added so PublishService can thread
+        // HF_HUB_TOKEN into the subprocess without leaking via argv.
+        let capFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pci-env-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: capFile) }
+
+        // Script captures the specific env var we want to pin.
+        let script = try makeTempScript(#"""
+        echo "$MY_TEST_VAR" > "__CAPFILE__"
+        """#.replacingOccurrences(of: "__CAPFILE__", with: capFile.path))
+
+        _ = try await PythonCLIInvoker.invoke(
+            args: [],
+            executableOverride: script,
+            env: ["MY_TEST_VAR": "hello-from-test", "PATH": "/usr/bin:/bin"]
+        ) { _, _ in FakeError(code: 0, stderr: "") }
+
+        let captured = try String(contentsOf: capFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(captured, "hello-from-test",
+            "env param must thread the variable into the subprocess")
+    }
+
+    func test_invoke_env_nil_preserves_parent_env_inheritance() async throws {
+        // Regression guard: when env is nil (the pre-M156 default), the
+        // subprocess must inherit the parent env. Otherwise every caller
+        // that doesn't explicitly pass env (6 out of 7) would get PATH=""
+        // and fail to find basic utilities.
+        let script = try makeTempScript(#"[ -n "$PATH" ] && exit 0 || exit 1"#)
+        _ = try await PythonCLIInvoker.invoke(
+            args: [],
+            executableOverride: script
+            // env: nil (default)
+        ) { code, _ in
+            XCTFail("PATH was empty — env=nil default dropped parent env inheritance. code=\(code)")
+            return FakeError(code: code, stderr: "")
+        }
+    }
+
     // ────────────── Task cancel propagates SIGTERM ──────────────
 
     func test_consumer_task_cancel_terminates_subprocess_within_3_seconds() async throws {

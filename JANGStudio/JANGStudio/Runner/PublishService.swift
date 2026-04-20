@@ -283,46 +283,25 @@ enum PublishService {
     }
 
     private nonisolated static func invoke(args: [String], token: String) async throws -> Data {
-        // M101 (iter 33): Task-cancel propagation — parallel to the
-        // streaming publishWithProgress path (iter 30 M96) and the other
-        // CLI service invokes. Dry-run publish is fast (<1s) but a hung
-        // consumer Task shouldn't still drag a subprocess behind it.
-        let handle = ProcessHandle()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { cont in
-                DispatchQueue.global().async {
-                    do {
-                        let proc = Process()
-                        proc.executableURL = BundleResolver.pythonExecutable
-                        proc.arguments = args
-                        var env = ProcessInfo.processInfo.environment
-                        env["HF_HUB_TOKEN"] = token
-                        env["PYTHONUNBUFFERED"] = "1"
-                        for (k, v) in BundleResolver.childProcessEnvAdditions(inherited: env) {
-                            env[k] = v
-                        }
-                        proc.environment = env
-                        let out = Pipe(); let err = Pipe()
-                        proc.standardOutput = out
-                        proc.standardError = err
-                        try proc.run()
-                        handle.set(process: proc)
-                        proc.waitUntilExit()
-                        if proc.terminationStatus != 0 {
-                            let stderrData = err.fileHandleForReading.readDataToEndOfFile()
-                            let stderrRaw = String(data: stderrData, encoding: .utf8) ?? ""
-                            let stderr = stderrRaw.replacingOccurrences(of: token, with: "<redacted>")
-                            cont.resume(throwing: PublishServiceError.cliError(code: proc.terminationStatus, stderr: stderr))
-                            return
-                        }
-                        cont.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
-                    } catch {
-                        cont.resume(throwing: error)
-                    }
-                }
-            }
-        } onCancel: {
-            handle.cancel()
+        // M156 (iter 79): migrated to shared PythonCLIInvoker (iter-76
+        // M153 / iter-78 M155 pattern). 7th copy of the cross-layer cancel
+        // pattern was hiding here — iter-76 scoped to 5 services; iter-78
+        // caught SourceDetector; this iter catches dryRun's variant which
+        // also needed env-var threading for HF_HUB_TOKEN.
+        //
+        // The errorFactory closure captures `token` so it can redact it
+        // from the stderr before wrapping the typed error — keeps the
+        // security-critical sanitization at the call site where the
+        // token is in scope.
+        var env = ProcessInfo.processInfo.environment
+        env["HF_HUB_TOKEN"] = token
+        env["PYTHONUNBUFFERED"] = "1"
+        for (k, v) in BundleResolver.childProcessEnvAdditions(inherited: env) {
+            env[k] = v
+        }
+        return try await PythonCLIInvoker.invoke(args: args, env: env) { code, stderr in
+            let scrubbed = stderr.replacingOccurrences(of: token, with: "<redacted>")
+            return PublishServiceError.cliError(code: code, stderr: scrubbed)
         }
     }
 }
