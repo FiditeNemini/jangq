@@ -92,6 +92,58 @@ def test_recommend_minimax_forces_bfloat16(tmp_path):
     assert any("bfloat16" in w for w in rec["warnings"])
 
 
+# M131 (iter 53): _recommend_dtype peer-helper sweep.
+#
+# `_classify_family` promotes ANY MoE model to "moe_large_expert" when
+# expert_count >= 512. But `_recommend_dtype` used a HARDCODED set
+# `_BF16_REQUIRED = {"minimax_m2", "glm_moe_dsa"}` — so a 512-expert
+# qwen3_5_moe (or any future 512-expert family not on that list) got
+# force_dtype=None while `warnings` said "bfloat16 is required to avoid
+# float16 overflow". Self-contradicting output; user sees conflicting
+# advice and the model then OOMs or NaNs at float16 boundaries. Iter 53
+# fixes by passing expert_count through to _recommend_dtype and checking
+# >= 512 dynamically alongside the named-family set.
+
+def test_recommend_dtype_forces_bfloat16_on_any_512_expert_model(tmp_path):
+    """A hypothetical 512+ expert qwen3_5_moe triggers the warning but
+    pre-iter-53 did NOT force bfloat16. The warning and recommendation
+    contradicted each other."""
+    d = _make_model_dir(tmp_path, {"model_type": "qwen3_5_moe", "num_experts": 512,
+                                    "hidden_size": 3072, "num_hidden_layers": 48,
+                                    "vocab_size": 151936, "intermediate_size": 3072})
+    rec = recommend(d)
+    assert any("bfloat16 is required" in w for w in rec["warnings"]), \
+        f"512+ expert model should warn about bfloat16, got {rec['warnings']}"
+    assert rec["recommended"]["force_dtype"] == "bfloat16", (
+        "When the warning says 'bfloat16 is required to avoid float16 overflow', "
+        "force_dtype must be bfloat16 — otherwise the wizard shows conflicting "
+        "advice and the user runs with f16 → NaN at runtime."
+    )
+
+
+def test_recommend_dtype_uses_n_routed_experts_for_bf16_check(tmp_path):
+    """Some HF configs expose expert count as `n_routed_experts` (DeepSeek
+    family). The dynamic check must handle that key too."""
+    d = _make_model_dir(tmp_path, {"model_type": "deepseek_v3", "n_routed_experts": 512,
+                                    "hidden_size": 4096, "num_hidden_layers": 60,
+                                    "vocab_size": 102400, "intermediate_size": 4096})
+    rec = recommend(d)
+    assert rec["recommended"]["force_dtype"] == "bfloat16"
+
+
+def test_recommend_dtype_below_512_stays_auto(tmp_path):
+    """Regression guard: a 256-expert qwen3_5_moe must NOT force bfloat16.
+    The <512 auto path is important — users with FP16 models pay speed cost
+    if we force bfloat16 unnecessarily."""
+    d = _make_model_dir(tmp_path, {"model_type": "qwen3_5_moe", "num_experts": 256,
+                                    "hidden_size": 3072, "num_hidden_layers": 48,
+                                    "vocab_size": 151936, "intermediate_size": 3072})
+    rec = recommend(d)
+    assert rec["recommended"]["force_dtype"] is None, (
+        f"256-expert model should stay on auto dtype, got {rec['recommended']['force_dtype']}"
+    )
+
+
 def test_recommend_large_expert_uses_jang_2l(tmp_path):
     d = _make_model_dir(tmp_path, {"model_type": "minimax_m2", "num_experts": 512,
                                     "hidden_size": 6144, "num_hidden_layers": 40,

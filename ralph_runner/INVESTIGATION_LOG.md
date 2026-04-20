@@ -2124,3 +2124,49 @@ Pivoted to re-audit M121. Iter 45 closed the text path but the VL path is a SEPA
 - grep-audit class: any `raise` without a message (empty Exception) in production.
 
 **Next iteration should pick:** `_recommend_*` peer-helper sweep (natural continuation of iter 52's approach — recommend.py is user-facing, Step 1 of the wizard, so inconsistencies here directly hit UX).
+
+## 2026-04-20 iteration 53 — M131 _recommend_dtype dynamic promotion asymmetry
+
+**Angle:** Iter 52 finding: peer-helper grep-audit has 4 bugs in 6 iters. Applied to recommend.py's `_recommend_*` family (4 sibling functions, all return decision-tuples, all user-facing on Step 1 of the wizard). User-facing = UX asymmetry directly hits real users.
+
+**Deep trace walkthrough:**
+1. **Diff parameter shapes:**
+   - `_recommend_family(model_type, source_dtype)` — 2 params.
+   - `_recommend_profile(family_class, expert_count, param_b)` — 3 params.
+   - `_recommend_hadamard(profile)` — 1 param.
+   - `_recommend_dtype(model_type, source_dtype)` — 2 params.
+   Interesting: `_recommend_profile` takes `expert_count` (uses for moe_large_expert promotion). `_recommend_dtype` does NOT, even though its own docstring says "Force bfloat16 for **512+ expert models**".
+2. **Read each helper's logic:** `_recommend_dtype` checks `model_type in _BF16_REQUIRED` where `_BF16_REQUIRED = {"minimax_m2", "glm_moe_dsa"}`. HARDCODED set.
+3. **Cross-reference `_classify_family`:** the SAME module has a function that dynamically promotes any MoE with `expert_count >= 512` to "moe_large_expert" (line 143-144: `if klass in ("moe_standard", "moe_hybrid_ssm") and expert_count >= 512: return "moe_large_expert"`). Two helpers in the same module, one with dynamic check, one with hardcoded set.
+4. **Cross-reference `warnings` block** in main `recommend()`: line 397-398 says `"bfloat16 is required to avoid float16 overflow"` for any 512+ expert model. Another dynamic check against expert_count.
+5. **The self-contradiction:** a future 512-expert qwen3_5_moe or a custom-config deepseek_v3 with 512 experts would:
+   - `_classify_family` → "moe_large_expert" (dynamic check hits).
+   - `warnings` → "bfloat16 is required".
+   - `_recommend_dtype` → **None** (not in `_BF16_REQUIRED` hardcoded set).
+   So the wizard tells the user "bfloat16 is required" while simultaneously recommending force_dtype=auto (don't touch). The conversion proceeds under float16, overflows mid-shard, produces NaN experts, user gets "mid-conversion NaN" errors downstream.
+6. **TDD-first test reproduced the contradiction:** `test_recommend_dtype_forces_bfloat16_on_any_512_expert_model` with 512-expert qwen3_5_moe. Pre-fix: the warning asserted OK (line 398 triggered) but `force_dtype` was None. Test FAILED at the force_dtype assertion. Second test with DeepSeek's `n_routed_experts=512` naming also failed — DeepSeek uses a different config key, and the detect() path at line 367 tries `cfg.get("num_experts") or cfg.get("n_routed_experts")`, so expert_count gets picked up correctly. The fix just needs to flow it through.
+7. **Fix is minimal:** add `expert_count: int = 0` param to `_recommend_dtype`; change the condition from `model_type in _BF16_REQUIRED` to `model_type in _BF16_REQUIRED or expert_count >= 512`; pass `expert_count` from the caller. Four lines touched.
+8. **Regression guard:** `test_recommend_dtype_below_512_stays_auto` pins 256-expert qwen3_5_moe to `force_dtype=None`. Don't over-force bfloat16 on models that work fine at float16 — that would slow down inference for no reason.
+
+**Meta-lesson on peer-helper audits.** The pattern behind every bug found via this technique: "two functions in the same module make overlapping decisions but have drifted on logic." The decision overlap is where the bug lives — the code path where both helpers contribute to the same user-visible output, and one has gone stale. Future audit rule: for every helper family, look for decision-overlap zones (e.g., here: "is this a 512+ expert model?" is asked by three code paths with three different implementations). Align them.
+
+**Items touched:**
+- M131 [x] — `_recommend_dtype` gains `expert_count` parameter + dynamic ≥512 check + 3 tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 305 jang-tools tests pass (was 302, +3 for the dynamic dtype suite). Swift 136 + ralph 73 unchanged.
+
+**Closed-status tally:** 65 (iter 52) + M131 = 66 closed / 100 total = 66.0% closure rate. **Round number reached.**
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation — needs live test)
+- **NEW M132 candidate**: `_recommend_hadamard` uses a hardcoded list `("JANG_1L", "JANG_2S", "JANG_2M", "JANG_2L", "JANGTQ2")` — brittle to new profiles. Extract bit tier from profile name instead. Lower-priority but a similar pattern to M131.
+- **NEW**: peer-helper sweep inside `allocate.py`'s `classify_tensor` family.
+- **NEW**: peer-helper sweep on Swift wizard step files — Source/Architecture/Profile/Method/Publish/Verify Step transitions.
+
+**Next iteration should pick:** M132 hadamard brittleness (tight scope, directly continues iter-53's "decision-overlap zones" meta-lesson) OR Swift wizard step peer-helper sweep (new territory).

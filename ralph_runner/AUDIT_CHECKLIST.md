@@ -590,6 +590,17 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       Each test spawns the loader in a subprocess so an mlx-import failure at test-collection time doesn't mask the format-parity signal. Skips gracefully when MLX isn't present.
       **Evidence:** `jang-tools/jang_tools/loader.py:688-738`. 302 Python tests pass (was 297, +5). Swift 136 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M131 (peer-helper sweep inside recommend.py: `_recommend_dtype` missed dynamic 512+ expert promotion)** — Iter 52's meta-pattern "peer-helper grep-audit has 4 finds in 6 iters" applied inside recommend.py's `_recommend_*` family. Diffed `_recommend_family`, `_recommend_profile`, `_recommend_hadamard`, `_recommend_dtype` for parameter/logic/fallback/error-path parity. **Found a self-contradicting recommendation bug:**
+      - `_classify_family(model_type, expert_count, …)` **dynamically promotes** any MoE with expert_count ≥ 512 to "moe_large_expert" (line 143-144).
+      - `recommend()`'s warning block says `"bfloat16 is required to avoid float16 overflow"` for any 512+ expert model (line 397-398).
+      - But `_recommend_dtype(model_type, source_dtype)` uses a **hardcoded** `_BF16_REQUIRED = {"minimax_m2", "glm_moe_dsa"}` set (line 315). A future 512+ expert family (or any custom 512-expert qwen3_5_moe/deepseek_v3) gets `force_dtype=None` while the warning says bfloat16 is required. **The wizard shows contradictory advice; the model then OOMs / NaNs at float16 boundaries.**
+      **Fix (iter 53):** add `expert_count: int = 0` parameter to `_recommend_dtype`; promote to bfloat16 when either `model_type in _BF16_REQUIRED` OR `expert_count >= 512`. Pass `expert_count` from `recommend()`'s existing detection. The helper now mirrors `_classify_family`'s dynamic promotion rule.
+      **Tests (+3):**
+      - `test_recommend_dtype_forces_bfloat16_on_any_512_expert_model`: 512-expert qwen3_5_moe (not in `_BF16_REQUIRED`) — pre-fix force_dtype=None; post-fix bfloat16.
+      - `test_recommend_dtype_uses_n_routed_experts_for_bf16_check`: deepseek_v3 with `n_routed_experts=512` (DeepSeek naming). Pre-fix None; post-fix bfloat16.
+      - `test_recommend_dtype_below_512_stays_auto` (regression guard): 256-expert must stay on auto dtype — don't over-force bfloat16 on smaller MoEs.
+      **Evidence:** `jang-tools/jang_tools/recommend.py:313-332`. 305 Python tests pass (was 302, +3). Swift 136 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

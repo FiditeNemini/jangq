@@ -310,12 +310,29 @@ def _recommend_hadamard(profile: str) -> tuple[bool, str]:
     return (True, "Hadamard rotation reduces quantization error at 3-bit and higher — we turn it on by default.")
 
 
-def _recommend_dtype(model_type: str, source_dtype: str) -> tuple[str | None, str]:
-    """Force bfloat16 for 512+ expert models; otherwise auto (follow source)."""
-    if model_type in _BF16_REQUIRED:
+def _recommend_dtype(
+    model_type: str,
+    source_dtype: str,
+    expert_count: int = 0,
+) -> tuple[str | None, str]:
+    """Force bfloat16 for 512+ expert models; otherwise auto (follow source).
+
+    M131 (iter 53): peer-helper parity with `_classify_family` — that helper
+    dynamically promotes any MoE model with expert_count >= 512 to
+    "moe_large_expert". Pre-iter-53, this helper only checked the named
+    set `_BF16_REQUIRED = {"minimax_m2", "glm_moe_dsa"}` — so a future
+    512+ expert family (or a custom 512-expert qwen3_5_moe) would get
+    force_dtype=None while ``recommend()``'s warning block at the caller
+    said "bfloat16 is required to avoid float16 overflow". Self-
+    contradicting recommendation; user gets NaN at runtime. Checking
+    ``expert_count >= 512`` in-helper aligns with the warning and with
+    ``_classify_family``'s dynamic promotion rule.
+    """
+    if model_type in _BF16_REQUIRED or expert_count >= 512:
+        reason_name = model_type if expert_count == 0 else f"{model_type} ({expert_count} experts)"
         return (
             "bfloat16",
-            f"{model_type} has 512+ experts. Float16 overflows at this scale; "
+            f"{reason_name} has 512+ experts. Float16 overflows at this scale; "
             "we force bfloat16 which has a wider exponent range.",
         )
     return (None, "We use the source model's native dtype — auto-detected.")
@@ -391,7 +408,7 @@ def recommend(model_path: Path) -> dict[str, Any]:
     family, family_alts, family_reason = _recommend_family(model_type, source_dtype)
     profile, profile_alts = _recommend_profile(family_class, expert_count, param_b)
     hadamard, hadamard_reason = _recommend_hadamard(profile)
-    force_dtype, dtype_reason = _recommend_dtype(model_type, source_dtype)
+    force_dtype, dtype_reason = _recommend_dtype(model_type, source_dtype, expert_count)
 
     warnings: list[str] = []
     if expert_count >= 512:
