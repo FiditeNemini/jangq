@@ -48,7 +48,32 @@ def cmd_inspect_source(args) -> None:
     if not cfg_path.exists():
         print(f"ERROR: config.json not found under {src}", file=sys.stderr)
         sys.exit(2)
-    cfg = json.loads(cfg_path.read_text())
+    # M120: surface config.json parse errors as plain-English diagnostics, not
+    # bare JSONDecodeError tracebacks. JANG Studio invokes this from
+    # SourceStep.inspect() and captures exit-code only — a traceback on stderr
+    # used to be silently dropped and the wizard would show "inspect-source
+    # exited 1" with no clue that the user's config.json is malformed.
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"ERROR: could not read config.json at {cfg_path}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        cfg = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(
+            f"ERROR: config.json at {cfg_path} is not valid JSON "
+            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not isinstance(cfg, dict):
+        print(
+            f"ERROR: config.json at {cfg_path} has a top-level "
+            f"{type(cfg).__name__}, expected a JSON object",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     model_type = cfg.get("model_type") or cfg.get("text_config", {}).get("model_type", "unknown")
     summary = {
         "model_type": model_type,

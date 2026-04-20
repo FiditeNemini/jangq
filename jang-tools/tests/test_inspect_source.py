@@ -43,3 +43,54 @@ def test_inspect_source_missing_config_errors(tmp_path):
     )
     assert r.returncode != 0
     assert "config.json" in r.stderr.lower()
+
+
+def _assert_clean_error(r: subprocess.CompletedProcess, *, expect_phrase: str) -> None:
+    """Shared invariants for inspect-source failure surfaces (M120).
+
+    A well-formed error must:
+      1. exit non-zero
+      2. NOT print a Python traceback (no `Traceback (most recent call last)`)
+      3. include the phrase describing WHAT went wrong so the wizard can
+         relay it to the user in plain English
+    """
+    assert r.returncode != 0
+    assert "Traceback" not in r.stderr, (
+        "inspect-source leaked a Python traceback — "
+        "user would see a cryptic multi-line stacktrace:\n" + r.stderr
+    )
+    assert expect_phrase in r.stderr.lower(), (
+        f"stderr missing phrase {expect_phrase!r}, got:\n{r.stderr}"
+    )
+
+
+def test_inspect_source_malformed_json_errors_cleanly(tmp_path):
+    """M120: a corrupt config.json must not crash with a bare JSONDecodeError."""
+    (tmp_path / "config.json").write_text("{ this is not json")
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "inspect-source", "--json", str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    _assert_clean_error(r, expect_phrase="config.json")
+
+
+def test_inspect_source_empty_config_errors_cleanly(tmp_path):
+    """M120: empty config.json (zero-byte or whitespace only) is a common disk-
+    failure mode — don't surface `Expecting value: line 1 column 1 (char 0)`."""
+    (tmp_path / "config.json").write_text("")
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "inspect-source", "--json", str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    _assert_clean_error(r, expect_phrase="config.json")
+
+
+def test_inspect_source_non_dict_config_errors_cleanly(tmp_path):
+    """M120: valid JSON but not an object (e.g. someone dumps a list) used to
+    AttributeError on `cfg.get(...)` — must fail with a clean diagnostic."""
+    (tmp_path / "config.json").write_text("[1, 2, 3]")
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "inspect-source", "--json", str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    _assert_clean_error(r, expect_phrase="config.json")

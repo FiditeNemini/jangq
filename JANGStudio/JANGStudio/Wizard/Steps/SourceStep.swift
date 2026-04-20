@@ -294,15 +294,32 @@ enum SourceDetector {
                         let proc = Process()
                         proc.executableURL = BundleResolver.pythonExecutable
                         proc.arguments = ["-m", "jang_tools", "inspect-source", "--json", url.path]
-                        let out = Pipe(); proc.standardOutput = out; proc.standardError = Pipe()
+                        let out = Pipe()
+                        let err = Pipe()
+                        proc.standardOutput = out
+                        proc.standardError = err
                         try proc.run()
                         handle.set(process: proc)
                         proc.waitUntilExit()
                         if proc.terminationStatus != 0 {
+                            // M120 (iter 43): include stderr in the surfaced
+                            // error so SourceStep's errorText banner tells the
+                            // user WHY inspect-source failed (e.g. "config.json
+                            // at … is not valid JSON (line 1, col 3)"). Pre-fix,
+                            // a malformed config.json produced a useless
+                            // "inspect-source exited 1" with the real reason
+                            // discarded on the floor.
+                            let stderr = String(
+                                data: err.fileHandleForReading.readDataToEndOfFile(),
+                                encoding: .utf8
+                            )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            let desc = stderr.isEmpty
+                                ? "inspect-source exited \(proc.terminationStatus)"
+                                : "inspect-source exited \(proc.terminationStatus): \(stderr)"
                             cont.resume(throwing: NSError(
                                 domain: "SourceDetector",
                                 code: Int(proc.terminationStatus),
-                                userInfo: [NSLocalizedDescriptionKey: "inspect-source exited \(proc.terminationStatus)"]))
+                                userInfo: [NSLocalizedDescriptionKey: desc]))
                             return
                         }
                         cont.resume(returning: out.fileHandleForReading.readDataToEndOfFile())

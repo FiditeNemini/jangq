@@ -1722,3 +1722,43 @@ Or a domain item: M87, M97, M106, Cat D.
 - M117 in-wizard inference smoke (feedback_model_checklist.md rule 3)
 
 **Next iteration should pick:** M97 (partial HF cleanup — concrete, testable via HF API mock) OR another grep-audit class (`json.loads(` without try/except) OR Cat D memory-file cross-ref (~6-iter cadence due, last pass was iter 38).
+
+## 2026-04-20 iteration 43 — M120 json.loads grep-audit uncovers two-layer silent failure
+
+**Angle:** Iter 42's forecast pointed at three candidates. Picked the grep-audit class (`json.loads(` without try/except) because it's tightly scoped + easy to test. The bigger surprise came FROM the grep, not the fix.
+
+**Deep trace walkthrough:**
+1. `grep -n "json\.loads\("` across all .py: 43 files, 50+ call sites.
+2. Rapid triage: most callers are reading files we *wrote* during conversion (jang_config.json, model.safetensors.index.json, our own output `config.json`). Those are trust-boundary internal and don't need guards — if we wrote bad JSON, unit tests would have caught it long ago.
+3. **Two sites cross the user trust boundary**: `inspect_source.py:51` and `recommend.py:332`. Both read `<user-selected-source>/config.json`. The user points the SourceStep at a HuggingFace dir — that dir can contain anything.
+4. **Simulate the failure**: `(tmp_path / "config.json").write_text("{ this is not json")`. Run `jang_tools inspect-source --json <dir>`. Got the full multi-line traceback: `Traceback (most recent call last):`, 6 stack frames, ending in `json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 3 (char 2)`. **stderr leaks Python internals to users.**
+5. **Worse: trace the Swift side to see what the UI shows.** `SourceStep.swift:297` creates `Pipe()` for stderr — *discards the handle*. Line 301-306 on nonzero exit only uses `proc.terminationStatus` in the NSError. The error message is literally `"inspect-source exited 1"`. User has zero clue which file is bad, let alone why.
+6. **Two-layer silent failure found.** Python emits raw traceback, Swift drops it on the floor, user sees a cryptic one-liner. Most insidious kind: nothing fails loudly, but the user has no path to self-diagnose.
+7. **Scope decision: fix BOTH layers in one iter.** Python clean stderr alone is half-measure — Swift still discards it. Swift stderr-capture alone is half-measure — message still contains a traceback. Either layer shipped alone is a pyrrhic victory.
+8. **Python fix design**: explicit try/except for the three failure modes (OSError on disk-level, UnicodeDecodeError on non-utf8, JSONDecodeError on malformed JSON) + isinstance check for non-dict roots (`[]` or bare strings). Each emits `ERROR: config.json at <path> ...` including decode location for JSONDecodeError. inspect_source exits directly; recommend raises ValueError caught by existing top-level handler (which *does* strip the traceback).
+9. **Swift fix design**: tiny — read err.fileHandleForReading.readDataToEndOfFile() on nonzero exit, trim, append to the NSError's NSLocalizedDescriptionKey. Four lines of code. The ProcessHandle + withTaskCancellationHandler wrap from iter 34's M105 stays unchanged.
+10. **Test invariant (shared helper `_assert_clean_error`)**: three clauses guarantee the fix:
+   - (a) exit code nonzero (proves the error path runs)
+   - (b) `"Traceback"` substring NOT in stderr (proves no raw traceback leaks)
+   - (c) `"config.json"` substring IS in stderr (proves the error message is user-informative)
+   All three must hold. Previously only (a) held.
+
+**Grep-audit meta-lesson.** The "Swift saturation detected iter 37" note has a nuance: it meant the *Swift concurrency* grep classes were saturated. But grep-audits that *span* Python+Swift (cross-process error-surfacing) are still productive. This one revealed a Swift side-bug (stderr drop) I would never have noticed if I'd only grepped Python. **Cross-layer grep = stronger than single-layer.**
+
+**Items touched:**
+- M120 [x] — json.loads user-trust-boundary guard + Swift stderr surfacing.
+
+**Commit:** (this iteration)
+
+**Verification:** 275 jang-tools Python tests pass (was 270, +5 for the M120 parity suite). 130 Swift tests pass unchanged. 73 ralph_runner tests pass unchanged.
+
+**Closed-status tally:** 57 (prior) + M120 = 58 closed / 92 total = 63% closure rate.
+
+**Forecast pipeline (unchanged from iter 42 + refreshed):**
+- M87 Mistral 4 RoPE live validation (needs real convert — not in unit-test iter)
+- M97 partial HF repo cleanup after cancel (iter-30 spawn — HF mock testable)
+- M117 in-wizard inference smoke (feedback_model_checklist.md rule 3)
+- **NEW**: Cat D memory cross-ref (6-iter cadence — last pass was iter 38, now iter 43, cadence due next iter)
+- **NEW**: grep-audit class — `.parse(`, `.decode(`, or `int(` / `float(` calls on user-supplied strings without try/except (similar risk surface as json.loads)
+
+**Next iteration should pick:** Cat D memory cross-ref (cadence due) OR `int()/float()` grep-audit (natural follow-on to this iter's json.loads class).

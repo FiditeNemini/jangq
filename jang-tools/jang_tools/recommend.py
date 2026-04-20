@@ -329,7 +329,27 @@ def detect(model_path: Path) -> dict[str, Any]:
     cfg_path = model_path / "config.json"
     if not cfg_path.exists():
         raise FileNotFoundError(f"config.json not found under {model_path}")
-    cfg = json.loads(cfg_path.read_text())
+    # M120: match inspect_source's error-surface behavior — a bad config.json
+    # must produce a diagnostic that includes the path so the wizard's error
+    # banner can point the user at the right file. Pre-fix, the top-level
+    # `except Exception` printed `JSONDecodeError: ...` with no path, leaving
+    # the user to guess which file was malformed.
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"could not read config.json at {cfg_path}: {exc}") from exc
+    try:
+        cfg = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"config.json at {cfg_path} is not valid JSON "
+            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
+        ) from exc
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"config.json at {cfg_path} has a top-level "
+            f"{type(cfg).__name__}, expected a JSON object"
+        )
     model_type = cfg.get("model_type") or (cfg.get("text_config", {}) or {}).get("model_type", "unknown")
     expert_count = int(cfg.get("num_experts") or cfg.get("n_routed_experts") or cfg.get("num_local_experts") or 0)
     is_vl = (model_path / "preprocessor_config.json").exists()

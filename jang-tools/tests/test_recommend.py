@@ -191,6 +191,40 @@ def test_cli_rejects_missing_model(tmp_path):
     assert "not found" in r.stderr.lower()
 
 
+def _assert_clean_recommend_error(r: subprocess.CompletedProcess) -> None:
+    """M120 companion: same invariant as test_inspect_source._assert_clean_error.
+    A corrupt config.json should surface a short stderr message, not a full
+    Python traceback — JANG Studio's SourceStep treats nonzero exit as a soft
+    failure and falls back to no-recommendation, but still logs stderr."""
+    assert r.returncode != 0
+    assert "Traceback" not in r.stderr, (
+        "recommend leaked a Python traceback:\n" + r.stderr
+    )
+    assert "config.json" in r.stderr.lower()
+
+
+def test_cli_rejects_malformed_config(tmp_path):
+    """M120: corrupt config.json must not crash recommend with JSONDecodeError."""
+    (tmp_path / "config.json").write_text("{bogus}")
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "recommend",
+         "--model", str(tmp_path), "--json"],
+        capture_output=True, text=True, check=False,
+    )
+    _assert_clean_recommend_error(r)
+
+
+def test_cli_rejects_non_dict_config(tmp_path):
+    """M120: list-root config.json used to AttributeError deep inside detect()."""
+    (tmp_path / "config.json").write_text("[]")
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "recommend",
+         "--model", str(tmp_path), "--json"],
+        capture_output=True, text=True, check=False,
+    )
+    _assert_clean_recommend_error(r)
+
+
 def test_cli_json_output(tmp_path):
     d = _make_model_dir(tmp_path, {"model_type": "qwen3_5_moe", "num_experts": 256,
                                     "hidden_size": 2048, "num_hidden_layers": 28,
