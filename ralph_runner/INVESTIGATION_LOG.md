@@ -3030,3 +3030,38 @@ Three iters building the same pattern — it's now a template. Future read-side 
 - **NEW**: routing_profile.py / codebook_vq.py also have sites.
 
 **Next iteration should pick:** M151 loader.py migration (highest-traffic module, many sites) OR M126 examples.py polish (simpler, closes a long-open low-priority item).
+
+## 2026-04-20 iteration 73 — M126 long-open polish closed: examples.py names failing config file
+
+**Angle:** Iter-49's Cat D cross-ref flagged `examples.py:detect_capabilities` as a polish item. Iter-72 forecast listed M126 alongside M151 loader.py migration. Picked M126 first — smaller scope, ready to close, chips down the open list.
+
+**Deep trace walkthrough:**
+1. **3 read sites** (line 47, 49, 54) for config.json, jang_config.json, tokenizer_config.json.
+2. **cmd_examples's top-level except-Exception** catches JSONDecodeError but emits `ERROR: JSONDecodeError: Expecting value: ...` — no file path in the message.
+3. **User impact:** a corrupted post-convert bundle. User runs `jang examples --model ./MyConverted --lang python`, sees cryptic JSON error, now has to:
+   (a) Inspect the 3 JSON files manually to find which one is broken.
+   (b) Likely re-run convert to regenerate, not knowing if all 3 are bad or just one.
+4. **Fix: local `_read_json_object` helper** (same shape as M148 / M149). Purpose string identifies the file in every error message. 3 call sites become terse, each with a distinct purpose tag.
+5. **Why local helper:** 3+ sites in one function crosses the DRY threshold. Cross-subpackage import (format.reader._read_json_object) would add coupling for a 20-line helper. Local copy stays module-boundaried.
+6. **Test strategy:** 3 pins, each corrupts ONE of the 3 files and verifies stderr names that SPECIFIC file (not any other). The pair-and-distinguish structure catches both false positives (wrong file named) and false negatives (generic error with no file).
+
+**Meta-lesson — long-open polish items closed eventually.** M126 sat open since iter 49 (4 weeks of real calendar time in session terms, 24 iters). Low-priority doesn't mean never-fix; it means don't-stop-for-this. When the template matures (M148/M149) AND the codebase has capacity (closure rate high), closing polish items gets cheap. Same pattern for the `M97 partial HF cleanup` / `M117 in-wizard smoke` / `M124 test hang` that still sit open — when the template / infrastructure grows around them, their cost drops.
+
+**Items touched:**
+- M126 [x] — examples.py now names the failing config in error messages.
+
+**Commit:** (this iteration)
+
+**Verification:** 332 jang-tools tests pass (was 329, +3 for M126 file-identification pins). Swift 170 + ralph 73 unchanged.
+
+**Closed-status tally:** 85 (iter 72) + M126 = 86 closed / 100 total = 86.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- M151 loader.py migration (14 sites — biggest user-facing reader).
+- **NEW**: routing_profile.py (3 sites) + codebook_vq.py (2 sites) using same template.
+
+**Next iteration should pick:** M151 loader.py migration (biggest impact — every model load goes through it) OR routing_profile.py small sweep.

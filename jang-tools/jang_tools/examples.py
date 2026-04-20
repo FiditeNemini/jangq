@@ -42,16 +42,57 @@ _TEXT_ONLY_MODEL_TYPES = frozenset({
 })
 
 
+def _read_json_object(path: Path, *, purpose: str) -> dict[str, Any]:
+    """M126 (iter 73): shared read-side loader template.
+
+    Same shape as `format.reader._read_json_object` (iter 71 M149) — local
+    copy to avoid a cross-subpackage import. Every failure becomes a
+    ValueError with the file path + purpose so the outer
+    `cmd_examples`'s `except Exception` handler can emit an actionable
+    `ERROR: <msg>` to stderr instead of a generic
+    `JSONDecodeError: Expecting value: line 1 column 1 (char 0)` with no
+    file-path context.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"could not read {purpose} at {path}: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{purpose} at {path} is not valid JSON "
+            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{purpose} at {path} has a top-level {type(data).__name__}, "
+            f"expected a JSON object"
+        )
+    return data
+
+
 def detect_capabilities(model_dir: Path) -> dict[str, Any]:
     """Inspect a converted model dir for capability flags needed by templates."""
-    cfg = json.loads((model_dir / "config.json").read_text())
-    jang_cfg = (
-        json.loads((model_dir / "jang_config.json").read_text())
-        if (model_dir / "jang_config.json").exists()
+    # M126 (iter 73): route all 3 reads through _read_json_object so a
+    # corrupted post-convert artifact surfaces with the failing file's
+    # path + purpose in the error. Pre-iter-73 the outer cmd_examples
+    # try/except emitted `ERROR: JSONDecodeError: Expecting value: …`
+    # without naming the file — user had 3+ candidates to check.
+    cfg_path = model_dir / "config.json"
+    cfg = _read_json_object(cfg_path, purpose="config.json")
+    jang_cfg_path = model_dir / "jang_config.json"
+    jang_cfg: dict[str, Any] = (
+        _read_json_object(jang_cfg_path, purpose="jang_config.json")
+        if jang_cfg_path.exists()
         else {}
     )
     tok_cfg_path = model_dir / "tokenizer_config.json"
-    tok_cfg = json.loads(tok_cfg_path.read_text()) if tok_cfg_path.exists() else {}
+    tok_cfg: dict[str, Any] = (
+        _read_json_object(tok_cfg_path, purpose="tokenizer_config.json")
+        if tok_cfg_path.exists()
+        else {}
+    )
 
     model_type = cfg.get("model_type") or cfg.get("text_config", {}).get("model_type", "")
     quant = jang_cfg.get("quantization", {})

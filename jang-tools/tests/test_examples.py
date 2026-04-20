@@ -289,3 +289,67 @@ def test_python_snippet_imports_resolve_to_real_symbols():
     vl_mod = importlib.import_module("jang_tools.load_jangtq_vlm")
     assert hasattr(vl_mod, "load_jangtq_vlm_model"), \
         "jang_tools.load_jangtq_vlm.load_jangtq_vlm_model missing — VL snippet will ImportError"
+
+
+# ────────────────────────────────────────────────────────────────────
+# M126 (iter 73): examples error messages name the failing file
+# ────────────────────────────────────────────────────────────────────
+#
+# Pre-iter-73 detect_capabilities called json.loads on 3 different config
+# files (config.json, jang_config.json, tokenizer_config.json). On any one
+# being corrupt, cmd_examples's outer except-Exception emitted
+# `ERROR: JSONDecodeError: Expecting value: line 1 column 1 (char 0)` —
+# correct that it failed but didn't name WHICH config broke. User had to
+# manually check 3 files. iter-73 routes each read through
+# _read_json_object(path, purpose=…) so the error is specific.
+
+
+def test_cli_examples_names_corrupted_config_json(tmp_path):
+    """Corrupt config.json — error must name it."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text("{ not valid json")
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "examples",
+         "--model", str(d), "--lang", "python"],
+        capture_output=True, text=True, check=False,
+    )
+    assert r.returncode != 0
+    assert "config.json" in r.stderr
+    assert "not valid JSON" in r.stderr
+    # Pre-M126, this test would only find "JSONDecodeError" with no path.
+
+
+def test_cli_examples_names_corrupted_jang_config(tmp_path):
+    """Valid config.json, corrupt jang_config.json — error must name
+    jang_config specifically (not config.json)."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (d / "jang_config.json").write_text("broken")
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "examples",
+         "--model", str(d), "--lang", "python"],
+        capture_output=True, text=True, check=False,
+    )
+    assert r.returncode != 0
+    assert "jang_config.json" in r.stderr, \
+        f"M126: error must name jang_config.json, got: {r.stderr}"
+
+
+def test_cli_examples_names_corrupted_tokenizer_config(tmp_path):
+    """Valid config + jang_config, corrupt tokenizer_config — error must
+    name tokenizer_config specifically."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (d / "jang_config.json").write_text(json.dumps({"profile": "JANG_4K"}))
+    (d / "tokenizer_config.json").write_text("{broken}")
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "examples",
+         "--model", str(d), "--lang", "python"],
+        capture_output=True, text=True, check=False,
+    )
+    assert r.returncode != 0
+    assert "tokenizer_config.json" in r.stderr, \
+        f"M126: error must name tokenizer_config.json, got: {r.stderr}"

@@ -892,7 +892,15 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
-- [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
+- [x] **M126 (iter 73)** — long-open polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. Pre-iter-73 the top-level `cmd_examples` try/except emitted `ERROR: JSONDecodeError: Expecting value: line 1 column 1 (char 0)` — correct that it failed but didn't name WHICH config broke. User had to check 3 files manually.
+      **Fix (iter 73):** Added local `_read_json_object(path, *, purpose)` helper — same raise-contract template as format/reader.py's M149 + jangspec.manifest.py's M148. Applied to all 3 read sites with file-specific purpose strings. Error now reads e.g.: `ERROR: jang_config.json at /path/to/model/jang_config.json is not valid JSON (line 1, col 3): Expecting property name enclosed in double quotes`.
+      **Tests (+3) in `tests/test_examples.py`:**
+      - `test_cli_examples_names_corrupted_config_json`: corrupt config.json → stderr names "config.json".
+      - `test_cli_examples_names_corrupted_jang_config`: valid config.json + corrupt jang_config.json → stderr names "jang_config.json" (NOT "config.json").
+      - `test_cli_examples_names_corrupted_tokenizer_config`: first two valid + corrupt tokenizer_config.json → stderr names "tokenizer_config.json".
+      The three pins together verify the error-path correctly identifies which of the three files failed.
+      **Evidence:** `jang-tools/jang_tools/examples.py:45-87`. 332 Python tests pass (was 329, +3). Swift 170 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button
       - `RunStep.swift:74` — `.desktopDirectory` for "Copy Diagnostics" button
