@@ -5098,3 +5098,46 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: extend the secrets-regex test from jang-server to JANGStudio Swift + jang-tools Python — a similar invariant per project would prevent future hardcodes anywhere in the repo.
 
 **Next iteration should pick:** extend the secrets invariant to all Python + Swift files (cross-repo coverage of the M181 rule), OR rate-limiting on jang-server.
+
+---
+
+## 2026-04-20 iteration 117 — M182 repo-wide secrets-sweep invariant (extends M181)
+
+**Angle:** Iter-116 M181 forecast: "extend the secrets invariant to all Python + Swift files for cross-repo coverage."
+
+**Deep trace walkthrough:**
+1. **Built the cross-cutting test** at `ralph_runner/tests/test_no_hardcoded_secrets_repo_wide.py`. Walks every `.py` and `.swift` file under repo root (skipping vendored: `__pycache__`, `.venv`, `build`, `Build`, `DerivedData`, `node_modules`, `site-packages`). Applies 5 secret-pattern regexes: HF current/legacy, OpenAI, AWS, GitHub.
+2. **First run found 3 hits** in test fixtures:
+   - `jang-tools/tests/test_publish.py:63,71` — `hf_literal_looking_token_abc123xyz`
+   - `jang-tools/tests/test_publish.py:81` — `hf_dummy_token_for_test`
+   - `JANGStudio/Tests/JANGStudioTests/DiagnosticsBundleTests.swift:31,32` — `huggingface_abcdef_ghij-klmnop1234567890QRSTUV`
+   All 3 are clearly-fake test fixtures verifying scrub-sensitive / token-disambiguation paths. Allowlisted in the test's `ALLOWED_FIXTURES` set with rationale.
+3. **Mask the matched substring in failure output.** Important: the test's assertion message includes the file:line for each hit. If I print the full match, a CI log would re-leak whatever real secret triggered the test. Mask to `[<6 chars>...<2 chars>]` — enough to identify which token shape, not enough to be useful.
+4. **Verified the test passes** repo-wide post-allowlist. 77 ralph_runner tests pass total (+1).
+
+**Meta-lesson — per-module invariants don't catch cross-module regressions.** iter-116 M181 added the secrets check only to jang-server. Without iter-117's repo-wide variant, a future hardcoded `hf_*` in jang-tools or JANGStudio would slip through silently. **Rule: when an invariant catches a bug class that could occur in any file, scope it repo-wide. Per-module invariants are appropriate for module-specific patterns (the iter-104/105/106 `try?` / `except Exception` taxonomy varies by language and matches per-module); cross-cutting bugs (secrets, license headers, copyright notices) need cross-cutting tests.**
+
+**Meta-lesson — mask matched secrets in test output.** A test that prints the secret it found in its assertion error effectively re-leaks the secret to anyone reading CI logs. Truncate matches to head + tail snippets (`[hf_lit<...>yz]`-style) — enough for the engineer to identify the token shape, not enough to use it. Standard rule for security-related test output. Same principle as iter-14 M22 DiagnosticsBundle scrubbing.
+
+**Meta-lesson — allowlist scoping needs rationale comments.** Each entry in `ALLOWED_FIXTURES` carries an inline comment explaining what it's for. Future engineer who adds a new test fixture and hits the failure can either: (a) add to allowlist with rationale (acceptable), or (b) realize it's a real secret and rotate (not acceptable to keep). The rationale gates against silent allowlist growth.
+
+**Items touched:**
+- M182 [x] — repo-wide secrets-sweep test. Cross-cutting invariant covering jang-tools + JANGStudio + jang-server + ralph_runner + jang-runtime + jang-tools/dflash + any future module. 1 new test.
+
+**Commit:** (this iteration)
+
+**Verification:** 77 ralph_runner tests pass (was 76, +1).
+
+**Closed-status tally:** 135 (iter 116) + M182 = 136 items touched, all closed. Zero known bugs as of iter-117 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: rate-limiting on jang-server (DoS surface, both auth'd + unauth'd attackers).
+- **NEW**: extend secrets-sweep to other file types (.json config, .yaml, .sh, .env.example) — currently only .py + .swift.
+- **NEW**: add a license / copyright invariant test (cross-cutting like M182, but for compliance).
+
+**Next iteration should pick:** rate-limiting on jang-server (concrete DoS angle), OR extend secrets-sweep to .json/.yaml/.sh, OR pivot back to JANGStudio Swift fresh angle.
