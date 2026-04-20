@@ -8,6 +8,12 @@ struct GenerateModelCardSheet: View {
     @State private var loading = true
     @State private var errorMessage: String?
     @State private var saveStatus: String?
+    /// M163 (iter 86): retry-Button task handle. The initial `.task { await
+    /// generate() }` is auto-cancelled by SwiftUI on sheet dismount, but the
+    /// Retry-button-spawned Task is NOT bound to the view lifecycle — it
+    /// would orphan the Python subprocess on close. Mirrors iter-85 M162's
+    /// sheet-dismiss cancel pattern.
+    @State private var retryTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +36,7 @@ struct GenerateModelCardSheet: View {
         }
         .frame(minWidth: 700, minHeight: 560)
         .task { await generate() }
+        .onDisappear { retryTask?.cancel() }
     }
 
     /// M91 (iter 28): `feedback_readme_standards.md` lists 12 hard
@@ -147,7 +154,10 @@ struct GenerateModelCardSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-            Button("Retry") { Task { await generate() } }
+            Button("Retry") {
+                retryTask?.cancel()
+                retryTask = Task { await generate() }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(24)

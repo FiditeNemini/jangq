@@ -221,6 +221,30 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M163 (iter 86): Retry-button Task orphan sweep across read-only sheets
+
+    func test_generateModelCardSheet_retry_task_cancelled_onDisappear() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard")
+        let src = try String(contentsOf: dir.appendingPathComponent("GenerateModelCardSheet.swift"), encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("retryTask") && src.contains(".onDisappear") && src.contains("retryTask?.cancel()"),
+            "GenerateModelCardSheet must track retryTask + cancel on .onDisappear (M163)"
+        )
+    }
+
+    func test_usageExamplesSheet_retry_task_cancelled_onDisappear() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard")
+        let src = try String(contentsOf: dir.appendingPathComponent("UsageExamplesSheet.swift"), encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("retryTask") && src.contains(".onDisappear") && src.contains("retryTask?.cancel()"),
+            "UsageExamplesSheet must track retryTask + cancel on .onDisappear (M163)"
+        )
+    }
+
     // MARK: - M136 (iter 58): RunStep auto-start must only fire on .idle
     //
     // Pre-iter-58 RunStep's .onAppear was:

@@ -3630,3 +3630,46 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: widget sweep — audit every `.sheet(isPresented:)` / `.popover(isPresented:)` / `.alert(isPresented:)` + their task-spawning children for the sheet-dismiss orphan class.
 
 **Next iteration should pick:** Either GenerateModelCardSheet/UsageExamplesSheet retry-Task cleanup for consistency, OR M97 partial-HF-repo cleanup (now more urgent since the iter-85 cancel may leave uploads half-done on HF). M97 is the bigger piece of work but the harder one — requires HF API knowledge.
+
+---
+
+## 2026-04-20 iteration 86 — M163 retry-Button Task orphan consistency fix (iter-85 M162 follow-up)
+
+**Angle:** Iter-85 forecast: "GenerateModelCardSheet + UsageExamplesSheet have `Button("Retry") { Task { ... } }` patterns. Read-only operations (low severity) but inconsistent with the new iter-85 pattern. Should add `.onDisappear` + task handle tracking for consistency." This is the follow-up.
+
+**Deep trace walkthrough:**
+1. **Mapped the four result-producing sheets.** PublishToHuggingFaceSheet (iter-85 M162 fixed), TestInferenceSheet (iter-85 M162 fixed), GenerateModelCardSheet, UsageExamplesSheet. All four follow the shape: `.task { await initialWork() }` for the initial pass + a Retry button in the error state.
+2. **Classified each sheet's exposure:**
+   - Publish: severe. 30-minute uploads to HF. Data exfiltration vector. iter-85 fixed.
+   - Test Inference: minor. 5-60 s GPU pin. iter-85 fixed.
+   - ModelCard: low. Model-card generation is a ~few-second read-only CLI. Subprocess wastes compute for seconds but no data goes anywhere.
+   - Examples: low. Snippet fetch is ~1-3 s per language. Same low-impact class.
+3. **Why bother fixing low-severity?** Audit consistency. After M162, asking "do all sheets cancel in-flight work on dismiss?" gets a yes-yes-no-no answer. The reviewer has to remember "oh right, the Retry path is different on those two because severity is low." That's cognitive debt. Closing it to yes-yes-yes-yes makes the rule uniform: "ALL result-producing sheets cancel their in-flight work on .onDisappear, without exception." Future sheet additions inherit this expectation automatically.
+4. **Picked the simplest fix shape.** `@State var retryTask: Task<Void, Never>?` on each sheet; retry button cancels the previous handle (defense against rapid double-click) then re-spawns into the handle; `.onDisappear { retryTask?.cancel() }` fires on dismissal. Matches iter-85 M162's shape verbatim. Chose NOT to refactor to `.task(id: retryNonce)` because the existing structure is fine — a single handle variable adds 3 lines per sheet vs. restructuring the error view.
+5. **Verified the cancel chain:** Task.cancel() → awaited code throws CancellationError → PythonCLIInvoker's `onCancel: { handle.cancel() }` (iter-76 M153 + iter-83 M160) → ProcessHandle.cancel() → SIGTERM subprocess + 3 s SIGKILL. Same plumbing as M162.
+6. **Regression tests:** source-inspection pins matching iter-85 pattern. Test that each sheet file contains `retryTask` + `.onDisappear` + `retryTask?.cancel()` literals.
+
+**Meta-lesson — consistency is a first-class audit property, independent of severity.** "The rule is uniform" is more debuggable, more teachable, and more robust-to-change than "the rule has exceptions for the low-severity cases." Cheap fixes that close consistency gaps are worth doing even when each individual gap is inconsequential. The cost of a cheap fix is linear; the cost of a scattered rulebook is quadratic (every audit has to re-discover the exceptions).
+
+**Meta-lesson — `.task` is the one-line opt-in to auto-cancel on dismount.** Four of four sheets use `.task` for initial work and that part has never caused an orphan. The bug was always in the button-spawned Task that lacked view-lifecycle binding. Codebase-wide rule: **prefer `.task(id:)` with a nonce for work that can be re-triggered by user action, over `Button { Task { ... } }` with handle tracking.** The `.task(id:)` pattern is SwiftUI-idiomatic and auto-handles cancellation on both dismount AND nonce change. Handle-tracking works but is more surface to maintain. Log this for future green-field sheet additions; M162 + M163 preserved the existing shape because the delta cost was minimal, but a rewrite should prefer `.task(id:)`.
+
+**Items touched:**
+- M163 [x] — GenerateModelCardSheet + UsageExamplesSheet retry buttons now track a `retryTask` handle and cancel on dismissal. Widget-sweep from iter-85 forecast is complete.
+
+**Commit:** (this iteration)
+
+**Verification:** 25 WizardStepContinueGateTests pass (was 23, +2). Python 348 + ralph 73 unchanged. Full Swift suite ~190.
+
+**Closed-status tally:** 98 (iter 85) + M163 = 99 closed / 100 total = 99.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (now the standout open item; upgraded priority by M162/M163)
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: `.task(id: retryNonce)` refactor as a future polish — not a bug fix, just pattern hygiene. Low priority.
+- **NEW**: audit keyboard shortcuts for dangerous-action-without-confirmation (e.g., cmd-W dismissing a sheet mid-upload → iter-85 fix handles it now, but are there other cmd-* shortcuts that skip confirmation?).
+- **NEW**: audit NSOpenPanel / NSSavePanel interactions. User picks folder, cancels, re-opens. Any state left stale? Especially in pickFolder (SourceStep) and pickOutput (ProfileStep).
+- **NEW**: symlink handling. If the user picks a symlink as source model folder, does SourceDetector resolve through it? Does the convert subprocess receive the resolved path or the symlink? Could matter for caching / path-match guards.
+
+**Next iteration should pick:** M97 (now clear standout), OR a fresh audit angle (keyboard-shortcut confirmation audit / symlink handling / rapid-click debouncing). M97 is a big piece of HF-API work; the fresh angles are faster and likely to yield more bugs.

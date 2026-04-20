@@ -9,6 +9,11 @@ struct UsageExamplesSheet: View {
     @State private var loadingLangs: Set<ExampleLanguage> = []
     @State private var errorByLang: [ExampleLanguage: String] = [:]
     @State private var saveErrorMessage: String? = nil   // M107: surface save failures
+    /// M163 (iter 86): retry-Button task handle. Initial `.task` parallel
+    /// pre-fetch (withTaskGroup) is auto-cancelled on dismount, but the
+    /// Retry button in the error view spawns a standalone Task that would
+    /// otherwise orphan the Python subprocess. Same pattern as iter-85 M162.
+    @State private var retryTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,6 +42,7 @@ struct UsageExamplesSheet: View {
                 }
             }
         }
+        .onDisappear { retryTask?.cancel() }
     }
 
     private var header: some View {
@@ -88,7 +94,10 @@ struct UsageExamplesSheet: View {
                     Text(err)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
-                    Button("Retry") { Task { await fetchSnippet(selectedLang) } }
+                    Button("Retry") {
+                        retryTask?.cancel()
+                        retryTask = Task { await fetchSnippet(selectedLang) }
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
