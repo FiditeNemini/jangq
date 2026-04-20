@@ -655,3 +655,38 @@ green/fail matrix has been lying.
 **Closed-status tally:** 29 (prior) + M15 + M81 = 31 closed / 71 total = 44% closure rate.
 
 **Next iteration should pick:** Cat A publish remainder (M42/M43/M45) — 4 iters on the forecast list, STILL unpicked. M43 (publish progress streaming — no ETA for 30-min uploads) would be the highest adopter-UX win. Alternatively Cat D memory cross-ref second pass (idle 12 iters). Alternatively M82 (run_audits per-row timeout — a15 hang bomb) is a concrete reliability win.
+
+---
+
+## 2026-04-19 iteration 18 — M82 per-row timeout in run_audits (Cat K)
+
+**Angle:** Close M82 — the concrete reliability win called out at end of iter 17. Ralph's audit harness has 15 registered rows, two of which (`a15` inference, `a11/a12` VL/video preprocessors) invoke `mlx_lm.load` / `AutoProcessor.from_pretrained` — both have known hang modes on corrupted bundles or Metal deadlocks. With no timeout, one hung row = entire Ralph iteration stalled. This was the reliability counterpart to iter 13's Ralph-reliability trilogy.
+
+**Deep trace walkthrough:**
+1. Read `run_audits` (iter-15 shape): each row runs in a try/except on the main thread. If `audit_a15_inference` hangs at `_load_llm(model_dir)` (a real failure mode on a corrupted shard), the except never fires — the thread just blocks inside Metal.
+2. `cmd_next` in runner.py wraps `run_audits` — also synchronous — so the Ralph --next call never returns. User in the terminal sees no output for hours. Matrix stays stuck. Iter 12's lock guarantees only ONE instance hangs at a time; iter 13's state atomicity keeps the file intact; neither fix addresses an actively-hung audit.
+3. **Solution options considered:**
+   - `signal.alarm`: Unix-only (macOS OK). Fires SIGALRM which interrupts the call. BUT: doesn't work from non-main threads, and mlx/Metal may mask signals. Also clobbers other signal handlers. Rejected.
+   - `multiprocessing`: killable, but adds serialization overhead for the model_dir Path, dict return, registry references; spawning a process per row triples audit wall-clock on short rows; macstudio memory pressure during convert+audit is already high. Rejected.
+   - `ThreadPoolExecutor` with `Future.result(timeout=...)`: timeout returns to caller but hung thread continues running. Acceptable if we accept the zombie thread dies when process exits (we do — cmd_next exits after audit).
+4. **Critical gotcha caught during test writing:** `with concurrent.futures.ThreadPoolExecutor(...) as pool:` context-manager `__exit__` implicitly calls `shutdown(wait=True)` → blocks forever on the hung thread, DEFEATING the timeout. Must use explicit `pool.shutdown(wait=False)` on TimeoutError. Test `test_run_with_timeout_fires_on_hang` initially timed out (30s+) until this was fixed; now completes in <3s of the intended 1s timeout.
+5. **Timeout tuning considerations:**
+   - a15: big JANG_4K model load (200 GB on macstudio M3 Ultra) takes ~2-4 min legitimately. 600s gives 3× headroom for corner cases.
+   - a17/a18: shell out to jang-tools subprocess. Those commands themselves have 60s internal timeouts; 90s gives a buffer for process startup.
+   - a3/a4/a5: mlx_lm.generate with ~20-200 tokens. 300s covers slow tokens/sec.
+   - a11/a12: VL AutoProcessor load. 120s.
+   - Default 60s: fast file-inspection rows (a1/a2/a7/a8/a9/a16).
+6. **Secondary fix caught during test writing:** `_fail(hint: str, **k)` signature makes `hint` positional. My first draft of the timeout message passed `hint=` kwarg → `got multiple values for argument 'hint'`. Rolled the "hung — process cleanup will reclaim" note into the single hint string.
+
+**Items touched:**
+- M82 [x] — per-row timeouts + graceful hang recovery; subsequent rows still run after a hang.
+
+**Tests (4 new):** quick-result roundtrip; timeout fires within tolerance (1s timeout of a 10s hanger completes in <3s); timeout map pins a15≥300 + default=60 (regression against future accidental dropping); end-to-end `run_audits` fake-registry test with a hang-row + quick-row proves subsequent rows still run + overall status reflects only required fails.
+
+**Commit:** (this iteration)
+
+**Verification:** 68 ralph_runner (was 64). jang-tools 231 + Swift 106 unchanged. Total 405.
+
+**Closed-status tally:** 31 (prior) + M82 = 32 closed / 71 total = 45% closure rate.
+
+**Next iteration should pick:** Cat A publish remainder (M42/M43/M45) — NOW 5 iters on the forecast list, STILL unpicked. M43 progress streaming is the biggest adopter-UX win. Alternatively M42 (verify cancellation — PostConvertVerifier's `jang validate` subprocess can't be cancelled). Alternatively Cat D memory cross-ref second pass (idle 13 iters) would surface any recent drift between memory claims and actual code.

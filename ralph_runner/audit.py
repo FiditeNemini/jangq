@@ -11,13 +11,14 @@ Runner.py rsyncs it as part of the jang-tools tree + invokes via SSH.
 """
 from __future__ import annotations
 import argparse
+import concurrent.futures
 import datetime as dt
 import json
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Test strings for tokenizer roundtrip (A1). Stays simple — avoids weird unicode
 # that specific tokenizers might normalize away.
@@ -762,6 +763,74 @@ AUDIT_REGISTRY = {
 }
 
 
+# ──────────────────────────────────────────────────────────────────────
+# M82 (iter 18): per-row timeouts so run_audits can't hang indefinitely.
+#
+# Scenario: audit_a15 loads a JANG model via mlx_lm. If the model has a
+# corrupted shard, missing file, or triggers a Metal kernel deadlock, the
+# load hangs. run_audits has no timeout — the whole Ralph iteration stalls
+# and cmd_next never returns. A 7200s convert + hung audit = multi-hour
+# silent stall in the Ralph matrix.
+#
+# Timeouts by row: a15 = 10 min (big model loads can legitimately take that
+# long for 200 GB JANG_4K), a17/a18 = 90s (shell out to jang-tools),
+# a3/a4/a5 = 5 min (inference generations), others = 60s (file inspection).
+# ──────────────────────────────────────────────────────────────────────
+
+_ROW_TIMEOUT_S: dict[str, int] = {
+    "a15": 600,          # inference model load + 20-token generate
+    "a3":  300,          # generate + check for 'Paris' — mlx_lm.generate
+    "a4":  300,          # throughput check — full generate loop
+    "a5":  300,          # chat turn end-to-end generate
+    "a17": 90,           # jang-tools modelcard subprocess
+    "a18": 90,           # 4× jang-tools examples subprocesses
+    "a11": 120,          # VL AutoProcessor load + image forward
+    "a12": 120,          # video AutoProcessor load + frames forward
+}
+_DEFAULT_ROW_TIMEOUT_S = 60
+
+
+def _timeout_for_row(row: str) -> int:
+    return _ROW_TIMEOUT_S.get(row, _DEFAULT_ROW_TIMEOUT_S)
+
+
+def _run_with_timeout(fn: Callable[[], dict], timeout_s: int) -> dict:
+    """Run `fn()` with a timeout. On timeout, return a fail result.
+
+    Note on semantics: Python threads can't be force-killed cleanly. If the
+    audit function hangs in a Metal kernel / C extension, the thread stays
+    alive until the PROCESS exits (typically when cmd_next returns on the
+    Ralph side). What we guarantee here is only that `run_audits` doesn't
+    block indefinitely — subsequent rows still run and the overall audit
+    result still lands, so Ralph's state machine can advance. The hung
+    thread becomes process cleanup's problem.
+
+    IMPORTANT: we DO NOT use `with ThreadPoolExecutor(...)` here because its
+    `__exit__` implicitly calls `shutdown(wait=True)` which would block
+    forever on a hung thread — defeating the purpose of the timeout. We
+    explicitly call `shutdown(wait=False)` on TimeoutError so the hanging
+    thread is orphaned rather than joined.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(fn)
+        try:
+            result = future.result(timeout=timeout_s)
+            pool.shutdown(wait=True)
+            return result
+        except concurrent.futures.TimeoutError:
+            # Orphan the hung thread — wait=False means we DON'T block on
+            # join. The thread continues running until the process exits.
+            pool.shutdown(wait=False)
+            return _fail(
+                f"timed out after {timeout_s}s (row hung — process cleanup will reclaim the thread)",
+                timeout_s=timeout_s,
+            )
+    except BaseException:
+        pool.shutdown(wait=False)
+        raise
+
+
 def run_audits(model_dir: Path, rows: list[str], convert_wall_s: float | None = None,
                baseline_wall_s: float | None = None, predicted_bytes: int | None = None,
                source_dir: Path | None = None) -> dict:
@@ -775,15 +844,19 @@ def run_audits(model_dir: Path, rows: list[str], convert_wall_s: float | None = 
             results["rows"][row] = {"status": "n/a", "hint": f"unknown row {row}"}
             continue
         title, fn, required = AUDIT_REGISTRY[row]
+        timeout_s = _timeout_for_row(row)
+        # Build a zero-arg thunk so _run_with_timeout can uniformly submit it
+        # regardless of the row's actual signature.
+        if row == "a6":
+            thunk = lambda: audit_a6_wall_time(convert_wall_s or 0, baseline_wall_s)
+        elif row == "a7":
+            thunk = lambda: audit_a7_size_estimate(model_dir, predicted_bytes)
+        elif row in ("a8", "a9"):
+            thunk = lambda fn=fn: fn(model_dir, source_dir)
+        else:
+            thunk = lambda fn=fn: fn(model_dir)
         try:
-            if row == "a6":
-                r = audit_a6_wall_time(convert_wall_s or 0, baseline_wall_s)
-            elif row == "a7":
-                r = audit_a7_size_estimate(model_dir, predicted_bytes)
-            elif row in ("a8", "a9"):
-                r = fn(model_dir, source_dir)
-            else:
-                r = fn(model_dir)
+            r = _run_with_timeout(thunk, timeout_s)
         except Exception as e:
             r = _fail(f"audit_crashed: {type(e).__name__}: {e}")
         r["title"] = title

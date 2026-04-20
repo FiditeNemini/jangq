@@ -424,6 +424,94 @@ def test_test_video_frames_fixture_present_and_valid():
     assert C == 3, f"expected RGB (C=3), got C={C}"
 
 
+# ────────────────────────────────────────────────────────────────────
+# Iter 18: M82 — per-row timeout prevents a15 / Metal hang from stalling
+# the whole Ralph iteration
+# ────────────────────────────────────────────────────────────────────
+
+def test_run_with_timeout_returns_quick_result():
+    from ralph_runner.audit import _run_with_timeout
+    r = _run_with_timeout(lambda: {"status": "pass", "x": 1}, timeout_s=2)
+    assert r["status"] == "pass"
+    assert r["x"] == 1
+
+
+def test_run_with_timeout_fires_on_hang():
+    """The critical guarantee: if the thunk never returns, _run_with_timeout
+    must return a fail status WITHOUT blocking the caller forever. The thunk
+    thread becomes a zombie — that's acceptable because cmd_next's process
+    exits eventually and cleans up."""
+    import time as _t
+    from ralph_runner.audit import _run_with_timeout
+
+    def hanger():
+        _t.sleep(10)
+        return {"status": "pass"}
+
+    t0 = _t.time()
+    r = _run_with_timeout(hanger, timeout_s=1)
+    elapsed = _t.time() - t0
+    assert r["status"] == "fail"
+    assert "timed out" in r["hint"]
+    assert r["timeout_s"] == 1
+    # Must actually return near the timeout, NOT wait for the hanger.
+    assert elapsed < 3, f"timeout should fire near 1s, took {elapsed:.1f}s"
+
+
+def test_row_timeout_defaults():
+    """Pin the timeout map so future commits adjusting it fail a test rather
+    than silently regress. a15 is the row most at risk of hanging (mlx_lm
+    load + Metal kernels), so its timeout must stay ≥5 minutes."""
+    from ralph_runner.audit import _timeout_for_row
+    assert _timeout_for_row("a15") >= 300, "a15 needs enough time for large model loads"
+    # Unknown rows fall back to default
+    assert _timeout_for_row("a99") == 60
+    # Fast rows (file inspection only) don't need long timeouts
+    assert _timeout_for_row("a1") == 60
+    assert _timeout_for_row("a7") == 60
+
+
+def test_run_audits_uses_timeout_per_row(tmp_path, monkeypatch):
+    """End-to-end: when a row's function hangs, run_audits reports a fail
+    for THAT row and proceeds to subsequent rows. Prior to M82, a hang in
+    a15 would stall the entire Ralph iteration (cmd_next never returns,
+    macstudio stays "busy" forever from Ralph's perspective).
+    """
+    import ralph_runner.audit as audit_mod
+    import time as _t
+
+    def hang_forever(_model_dir):
+        _t.sleep(30)
+        return {"status": "pass"}
+
+    def quick_pass(_model_dir):
+        return {"status": "pass", "x": "ok"}
+
+    # Install a fake registry: one hang row (with short timeout) + one quick row.
+    fake_registry = {
+        "hang": ("Hanging row", hang_forever, True),
+        "quick": ("Quick row", quick_pass, False),
+    }
+    monkeypatch.setattr(audit_mod, "AUDIT_REGISTRY", fake_registry)
+    # Pin the hang row to a short timeout so the test runs fast.
+    monkeypatch.setattr(audit_mod, "_ROW_TIMEOUT_S", {"hang": 1})
+
+    t0 = _t.time()
+    results = audit_mod.run_audits(tmp_path, ["hang", "quick"])
+    elapsed = _t.time() - t0
+
+    # The hanging row returned a fail via timeout path
+    assert results["rows"]["hang"]["status"] == "fail"
+    assert "timed out" in results["rows"]["hang"]["hint"]
+    # The subsequent row STILL RAN — the hang didn't poison later rows
+    assert results["rows"]["quick"]["status"] == "pass"
+    # Total time is near the timeout, not 30s
+    assert elapsed < 5, f"run_audits must not wait for the full hang, took {elapsed:.1f}s"
+    # Overall status — hang was required=True and failed, so overall=fail
+    assert results["overall"] == "fail"
+    assert results["required_fail_count"] == 1
+
+
 def test_fixtures_are_in_git_manifest():
     """Run `git ls-files` and assert both fixtures are tracked. Catches the
     exact "fixture accidentally gitignored" failure mode that M81 named —
