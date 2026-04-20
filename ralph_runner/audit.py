@@ -115,9 +115,17 @@ def audit_a2_chat_template(model_dir: Path) -> dict:
     except Exception as e:
         return _fail(f"tokenizer_load: {type(e).__name__}: {e}")
     if not getattr(tok, "chat_template", None):
-        # Maybe a .jinja file
+        # HF accepts chat templates in three forms (see
+        # feedback_chat_template_rules.md + Swift PostConvertVerifier row #5):
+        #   1. inline `chat_template` field on the tokenizer (handled above)
+        #   2. `chat_template.jinja` file
+        #   3. `chat_template.json` file (newer HF convention, e.g. Qwen3-VL)
+        # Iter-15 fix: the original code only checked (1) and (2); a model
+        # shipping only (3) was mis-graded as `n/a` (no template) instead of
+        # being rendered + checked. Now we accept all three forms.
         jinja = model_dir / "chat_template.jinja"
-        if not jinja.exists():
+        tpl_json = model_dir / "chat_template.json"
+        if not jinja.exists() and not tpl_json.exists():
             return _na("no chat template present in source")
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -685,6 +693,11 @@ AUDIT_REGISTRY = {
     "a3": ("Generation coherence", audit_a3_coherence, False),              # warn-only (tiny models may not say Paris)
     "a4": ("Tokens/sec throughput", audit_a4_tokens_per_sec, False),
     "a5": ("Chat turn end-to-end", audit_a5_chat_turn, False),
+    # M72 (iter 15): a6 was defined + had a run_audits dispatch branch but
+    # wasn't in the registry, so `row not in AUDIT_REGISTRY: continue`
+    # skipped it at line 710. Users passing `--rows a6` saw `status=n/a,
+    # hint=unknown row a6` on a row that actually works. Registered now.
+    "a6": ("Wall time vs baseline", audit_a6_wall_time, False),
     "a7": ("Size vs estimate", audit_a7_size_estimate, False),
     "a8": ("Tool/reasoning parser preservation", audit_a8_parser_preservation, False),
     "a9": ("Special tokens preservation", audit_a9_special_tokens, True),   # required

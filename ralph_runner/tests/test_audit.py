@@ -139,3 +139,134 @@ def test_registry_has_a11_a12():
     # Both are warn-only
     assert AUDIT_REGISTRY["a11"][2] is False
     assert AUDIT_REGISTRY["a12"][2] is False
+
+
+# ────────────────────────────────────────────────────────────────────
+# Iter 15: M72 — a6 registered (was defined + dispatch-handled but unreachable)
+# ────────────────────────────────────────────────────────────────────
+
+def test_a6_wall_time_is_registered():
+    """M72: a6 was defined + had a run_audits special-case dispatch but
+    wasn't in AUDIT_REGISTRY, so `row not in AUDIT_REGISTRY: continue`
+    skipped it — `--rows a6` returned `status=n/a, hint=unknown row a6`
+    on a row that actually works. Regression test to keep it registered.
+    """
+    from ralph_runner.audit import AUDIT_REGISTRY
+    assert "a6" in AUDIT_REGISTRY
+    title, fn, required = AUDIT_REGISTRY["a6"]
+    assert title == "Wall time vs baseline"
+    # a6 is warn-only (a bad wall-time shouldn't fail the whole audit).
+    assert required is False
+    # Function reference must be the real audit_a6_wall_time.
+    from ralph_runner.audit import audit_a6_wall_time
+    assert fn is audit_a6_wall_time
+
+
+def test_a6_dispatches_through_run_audits():
+    """End-to-end: passing `--rows a6` to run_audits with a convert_wall_s
+    must return a status (pass/warn/fail) — NOT `n/a, unknown row a6`."""
+    from ralph_runner.audit import run_audits
+    # Fresh tmp dir — a6 doesn't need a real model (it only checks wall times).
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        results = run_audits(
+            Path(d), ["a6"], convert_wall_s=100.0, baseline_wall_s=80.0,
+        )
+        a6 = results["rows"]["a6"]
+        assert a6["status"] != "n/a", f"a6 should dispatch, got {a6}"
+        assert "unknown row" not in a6.get("hint", "")
+
+
+def test_a6_baseline_none_returns_ok():
+    """First-run behaviour: no baseline established yet — a6 should
+    return ok with the wall time recorded, not fail."""
+    from ralph_runner.audit import audit_a6_wall_time
+    r = audit_a6_wall_time(convert_wall_s=42.0, baseline_s=None)
+    assert r["status"] == "pass"
+    assert r["wall_s"] == 42.0
+
+
+def test_a6_over_150pct_baseline_fails():
+    from ralph_runner.audit import audit_a6_wall_time
+    r = audit_a6_wall_time(convert_wall_s=200.0, baseline_s=100.0)
+    assert r["status"] == "fail"
+    assert r["wall_s"] == 200.0
+
+
+def test_a6_within_baseline_passes():
+    from ralph_runner.audit import audit_a6_wall_time
+    r = audit_a6_wall_time(convert_wall_s=110.0, baseline_s=100.0)
+    assert r["status"] == "pass"
+    # ratio is recorded
+    assert r["ratio"] == 1.1
+
+
+# ────────────────────────────────────────────────────────────────────
+# Iter 15: M77 — a2 accepts chat_template.json as a third template form
+# ────────────────────────────────────────────────────────────────────
+
+class _NoChatTemplateTokenizer:
+    """Mock tokenizer with no chat_template attribute — triggers the
+    first-clause code path in audit_a2_chat_template that decides between
+    the three file-based template forms."""
+    chat_template = None
+
+
+def test_a2_accepts_chat_template_json_file(tmp_path, monkeypatch):
+    """M77: a model shipping only chat_template.json (newer HF convention,
+    e.g. Qwen3-VL) was mis-graded as `n/a`. Now a2 treats it as the third
+    valid chat-template form alongside inline + .jinja.
+
+    We stub load_tokenizer so the test doesn't depend on having real HF
+    tokenizer bytes — the regression we pin is the file-discovery logic
+    inside audit_a2_chat_template.
+    """
+    import ralph_runner.audit as audit_mod
+    monkeypatch.setattr(audit_mod, "load_tokenizer",
+                        lambda _d: _NoChatTemplateTokenizer())
+
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "chat_template.json").write_text(
+        '{"chat_template":"{% for m in messages %}{{m.content}}{% endfor %}"}')
+
+    r = audit_mod.audit_a2_chat_template(d)
+    # With no inline template AND chat_template.json present, the old code
+    # returned `n/a, "no chat template present in source"` and bailed.
+    # The fix: a2 now progresses past the guard. The downstream
+    # apply_chat_template call will still fail on our mock tokenizer (it's
+    # a stub with no apply_chat_template method) → status=fail from the
+    # downstream exception handler. That's the expected new behaviour:
+    # we surface a real problem instead of silently skipping.
+    assert r["status"] != "n/a" or "no chat template present" not in r.get("hint", ""), \
+        f"chat_template.json must not be treated as 'no template'. got {r}"
+
+
+def test_a2_still_na_when_no_template_anywhere(tmp_path, monkeypatch):
+    """Negative: when none of the three forms exist, a2 still returns n/a.
+    Defends against accidentally making a2 'always-passes' via the iter-15 fix.
+    """
+    import ralph_runner.audit as audit_mod
+    monkeypatch.setattr(audit_mod, "load_tokenizer",
+                        lambda _d: _NoChatTemplateTokenizer())
+
+    d = tmp_path / "model"
+    d.mkdir()
+    # No chat_template.jinja, no chat_template.json, no inline
+    r = audit_mod.audit_a2_chat_template(d)
+    assert r["status"] == "n/a", f"got {r}"
+    assert "no chat template present" in r.get("hint", "")
+
+
+def test_a2_accepts_chat_template_jinja_file(tmp_path, monkeypatch):
+    """Regression test for the pre-existing .jinja path — iter 15's fix
+    must not have broken the middle of three valid forms."""
+    import ralph_runner.audit as audit_mod
+    monkeypatch.setattr(audit_mod, "load_tokenizer",
+                        lambda _d: _NoChatTemplateTokenizer())
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "chat_template.jinja").write_text("{% for m in messages %}{{m.content}}{% endfor %}")
+    r = audit_mod.audit_a2_chat_template(d)
+    # Same reasoning as the chat_template.json test: must not be the "no template" n/a.
+    assert r["status"] != "n/a" or "no chat template present" not in r.get("hint", "")

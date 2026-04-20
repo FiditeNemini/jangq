@@ -531,3 +531,54 @@ sub-items in one patch.
 **Closed-status tally:** 23 (prior) + M16 + M22 + M62-anon = 26 closed / 66 total = 39% closure rate.
 
 **Next iteration should pick:** **audit.py (Cat K debt since iter 8, 765 lines, never traced)** is now the clear priority — 6 iters of debt and it's the harness that judges whether a convert passed. Alternatively, Cat A remaining publish items (M42 verify cancellation, M43 publish progress streaming, M45 modelcard per-arch coverage) which would round out the adopter journey begun in iters 6+7. Cat D (memory cross-ref) also hasn't been revisited since iter 5 — could scan for additional drift now that 10 more iters' worth of code has landed.
+
+---
+
+## 2026-04-19 iteration 15 — audit.py deep trace (Cat K debt closed)
+
+**Angle:** 7 iterations of Cat K debt. audit.py is what decides whether Ralph
+grades a convert GREEN or FAILED; bugs here silently mis-grade real runs.
+Read it end-to-end + look for: (a) unreachable / dead-code rows, (b) out-of-sync
+logic between audit.py and Swift PostConvertVerifier (the two arbiters must agree),
+(c) pass/fail semantics mismatches on required rows.
+
+**Deep trace walkthrough:**
+1. Read `AUDIT_REGISTRY` (lines 682-697). 13 rows defined. Numbered sequence
+   has GAPS at a10, a13, a14 (deprecated — defensible) but ALSO at a6 which
+   has a defined function AND a special-case dispatch in run_audits.
+2. Read `run_audits` (lines 700-731). First check: `row not in AUDIT_REGISTRY: continue`. Then dispatch: `if row == "a6": r = audit_a6_wall_time(...)`. **But a6 is NOT in the registry.** So the continue fires FIRST — the `row == "a6"` branch is unreachable. Users passing `--rows a6` get `{"status": "n/a", "hint": "unknown row a6"}` on a real working function.
+3. **BUG M72 CONFIRMED.** `audit_a6_wall_time` is dead code via this path. Fix: register it.
+4. Read `audit_a2_chat_template` (lines 112-133). Line 117-121: guard clause checks `tok.chat_template` (inline form) and `chat_template.jinja` file. If neither exists, return `n/a`.
+5. Cross-check with Swift `PostConvertVerifier.swift:42-50` — it accepts THREE forms: inline, `chat_template.jinja`, `chat_template.json`. The two arbiters are OUT OF SYNC. A model shipping only `chat_template.json` would be graded `n/a` by audit.py but valid by Swift.
+6. **BUG M77 CONFIRMED.** Qwen3-VL and other newer HF models use `chat_template.json`. Fix: add the third form to a2's guard-clause file check.
+7. Scan remaining rows quickly:
+   - a1 tokenizer roundtrip — looks solid, uses `decoded.strip() != s.strip()` looser equality to tolerate whitespace.
+   - a9 special tokens — potential issue with structured vs string token value comparison (source `{"bos_token":{"content":"<s>",...}}` vs output `{"bos_token":"<s>"}`) — real HF can serialise both forms. Noted but out of scope for this iter.
+   - a15 inference — calls `mlx_lm.generate` directly with raw prompt (no chat_template), so this is looser than the CLI which uses `_apply_chat_template_if_any` (iter 4 fix). That's a deliberate design split: a15 = "does ANY output come out", a16 = "does the chat template actually render". OK.
+   - a17 model card — calls `jang-tools modelcard --json` subprocess, decodes JSON, validates required keys. Solid.
+   - a18 usage examples — 4 langs, Python snippet must compile. Covers the "does the example we tell users to copy-paste actually run". Nice design.
+8. **Fix scope (kept narrow for review):** M72 + M77 only. Other surface-level concerns spawned as M78-M82.
+
+**Design notes:**
+- M72 fix is one line + 5 tests. Defensible for inclusion.
+- M77 fix is 3 lines + 3 tests. Defensible.
+- Testing strategy: stub `load_tokenizer` via `monkeypatch.setattr` because building a valid HF tokenizer.json in a unit-test fixture is overkill for this pure-logic change. The tests pin the FILE-DISCOVERY logic specifically, not the full end-to-end render.
+
+**Items touched:**
+- M72 [x] — a6 now registered + dispatches correctly; 5 regression tests
+- M77 [x] — a2 now matches Swift's three-form chat-template acceptance; 3 tests
+
+**New questions spawned (M78-M82):**
+- M78: a9 structured-vs-string special token value comparison would false-fail on legitimately equivalent forms. Need a value-normaliser.
+- M79: a15 uses raw prompt to mlx_lm.generate — explicit design split from a16, but ought to be documented in a module docstring so the next auditor doesn't "fix" it into applying the chat template.
+- M80: audit_a4 (tokens/sec) and audit_a5 (chat turn) are in the registry but not required. What does "tokens/sec below threshold" fail mean — speed regression, or just a slow machine? No baseline comparison today. Could leverage a6's baseline infrastructure once it's registered.
+- M81: a11/a12 fixtures are in `ralph_runner/fixtures/`. Are they git-tracked? If not, a fresh clone can't run those audits.
+- M82: run_audits has no per-row timeout. audit_a15 could hang indefinitely on a deadlocked mlx_lm load. Should wrap each row in a timeout context (e.g., 5 minutes default, configurable per row).
+
+**Commit:** (this iteration)
+
+**Verification:** 52 ralph_runner tests (was 44), 231 jang-tools + 106 Swift unchanged. Total 389 tests.
+
+**Closed-status tally:** 26 (prior) + M72 + M77 = 28 closed / 71 total = 39% closure rate. Cat K debt now drained: runner.py (iters 8 + 12 + 13) AND audit.py (iter 15) both traced.
+
+**Next iteration should pick:** Cat A remaining publish items (M42 verify cancellation, M43 publish progress streaming, M45 modelcard per-arch coverage) would round out the adopter journey and complement iter 14's DiagnosticsBundle work. Or tackle one of M78-M82 spawned here (M78 a9 value normaliser is the most concrete). Or Cat D memory cross-ref second pass (never revisited since iter 5).
