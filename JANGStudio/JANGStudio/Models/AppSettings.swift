@@ -120,12 +120,32 @@ final class AppSettings {
         if let data = try? JSONEncoder().encode(snapshot) {
             UserDefaults.standard.set(data, forKey: Self.defaultsKey)
         }
+        mirrorLeafConsumerKeys()
     }
 
     private func load() {
         guard let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
               let s = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
         s.apply(to: self)
+        // Re-sync the dedicated leaf-consumer mirrors after loading — otherwise
+        // a fresh process start wouldn't pick up the saved python override
+        // until the user touched Settings.
+        mirrorLeafConsumerKeys()
+    }
+
+    /// Copy settings that leaf consumers (BundleResolver, future non-MainActor
+    /// services) need into dedicated UserDefaults keys. These consumers can't
+    /// hold an AppSettings reference (isolation + lifecycle issues), so they
+    /// read a single typed key instead of decoding the whole Snapshot blob.
+    private func mirrorLeafConsumerKeys() {
+        let defaults = UserDefaults.standard
+        // Python override — BundleResolver reads this. Remove the key when empty
+        // so the env-var / bundled fallbacks take over cleanly.
+        if pythonOverridePath.isEmpty {
+            defaults.removeObject(forKey: BundleResolver.pythonOverrideDefaultsKey)
+        } else {
+            defaults.set(pythonOverridePath, forKey: BundleResolver.pythonOverrideDefaultsKey)
+        }
     }
 }
 

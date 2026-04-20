@@ -251,3 +251,55 @@ Each entry records ONE deep trace. Created by iterations under the new Ralph pro
 **Next iteration should pick:** Continue Cat K — audit.py is 765 lines and still untraced. Or rotate to Cat B (settings → UserDefaults → subprocess env pipeline, never done). Or M55 (multi-instance state.json race) which would complement this iter's reliability work cleanly.
 
 **Closed-status tally:** M01, M12, M13, M14, M19, M29, M35, M41, M44, M46, M52, M53, M54, M54b = 14 closed / 56 total = 25% closure rate. 🟢 Ralph runner no longer a blind spot.
+
+---
+
+## 2026-04-19 iteration 9 — Settings → UserDefaults → leaf consumers (Category B)
+
+**Angle:** Never done: trace the settings pipeline from `AppSettings.pythonOverridePath` (UI binding) → `persist()` (JSON blob in UserDefaults) → the subprocess that actually needs to know which Python to launch. Pick one critical setting and verify the full data flow works.
+
+**Deep trace walkthrough:**
+1. Read `AppSettings.swift` (223 lines) — @Observable @MainActor class with ~27 fields, persistence via single JSON `Snapshot` blob in UserDefaults key `"JANGStudioSettings"`. `init` calls `load()`, `persist()` is manual.
+2. Read `SettingsWindow.swift` — 5 tabs fully wired: General, Advanced, Performance, Diagnostics, Updates. Auto-persist via `observeAndPersist(settings)` task using `withObservationTracking` + `CheckedContinuation` loop (creative but works).
+3. Read `BundleResolver.swift`. Before this iter: `pythonExecutable` checked ONE source — `ProcessInfo.processInfo.environment["JANGSTUDIO_PYTHON_OVERRIDE"]`. **Never touches AppSettings.** So the Advanced-tab "Python override" picker was pure decoration: user picks a path, saves, relaunches app, path is ignored, bundled Python still runs.
+4. **Verify the scope of the problem:** grep every AppSettings field across JANGStudio/ for read-sites outside `AppSettings.swift` and `SettingsWindow.swift`:
+   ```
+   grep -rn "settings\.\|AppSettings" JANGStudio/ --include="*.swift" \
+     | grep -v "AppSettings.swift\|SettingsWindow.swift"
+   ```
+   Returns exactly ONE hit: the `@State private var settings = AppSettings()` line in `JANGStudioApp.swift`. **No field is ever read at a consumer site.** Settings is a 27-field UI lie surface.
+5. **BUG CONFIRMED (M60+M61):** every Advanced/Performance setting is inert. Fixing all 27 is out of scope for one iter. Picked M61 (Python override) because:
+   - It's the Advanced setting most likely to be used in the wild (dev mode, bundle troubleshooting, bug reports).
+   - The plumbing required is minimal (single-string hand-off).
+   - It unblocks a pattern the remaining fields can follow (dedicated UserDefaults leaf keys + mirror on persist/load).
+6. **Fix architecture:**
+   - BundleResolver is nonisolated + called from sync contexts (PythonRunner init, SettingsWindow previews). Can't hold a `@MainActor` AppSettings reference.
+   - Snapshot JSON decode per call would work but wastes cycles.
+   - Decision: dedicated UserDefaults leaf keys. AppSettings is the writer; BundleResolver is the reader. UserDefaults.standard is thread-safe. No coupling between them beyond a string key constant declared on BundleResolver.
+7. **Fix implementation:**
+   - `BundleResolver.swift:5-32`: exported `pythonOverrideDefaultsKey = "JANGStudioPythonOverride"`. Priority order: UserDefaults leaf key (non-empty) → `JANGSTUDIO_PYTHON_OVERRIDE` env var → bundled Python.
+   - `AppSettings.swift:130-152`: added `mirrorLeafConsumerKeys()` private helper called from `persist()` AND `load()` (the latter for fresh-process warm-up). Writes `pythonOverridePath` to the dedicated key; empty string → `removeObject` so env-var / bundled fallbacks remain visible.
+8. **Tests:** 6 new cases in `AppSettingsTests`:
+   - persist() mirrors to leaf key
+   - clearing path removes leaf key (fallback reactivation)
+   - BundleResolver reads the leaf key
+   - empty-string leaf key is ignored (doesn't point at empty path)
+   - load() re-syncs leaf key from Snapshot on fresh process (defends against leaf-key drift — someone else wrote a different value)
+   - reset() clears the leaf key (reset() calls persist() internally; mirror must follow)
+9. **Verification:** 81/81 Swift tests pass (was 75). Python tests unchanged at 227.
+
+**Items touched:**
+- M61 [x] — pythonOverridePath now works end-to-end; UI → UserDefaults → BundleResolver → subprocess Python
+- M60 [x] — meta-bug (settings are UI lies) is formally scoped: M62 lists all remaining inert fields
+- M62-M66 [ ] — 5 new settings-pipeline questions:
+  - M62: remaining 10+ inert settings (customJangToolsPath, tickThrottleMs, logVerbosity, mlxThreadCount, …)
+  - M63: sync persist() could block if UserDefaults is CloudKit-backed
+  - M64: observeAndPersist continuation pairing on paired mutations
+  - M65: auto-persist TASK lifecycle tied to Settings view existence
+  - M66: Snapshot.apply silently coerces unknown enum values
+
+**Commit:** (this iteration)
+
+**Closed-status tally:** 14 (prior) + M60 + M61 = 16 closed / 61 total = 26% closure rate.
+
+**Next iteration should pick:** Continue M62 chain by wiring up `revealInFinderOnFinish` (smallest inert field, fires once per convert — low risk, high user-visible polish). Or rotate to audit.py (765 lines, Cat K still has debt). Or rotate to M55 (multi-instance state.json race — complements iter 8 reliability work). 4 categories now have ≥1 iter; Cat E (spawned M-questions) still has lots of easy pickings (M02, M03, M07, M15, M16, M22, …).

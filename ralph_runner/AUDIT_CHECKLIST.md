@@ -280,6 +280,27 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
 - [ ] **M57** — `slug()` handles space and `/` but not `;`, `$`, `` ` ``, `\n`. If a profile name ever contains any of those, the `out` path in `run_convert_remote` gets spliced into a shell command with those chars intact → shell injection. Defence-in-depth: run `out_slug` through the same `_HF_REPO_PATTERN`-style check (or `shlex.quote`) before splicing.
 - [ ] **M58** — `run_convert_remote` line 128: the JANGTQ path uses `python3 -m jang_tools.convert_qwen35_jangtq` but the registered CLI for other JANGTQ families (minimax) is elsewhere. Hardcoding `convert_qwen35_jangtq` means MiniMax JANGTQ combos would dispatch to the Qwen35 entry point. Verify via model-family dispatch rather than a hardcoded CLI path.
 - [ ] **M59** — `audit.py` is 765 lines and handles every audit row inline. Any new audit rule needs a 50-line PR. Consider a plugin directory `audits/` where each file is one row, auto-registered at import.
+- [x] **M60+M61** — Settings pipeline UI lies. `AppSettings` has ~27 fields with full UI bindings (SettingsWindow tabs General/Advanced/Performance/Diagnostics/Updates). A grep across JANGStudio/ for every field (`pythonOverridePath`, `customJangToolsPath`, `tickThrottleMs`, `mlxThreadCount`, `logVerbosity`, `logFileOutputDir`, `preAllocateRam*`, `convertConcurrency`, `metalPipelineCacheEnabled`, `maxBundleSizeWarningMb`, `anonymizePathsInDiagnostics`, `autoDeletePartialOnCancel`, `revealInFinderOnFinish`, `defaultProfile`, `defaultFamily`, `defaultMethod`, `defaultHadamardEnabled`, `defaultCalibrationSamples`, `defaultOutputParentPath`) returned ZERO read-sites outside `AppSettings.swift` + `SettingsWindow.swift`. Users could toggle any of these, see the UI respond, watch it persist to UserDefaults — and nothing in the convert/inference/publish pipeline would consult them.
+      **Fix scope this iter (M61 only — most-impactful):** Wired `pythonOverridePath` through to `BundleResolver`.
+      - `BundleResolver.swift:5-32`: added `pythonOverrideDefaultsKey` + prioritized lookup order (UserDefaults → env var → bundled).
+      - `AppSettings.swift:130-152`: `persist()` / `load()` now mirror `pythonOverridePath` to the dedicated leaf-consumer key. Empty string REMOVES the key so env/bundled fallbacks take over cleanly.
+      - 6 new tests (persist mirror, clear removes key, resolver reads UserDefaults, empty string ignored, load re-syncs on fresh process, reset clears leaf mirror).
+      **Evidence:** 81 Swift tests pass (was 75).
+      **Commit:** (this iteration)
+- [ ] **M62** — Remaining UI-lie settings still inert after M61 fix:
+  - `customJangToolsPath` → should set PYTHONPATH in PythonRunner env
+  - `tickThrottleMs` → should be passed to Python via env var / CLI flag
+  - `logVerbosity` → should set JANG_LOG_LEVEL env
+  - `mlxThreadCount` → should set OMP_NUM_THREADS / MLX_THREADS env
+  - `preAllocateRam*` → should set MLX_BUFFER_POOL_SIZE_GB env
+  - `autoDeletePartialOnCancel` → should drive RunStep cancel handler
+  - `revealInFinderOnFinish` → should fire NSWorkspace.activateFileViewerSelecting
+  - `defaultProfile` / `defaultFamily` / `defaultMethod` / `defaultHadamardEnabled` → should seed ConversionPlan at wizard init
+  - `anonymizePathsInDiagnostics` → DiagnosticsBundle should obey
+- [ ] **M63** — `AppSettings.reset()` / `persist()` are synchronous `@MainActor` but the leaf-mirror writes happen inside them. If a write blocks (CloudKit-backed UserDefaults sync), the UI freezes. UserDefaults.standard is generally non-blocking but worth flagging.
+- [ ] **M64** — `observeAndPersist` in `SettingsWindow.swift` uses `withObservationTracking` inside a loop with `withCheckedContinuation`. Each mutation fires a continuation that persists ONCE. But if two fields are mutated in the same SwiftUI pass (e.g., resetting via the Reset button), does the loop fire TWICE or ONCE? The `CheckedContinuation` pattern may miss paired mutations. Verify.
+- [ ] **M65** — `SettingsWindow` auto-persist TASK is bound to the `.task { await observeAndPersist(settings) }` on the Settings body. If the user never OPENS Settings, the auto-persist never runs — which is fine (no changes to persist) UNLESS something else mutates settings programmatically (it doesn't today, but a future crash reporter that toggles `autoOpenIssueTrackerOnCrash` would lose the change).
+- [ ] **M66** — `Snapshot.apply` uses `LogVerbosity(rawValue: logVerbosity) ?? .normal` — if someone writes a garbage value into UserDefaults (e.g., schema migration from a newer version downgraded), the setting silently reverts to `.normal` without telling the user. Same for `updateChannel`. Consider emitting a log line on coercion.
 
 ---
 
