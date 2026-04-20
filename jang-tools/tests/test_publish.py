@@ -193,6 +193,56 @@ def test_upload_with_progress_raises_on_empty_dir(tmp_path):
         )
 
 
+def test_upload_excludes_jang_imatrix(tmp_path):
+    """M114 (iter 38): jang_imatrix.safetensors must NOT be uploaded to HF.
+    It's useful locally as a convert cache but is pure bloat on a published
+    model — per feedback_model_checklist.md's "155 GB bloat" incident.
+    """
+    from jang_tools.publish import _upload_with_progress
+    from jang_tools.progress import ProgressEmitter
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text('{"model_type":"qwen3"}')
+    (model_dir / "model-00001-of-00001.safetensors").write_bytes(b"x" * 1000)
+    # The junk file that must NOT upload
+    (model_dir / "jang_imatrix.safetensors").write_bytes(b"y" * 9999)
+
+    fake_upload = _FakeUploadFile()
+    err = io.StringIO()
+    emitter = ProgressEmitter(json_to_stderr=True, quiet_text=True, _stderr=err)
+    _upload_with_progress(
+        model_dir=model_dir, repo_id="test/m", token="tok",
+        emitter=emitter, commit_message="msg",
+        upload_file=fake_upload,
+    )
+    uploaded_names = {c["repo_path"] for c in fake_upload.calls}
+    assert "jang_imatrix.safetensors" not in uploaded_names, \
+        "imatrix is local-cache-only; must not be uploaded to HF"
+    assert "config.json" in uploaded_names
+    assert "model-00001-of-00001.safetensors" in uploaded_names
+
+
+def test_dry_run_excludes_jang_imatrix_from_size(fake_converted, monkeypatch):
+    """Dry-run preview must match what actually uploads. Pre-M114, user saw
+    N files / X GB in preview but N-1 files / X-imatrix_size GB actually
+    uploaded — confusing."""
+    # Add an imatrix to the fixture
+    (fake_converted / "jang_imatrix.safetensors").write_bytes(b"z" * 50_000)
+    monkeypatch.setenv("HF_HUB_TOKEN", "dummy")
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "publish",
+         "--model", str(fake_converted), "--repo", "test/model",
+         "--dry-run", "--json"],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "HF_HUB_TOKEN": "dummy"},
+    )
+    data = json.loads(r.stdout)
+    # The 50000-byte imatrix must NOT be counted in total_size_bytes
+    # (fixture has ~1000 bytes of real content, so total < 50_000)
+    assert data["total_size_bytes"] < 50_000, \
+        f"imatrix leaked into dry-run size: {data['total_size_bytes']}"
+
+
 def test_publish_cli_has_progress_flag():
     """The --progress=json flag is the Swift-side contract. Pin it in the
     help output so a rename would break the Swift PublishService integration

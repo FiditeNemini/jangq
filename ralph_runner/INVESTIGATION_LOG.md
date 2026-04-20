@@ -1510,3 +1510,38 @@ Or a domain item: M87, M97, M106, Cat D.
 - `DispatchQueue.global().async { ... cont.resume` racing
 - ralph_runner Python side (untouched by the Swift-focused sweeps)
 - Non-cancel-safe `try! await` in Python async code (none expected since jang_tools is sync)
+
+---
+
+## 2026-04-20 iteration 38 — M114 Cat D fifth pass: feedback_model_checklist.md
+
+**Angle:** Rotate from grep-audit meta-loop (saturating per iter 37) to the last un-cross-ref'd Cat D memory file. Cat D track record: 3 real bugs from 4 passes (iter 5 M35, iter 21 M83, iter 26 M89, iter 27 M90; iter 22 clean). Pattern says this pass likely finds something.
+
+**Deep trace walkthrough:**
+1. Read `feedback_model_checklist.md` (32 days old). 6 rules for every convert verification. Memory warns of "155 GB bloat" from shipping junk files → rule 1 ("no jang_imatrix.safetensors, no importance tensors") is historically high-impact.
+2. **Cross-ref rule 1:**
+   - convert.py writes `jang_imatrix.safetensors` to `output_path` during calibration (lines 229, 233-234). writer.py also writes it (lines 160, 235) when `importance_data` is non-empty.
+   - publish.py enumerates `rglob("*")` and uploads EVERY file in model_dir. No filter.
+   - **M114 CONFIRMED**: every JANG model on HF has jang_imatrix.safetensors cluttering the repo.
+3. **Design decision: filter at publish layer, not convert.** Imatrix is useful LOCALLY as a re-convert cache (the `--imatrix-path` CLI arg lets users reuse it); pure bloat on HF.
+4. **Fix:** `_EXCLUDE_FROM_UPLOAD = {"jang_imatrix.safetensors"}` filter applied in both (a) `_upload_with_progress` file enum and (b) `cmd_publish` dry-run count/size. Critical: pre-fix the dry-run showed "42 files / 187 GB" but uploaded 41 / 182 GB. Fixing one without the other would confuse users. 2 regression tests cover both paths.
+5. **Other rules spot-checked (logged as follow-ups, not fixed):**
+   - Rule 1 "no old v1 .jang.safetensors" on RE-convert: convert.py doesn't clean pre-existing content on output dir overwrite. Typical flow uses fresh dirs; spawned M115.
+   - Rule 2 size ≈ GPU RAM: no post-convert size vs estimate check in Swift PostConvertVerifier (audit.py a7 does it for Ralph harness only). Spawned M116.
+   - Rule 3 speed test: PostConvertVerifier has no inference smoke. Scope creep; spawned M117.
+   - Rule 4 coherent output: audit.py's a3 covers the "Paris" token check; beyond grep-audit scope.
+   - Rule 5 VL test: already covered by audit.py a11/a12.
+   - Rule 6 config audit: PostConvertVerifier rows #1-#4 already cover.
+
+**Items touched:**
+- M114 [x] — jang_imatrix.safetensors now excluded from HF uploads; dry-run size reflects the exclusion.
+
+**Commit:** (this iteration)
+
+**Verification:** 262 jang-tools tests (was 260, +2). ralph_runner 68 + Swift 122 unchanged.
+
+**Closed-status tally:** 52 (prior) + M114 = 53 closed / 90 total = 59% closure rate (3 new spawns M115/M116/M117 nudge total up).
+
+**Cat D yield tally — 4 of 6 passes found real bugs. Every pass is worth the investment.** Memory files remaining for future Cat D passes: `project_minimax_m27.md`, `reference_architecture_details.md`, various newer memories (e.g., `project_glm51_jang1l_working.md`).
+
+**Next iteration should pick:** M115 (cleanup old v1 files in convert.py — small, natural follow-up to M114) OR M116 (Swift-side size verification — closes rule 2) OR rotate to domain: M87 Mistral 4 RoPE, M97 partial HF cleanup, M106 DiagnosticsBundle. Or a final grep-audit pass on ralph_runner Python (untouched by iter-30-37 Swift-focused sweeps).

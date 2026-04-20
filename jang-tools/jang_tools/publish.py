@@ -30,8 +30,18 @@ def _upload_with_progress(model_dir: Path, repo_id: str, token: str,
     `upload_file` is an injection point so tests can mock the HfApi call
     without touching the network. Prod callers leave it None; production
     uses `HfApi(token=token).upload_file`.
+
+    M114 (iter 38): exclude `jang_imatrix.safetensors` from the upload.
+    The imatrix is useful LOCALLY during subsequent converts (cached via
+    `--imatrix-path`) but is just bloat on HF — it doesn't participate in
+    inference and balloons the repo size (per `feedback_model_checklist.md`'s
+    "155 GB bloat" incident that this sweep was written to prevent).
     """
-    files = sorted(p for p in model_dir.rglob("*") if p.is_file())
+    _EXCLUDE_FROM_UPLOAD = {
+        "jang_imatrix.safetensors",
+    }
+    files = sorted(p for p in model_dir.rglob("*")
+                   if p.is_file() and p.name not in _EXCLUDE_FROM_UPLOAD)
     if not files:
         raise RuntimeError(f"no files to upload under {model_dir}")
     total_bytes = sum(p.stat().st_size for p in files)
@@ -112,13 +122,19 @@ def cmd_publish(args) -> None:
             sys.exit(3)
 
     if args.dry_run:
+        # M114: dry-run count/size must match what _upload_with_progress
+        # actually uploads (imatrix excluded) — otherwise user sees "42 files
+        # 187 GB" in preview but 41 files 182 GB actually upload, confusing.
+        _EXCLUDE = {"jang_imatrix.safetensors"}
+        to_upload = [p for p in model_dir.rglob("*")
+                     if p.is_file() and p.name not in _EXCLUDE]
         result = {
             "dry_run": True,
             "repo": args.repo,
             "private": args.private,
             "model_card_path": str(readme),
-            "files_count": sum(1 for _ in model_dir.rglob("*") if _.is_file()),
-            "total_size_bytes": sum(p.stat().st_size for p in model_dir.rglob("*") if p.is_file()),
+            "files_count": len(to_upload),
+            "total_size_bytes": sum(p.stat().st_size for p in to_upload),
         }
     else:
         try:
