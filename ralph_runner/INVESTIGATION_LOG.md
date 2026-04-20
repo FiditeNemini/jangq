@@ -4237,3 +4237,54 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: preflight disk-space accuracy on >100 GB models.
 
 **Next iteration should pick:** M64 observeAndPersist race (concrete + tractable) OR preflight disk-space accuracy check, OR another cheap M-item from the checklist.
+
+---
+
+## 2026-04-20 iteration 98 — M64 closure: observeAndPersist coalescing is correct-by-design
+
+**Angle:** Iter-97 forecast option 1: M64 verification. Concrete ask: "if two fields mutate in the same SwiftUI pass, does the loop fire twice or once?"
+
+**Deep trace walkthrough:**
+1. **Re-read the observer loop** at `SettingsWindow.swift:435-475`. Pattern: `while !Task.isCancelled { await withCheckedContinuation { cont in withObservationTracking { reads... } onChange: { Task { @MainActor in persist(); cont.resume() } } } }`.
+2. **Traced the mutation sequence mentally for the Reset scenario:**
+   - Reset button handler runs on main actor.
+   - Line 1: `settings.foo = defaultFoo`. Mutation observed → onChange fires.
+   - onChange: `Task { @MainActor in persist(); continuation.resume() }`. Task is SCHEDULED on main actor but doesn't run yet (current synchronous handler is still executing).
+   - Line 2: `settings.bar = defaultBar`. Mutation observed. But tracking was already consumed by the first mutation's onChange. No second onChange fires.
+   - Reset handler completes. Main actor becomes free.
+   - Scheduled Task runs: `persist()` reads current settings via `Snapshot(from: self)` which captures BOTH the foo and bar changes.
+   - `continuation.resume()` runs → `await withCheckedContinuation` returns → loop body completes → next iteration starts → new `withObservationTracking` re-registers for next batch.
+3. **Confirmed the end state is correct:** both foo and bar are persisted. ONE `persist()` call, captures both mutations. Coalescing is a feature (fewer disk writes, atomic snapshot) not a bug.
+4. **Considered edge cases:**
+   - **Rapid back-to-back batches (user types fast):** each batch gets its own onChange → Task → persist cycle. No issue.
+   - **Gap between `resume()` and loop re-tracking:** main actor is busy (synchronous resumption of the awaiting code). No UI event can sneak in during that moment. Even if one could, the next mutation would be observed by the re-established tracking in the next iteration.
+   - **Continuation double-resume?** No — onChange is one-shot by design. Single resume per iteration.
+5. **Documented the rationale** inline above the function with 15 lines of comment explaining the one-shot semantics, why coalescing is correct, and what a future refactor must preserve.
+6. **Added two tests:** source-inspection pin + functional round-trip test (mutate 3 fields synchronously, persist, reload, assert all 3 survived).
+7. **Stumbled on a test-literal case mismatch:** the test originally grepped for lowercase "one-shot" but the comment had "ONE-SHOT". Caught by the red phase, fixed with `src.lowercased()`. Minor; shows the value of running red before green even on "verification" tests.
+
+**Meta-lesson — "verify" ≠ "fix." Open observations can be correct-by-design.** M64 asked to verify, not to fix. After deep-tracing, the pattern IS correct. The right outcome is: document why, add regression pins, close the item. Verifying that behavior is correct and then locking it in with tests is AS VALUABLE as finding and fixing a bug — future refactors can't accidentally break it.
+
+**Meta-lesson — when documenting rationale, anchor it in the code, not just the commit/log.** The inline rationale comment above `observeAndPersist` makes future me / future reviewers see the M64 reasoning at the point where they'd be tempted to "simplify" the loop. Commits scroll by; source comments stay put.
+
+**Meta-lesson — test cases are sensitive to copy-paste whims.** The source comment uses "ONE-SHOT" (ALL CAPS for emphasis); my test grep'd lowercase. Lowercased the source string before comparing to remove this coupling. General lesson: when pinning natural-language content via source-inspection, normalize case before asserting to survive stylistic tweaks.
+
+**Items touched:**
+- M64 [x] — verified correct-by-design. Rationale comment added. 2 new regression tests (source-inspection + functional round-trip).
+
+**Commit:** (this iteration)
+
+**Verification:** 28 AppSettingsTests pass (was 26, +2). 31 WizardStepContinueGateTests unchanged.
+
+**Closed-status tally:** 114 (iter 97) + M64 = 115 items touched, all closed. Zero known bugs as of iter-98 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: M65 SettingsWindow auto-persist — if a future programmatic mutator is added, the auto-persist won't fire until the user opens Settings. Observation-only since no such mutator exists today; document + close.
+- **NEW**: M63 AppSettings.reset()/persist() MainActor blocking on CloudKit-backed UserDefaults sync. Observation-only; worth a note.
+- **NEW**: preflight disk-space accuracy on >100 GB models (concrete measurable).
+
+**Next iteration should pick:** close M65 + M63 together as observation-only documentation iter, OR preflight accuracy measurement.

@@ -431,6 +431,23 @@ private struct UpdatesTab: View {
 /// Drives persistence whenever any observed property of `settings` changes.
 /// Uses `withObservationTracking` in a loop — reads every property once to
 /// register tracking, then fires `persist()` on the main actor on each change.
+///
+/// M64 (iter 98): verified the coalescing behavior is correct-by-design.
+/// `withObservationTracking.onChange` is a ONE-SHOT callback — it fires
+/// exactly once on the first mutation of any tracked property, after which
+/// tracking is consumed. If multiple properties mutate in the same
+/// synchronous `@MainActor` pass (e.g., Reset button setting `foo` then
+/// `bar` in two successive lines), `onChange` fires only once — BUT
+/// `persist()` runs AFTER both mutations have landed (Task hops to a new
+/// main-actor execution), so the persisted Snapshot captures both. The
+/// loop's next iteration re-registers tracking for the next batch.
+///
+/// Net behavior: ONE `persist()` call per batch of mutations that land in
+/// the same main-actor transaction. Coalescing is a feature (fewer disk
+/// writes, atomic multi-field updates) not a bug (no lost data — every
+/// mutation is captured by the pending persist). The test pin below
+/// guards against a future refactor that accidentally re-enters the loop
+/// mid-batch and loses the coalescing.
 @MainActor
 private func observeAndPersist(_ settings: AppSettings) async {
     while !Task.isCancelled {

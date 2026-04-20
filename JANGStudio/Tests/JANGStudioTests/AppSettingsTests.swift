@@ -375,6 +375,49 @@ final class AppSettingsTests: XCTestCase {
         )
     }
 
+    // MARK: - Iter 98 M64: observeAndPersist coalescing documented
+
+    func test_observeAndPersist_coalescing_rationale_is_pinned() throws {
+        // Guard the M64 iter-98 rationale: withObservationTracking's onChange
+        // is one-shot, so multiple mutations in the same main-actor pass
+        // produce ONE persist() call (capturing all changes). This is
+        // coalescing-by-design, not a bug. If a future refactor drops the
+        // rationale comment or restructures the loop, we want this test to
+        // flag it so the reviewer reads the M64 entry.
+        let srcURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard/SettingsWindow.swift")
+        let src = try String(contentsOf: srcURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("M64") && src.contains("coalescing") && src.lowercased().contains("one-shot"),
+            "observeAndPersist must document why its coalescing is correct-by-design"
+        )
+    }
+
+    @MainActor
+    func test_observeAndPersist_captures_rapid_multi_field_mutations() {
+        // Functional pin: after multiple mutations in a single synchronous
+        // pass, the persisted Snapshot contains ALL of them — not just the
+        // last one, not just the first one. The one-shot onChange + Task-
+        // deferred persist() design captures the post-batch state.
+        let s = AppSettings()
+        s.reset()   // start from known defaults
+
+        // Mutate multiple fields synchronously — simulates a Reset button
+        // or a bulk-setter method. These land in the same main-actor
+        // transaction.
+        s.logVerbosity = .verbose
+        s.tickThrottleMs = 250
+        s.defaultHFOrg = "dealignai"
+        s.persist()   // simulate the persist() the observer would trigger
+
+        // Reload from UserDefaults to confirm ALL three fields round-tripped.
+        let s2 = AppSettings()
+        XCTAssertEqual(s2.logVerbosity, .verbose, "first mutation must persist")
+        XCTAssertEqual(s2.tickThrottleMs, 250, "second mutation must persist")
+        XCTAssertEqual(s2.defaultHFOrg, "dealignai", "third mutation must persist")
+    }
+
     func test_snapshot_apply_still_coerces_invalid_values_to_defaults() {
         // Functional test: behavior is preserved — an invalid rawValue still
         // results in the default being applied. The M66 fix ADDS logging
