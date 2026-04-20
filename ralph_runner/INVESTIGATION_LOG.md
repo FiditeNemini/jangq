@@ -2566,3 +2566,41 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 - **NEW M142 candidate**: `hadamardVsLowBits` uses `plan.profile.contains("_2")` — brittle to future profiles. Same class as iter-54 M132 (JANGTQ converters' profile-name parsing).
 
 **Next iteration should pick:** M141 (diskSpace actually gate) OR M142 (hadamard brittleness cleanup). M141 has higher user impact; M142 is a smaller scope continuation.
+
+## 2026-04-20 iteration 63 — M141 preflight diskSpace gate was inert
+
+**Angle:** Iter 62's preflight audit flagged the diskSpace check as likely-inert: `run(...)` always passed `estimated: 0`, and `diskSpace` short-circuits to `.pass` when `estimated <= 0`. Iter 63 confirms + fixes.
+
+**Deep trace walkthrough:**
+1. **Read all 10 preflight checks for foot-guns.** Triaged in iter 62. Confirmed diskSpace is inert.
+2. **The user-impact scenario:** MacBook Pro with 500 GB disk, user has 12 GB free. They point JANG Studio at a 50 GB MoE. Profile JANG_4M predicts ~13 GB output. User clicks "Start Conversion". Preflight shows "Free disk space ✓ · 12 GB free" (accurate display, no gate). Convert proceeds, fills the disk mid-shard, crashes with OSError. Partial output. M115 cleans it on retry but the user wasted 5 minutes of compute + is confused.
+3. **The data to compute the gate EXISTS.** `plan.detected.totalBytes` gives source size. `profiles.jang[].avgBits` gives per-profile bit-width. Python-side `estimate_model.predict` already uses this exact formula.
+4. **Why it was inert:** probably because PreflightRunner was authored before ProfilesService existed as an injectable dependency. `run(...)` took `capabilities:` for the jangtqWhitelist (knownExpert512Types) but never got `profiles:` added later when profiles became an observable service.
+5. **Fix: add `profiles: Profiles = .frozen` parameter.** Compute estimated bytes inline using the existing formula from `jang_tools/estimate_model.predict`: `srcBytes × (avgBits / 16) × 1.05 metadata overhead`. Assume source is BF16 — conservative-over for FP8 sources, which is fine for an inequality gate ("have at least N free").
+6. **Defensive zero-returns:**
+   - `detected.totalBytes == 0` → return 0 → diskSpace .pass (haven't measured source yet).
+   - Unknown profile → return 0 → diskSpace .pass (typo tolerance; don't over-gate on junk data).
+7. **ProfileStep.refresh call site updated** to pass `profilesSvc.profiles`.
+8. **Formula parity across boundary:** `estimate_model.predict` (Python) and `PreflightRunner.estimateOutputBytes` (Swift) now compute the same number. iter-55 M133 made the Python formula MoE-aware; this iter mirrors it cleanly on the Swift side. The wizard's predicted-size display, the preflight gate, and the Python CLI estimate-model all agree.
+
+**Meta-lesson — inert safety gates.** The pattern "check always passes because it's called with the default-zero argument" is a silent failure — the UI SAYS there's a gate, the gate never fires. Worth a targeted audit: find all places where a preflight / sanity / safety function's primary argument is defaulted in a way that disables the check. Iter-64 candidate.
+
+**Items touched:**
+- M141 [x] — PreflightRunner.diskSpace now actually gates via profile-aware output-size estimation.
+
+**Commit:** (this iteration)
+
+**Verification:** 156 Swift tests pass (was 152, +4 for M141 estimator + boundary cases). All Wizard tests still pass (10/10) — regression clean. Python 310 + ralph 73 unchanged.
+
+**Closed-status tally:** 75 (iter 62) + M141 = 76 closed / 100 total = 76.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- M142 `hadamardVsLowBits` brittle `profile.contains("_2")` substring match.
+- **NEW M143 candidate**: audit for other inert-safety-gate patterns (functions with "defaulted disable" args). Check Python side's `detect_architecture` / `classify_tensor` / `validate_*` functions.
+
+**Next iteration should pick:** M142 hadamard brittleness (small scope, continues the iter-62 foot-gun enumeration) OR M143 inert-gate audit (generalizes this iter).

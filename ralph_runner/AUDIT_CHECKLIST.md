@@ -729,6 +729,24 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Meta-observation:** the sibling bug on both sides of the boundary (Python recommend.py + Swift preflight) means decision-overlap zones can span the Swift⇄Python boundary too. Future peer-helper audits should look for the same hardcoded-list-vs-dynamic-check patterns on BOTH sides when the user-facing gate is split across the boundary.
       **Evidence:** `JANGStudio/JANGStudio/Verify/PreflightRunner.swift:124-149`. 152 Swift tests pass (was 149, +3 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M141 (preflight diskSpace was inert: always `estimated: 0` → always `.pass`)** — Iter 62's preflight-enumeration pass flagged `diskSpace` as a potential foot-gun; iter 63 fixed it. The call was:
+      ```swift
+      out.append(Self.diskSpace(dst: dst, estimated: 0))
+      ```
+      and `diskSpace` short-circuits to `.pass` when `estimated <= 0`. The entire gate was cosmetic — it displayed "N GB free" but never ACTUALLY blocked anything. User with a near-full disk would pass preflight, start a conversion, fill the remaining free space mid-shard, hit OSError, leave partial output on disk that M115 then cleans up on retry — but the initial pre-flight warning never fired.
+      **Fix (iter 63):**
+      - New `PreflightRunner.estimateOutputBytes(plan:, profiles:)` public helper. Uses the same formula as `jang_tools/estimate_model.predict`: `srcBytes × (avgBits / 16.0) × 1.05` for metadata overhead.
+      - New `PreflightRunner.avgBitsForProfile(profile:, profiles:)` helper. Looks up `profiles.jang[].avgBits` first, falls back to `profiles.jangtq[].bits` (JANGTQ uses integer bits). Returns 0 on unknown profile (preserves the pass-through fallback for typos).
+      - `run(...)` now accepts `profiles: Profiles = .frozen` and computes the estimate before calling `diskSpace`.
+      - `ProfileStep.refresh()` passes `profilesSvc.profiles` through.
+      **Parity with `estimate_model.predict`:** formula mirrors the Python-side size estimator (iter-55 M133 made that formula MoE-aware). Now the wizard's predicted-size banner, the preflight disk-space gate, and the Python CLI `estimate-model` all compute the same number.
+      **Tests (+4) in `PreflightRunnerTests.swift`:**
+      - `test_estimateOutputBytes_scales_by_profile_avgBits`: 100 GB × 4/16 × 1.05 = 26.25 GB for JANG_4K.
+      - `test_estimateOutputBytes_uses_real_avgBits_for_JANG_2L`: 100 GB × 2.9/16 × 1.05 ≈ 19 GB (bounds-checked).
+      - `test_estimateOutputBytes_returns_zero_before_source_inspected`: pre-detection state returns 0 so preflight doesn't falsely fail.
+      - `test_estimateOutputBytes_returns_zero_for_unknown_profile`: typo-defensive — no guessed bit-width.
+      **Evidence:** `JANGStudio/JANGStudio/Verify/PreflightRunner.swift:5-32, 45-67`, `JANGStudio/JANGStudio/Wizard/Steps/ProfileStep.swift:85-93`. 156 Swift tests pass (was 152, +4). Python 310 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

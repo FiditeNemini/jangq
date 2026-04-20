@@ -82,7 +82,15 @@ struct ProfileStep: View {
         }
     }
 
-    private func refresh() { preflight = PreflightRunner().run(plan: coord.plan, capabilities: capsSvc.capabilities) }
+    private func refresh() {
+        // M141 (iter 63): pass profiles so the disk-space check can do a
+        // profile-aware size estimate instead of short-circuiting to .pass.
+        preflight = PreflightRunner().run(
+            plan: coord.plan,
+            capabilities: capsSvc.capabilities,
+            profiles: profilesSvc.profiles
+        )
+    }
     private func allMandatoryPass() -> Bool { !preflight.contains { $0.status == .fail } }
 
     private func pickOutput() {

@@ -172,6 +172,65 @@ final class PreflightRunnerTests: XCTestCase {
             "256-expert qwen3_5_moe must not fire the 512+ warning.")
     }
 
+    // MARK: - M141 (iter 63): diskSpace preflight actually gates
+    //
+    // Pre-iter-63 PreflightRunner.run always passed `estimated: 0` to the
+    // diskSpace check, which short-circuited to `.pass` unconditionally.
+    // User with near-full disk got no warning — convert started, filled
+    // the disk, crashed mid-shard. Iter 63 wires profile-aware estimation
+    // via `estimateOutputBytes(plan:, profiles:)` using the same formula
+    // as jang_tools/estimate_model.predict.
+
+    func test_estimateOutputBytes_scales_by_profile_avgBits() {
+        // 100 GB bf16 source × (4/16) × 1.05 = 26.25 GB for JANG_4K.
+        let plan = ConversionPlan()
+        plan.profile = "JANG_4K"
+        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 100_000_000_000, shardCount: 1)
+        let est = PreflightRunner.estimateOutputBytes(plan: plan, profiles: .frozen)
+        // 100 GB * 4/16 * 1.05 = 26.25 GB
+        XCTAssertEqual(est, 26_250_000_000, accuracy: 500_000_000,
+                       "JANG_4K on 100 GB bf16 source should predict ~26 GB output")
+    }
+
+    func test_estimateOutputBytes_uses_real_avgBits_for_JANG_2L() {
+        // JANG_2L is 2.9 bits/weight avg → 100 GB × 2.9/16 × 1.05 = 19.03 GB
+        let plan = ConversionPlan()
+        plan.profile = "JANG_2L"
+        plan.detected = .init(modelType: "minimax_m2", isMoE: true, numExperts: 256,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 100_000_000_000, shardCount: 1)
+        let est = PreflightRunner.estimateOutputBytes(plan: plan, profiles: .frozen)
+        XCTAssertGreaterThan(est, 15_000_000_000)
+        XCTAssertLessThan(est, 25_000_000_000)
+    }
+
+    func test_estimateOutputBytes_returns_zero_before_source_inspected() {
+        // Regression: pre-inspection state (detected=nil) must return 0 so
+        // the disk-space check falls back to its `estimated <= 0` .pass
+        // short-circuit — we can't gate until we know the source size.
+        let plan = ConversionPlan()
+        plan.profile = "JANG_4K"
+        // detected stays nil
+        let est = PreflightRunner.estimateOutputBytes(plan: plan, profiles: .frozen)
+        XCTAssertEqual(est, 0,
+            "Without a detected source size, the estimator must return 0 so preflight doesn't falsely fail.")
+    }
+
+    func test_estimateOutputBytes_returns_zero_for_unknown_profile() {
+        // Regression: unknown profile must also produce 0 rather than
+        // guessing a bits value — prevents false positives from typos.
+        let plan = ConversionPlan()
+        plan.profile = "JANG_UNKNOWN_99X"
+        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 100_000_000_000, shardCount: 1)
+        let est = PreflightRunner.estimateOutputBytes(plan: plan, profiles: .frozen)
+        XCTAssertEqual(est, 0,
+            "Unknown profile must return 0 (caller falls back to pass). Don't guess a bit-width.")
+    }
+
     func test_hadamardAt2bitWarns() throws {
         let src = tmp.appendingPathComponent("model"); try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
         try #"{"model_type":"qwen3_5_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)

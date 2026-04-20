@@ -2,7 +2,9 @@
 import Foundation
 
 struct PreflightRunner {
-    func run(plan: ConversionPlan, capabilities: Capabilities = .frozen) -> [PreflightCheck] {
+    func run(plan: ConversionPlan,
+             capabilities: Capabilities = .frozen,
+             profiles: Profiles = .frozen) -> [PreflightCheck] {
         var out: [PreflightCheck] = []
         let src = plan.sourceURL
         let dst = plan.outputURL
@@ -10,7 +12,15 @@ struct PreflightRunner {
         out.append(Self.sourceReadable(src))
         out.append(Self.configValid(src))
         out.append(Self.outputUsable(src: src, dst: dst))
-        out.append(Self.diskSpace(dst: dst, estimated: 0))
+        // M141 (iter 63): diskSpace was being called with `estimated: 0`,
+        // which makes the function short-circuit to `.pass` unconditionally.
+        // The gate was inert. Compute a profile-aware estimate from the
+        // source bytes × (avgBits / 16) × 1.05 metadata overhead — same
+        // formula as `estimate_model.predict` on the Python side, keeping
+        // the two size-estimates aligned across the Swift⇄Python boundary
+        // (M140 meta-lesson about cross-boundary decision-overlap).
+        let estimated = Self.estimateOutputBytes(plan: plan, profiles: profiles)
+        out.append(Self.diskSpace(dst: dst, estimated: estimated))
         out.append(Self.ramAdequate(plan: plan))
         out.append(Self.jangtqArchSupported(plan: plan, whitelist: capabilities.jangtqWhitelist))
         out.append(Self.jangtqSourceDtype(plan: plan))
@@ -18,6 +28,32 @@ struct PreflightRunner {
         out.append(Self.hadamardVsLowBits(plan: plan))
         out.append(Self.bundledPythonHealthy())
         return out
+    }
+
+    /// M141 (iter 63): profile-aware output-size estimator for the
+    /// preflight disk-space gate. Returns 0 when the source hasn't been
+    /// inspected yet (preserves the pre-iter-63 pass-through behavior on
+    /// the initial empty-plan render).
+    ///
+    /// Formula mirrors `jang_tools/estimate_model.predict` so the preflight
+    /// warning, the wizard's predicted-size banner, and the Python-side
+    /// downstream are all in agreement. Assumes source is BF16 (16 bits /
+    /// weight) — for an FP8 source the real output will be slightly
+    /// smaller than this estimate, but conservative-over predicts are OK
+    /// (the disk-space gate is an INEQUALITY: "have at least N free").
+    static func estimateOutputBytes(plan: ConversionPlan, profiles: Profiles) -> Int64 {
+        guard let srcBytes = plan.detected?.totalBytes, srcBytes > 0 else { return 0 }
+        let avgBits = avgBitsForProfile(plan.profile, profiles: profiles)
+        guard avgBits > 0 else { return 0 }
+        return Int64(Double(srcBytes) * (avgBits / 16.0) * 1.05)
+    }
+
+    /// Look up the avg bits/weight for a profile from either JANG or JANGTQ
+    /// tables. Returns 0 on unknown profile (caller falls back to pass).
+    static func avgBitsForProfile(_ profile: String, profiles: Profiles) -> Double {
+        if let p = profiles.jang.first(where: { $0.name == profile }) { return p.avgBits }
+        if let p = profiles.jangtq.first(where: { $0.name == profile }) { return Double(p.bits) }
+        return 0
     }
 
     private static func sourceReadable(_ url: URL?) -> PreflightCheck {
