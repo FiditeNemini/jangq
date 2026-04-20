@@ -5141,3 +5141,47 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: add a license / copyright invariant test (cross-cutting like M182, but for compliance).
 
 **Next iteration should pick:** rate-limiting on jang-server (concrete DoS angle), OR extend secrets-sweep to .json/.yaml/.sh, OR pivot back to JANGStudio Swift fresh angle.
+
+---
+
+## 2026-04-20 iteration 118 — M183 extend secrets sweep to non-source files
+
+**Angle:** Iter-117 forecast: "extend secrets-sweep to .json/.yaml/.sh." Direct execution.
+
+**Deep trace walkthrough:**
+1. **Added `NONSOURCE_EXTENSIONS = {.json, .yaml, .yml, .sh, .env, .md, .toml, .cfg}`** + `_iter_nonsource_files` walker. Same skip set + allowlist mechanism as M182.
+2. **Skipped two specific filenames:** `pyproject.toml` (package dependency strings can shape-match `hf_<long-name>`) and `.env.example` (placeholder values are the file's purpose).
+3. **First run hit 6 sites — all in MY OWN AUDIT DOCS** (`AUDIT_CHECKLIST.md` + `INVESTIGATION_LOG.md`). The M181/M182 audit entries quote fixture token names by literal value when explaining the fix. Audit documentation, not leaks. Allowlisted both files for both HF regex flavors.
+4. **Repo-wide coverage** now spans:
+   - `.py + .swift` (M182, iter-117).
+   - `.json + .yaml + .yml + .sh + .env + .md + .toml + .cfg` (M183, this iter).
+5. **Tests pass:** 78 ralph_runner total (+1).
+
+**Meta-lesson — extension iters are cheap when test infrastructure is reusable.** M182 built the regex set + allowlist mechanism. M183 reuses both — just adds a different file walker. ~10 min of work. Same compound-interest pattern as:
+  - iter-99 PreflightRunner.sourceBytesPerWeight → iter-100 PostConvertVerifier reuses helper.
+  - iter-105 jang-tools dual-invariant → iter-106 ralph_runner template-copies → iter-111 jang-server.
+  - iter-101 .pass disambiguation → iter-102 sweep finds siblings.
+**Rule: when designing an audit invariant, structure it for REUSE from the start. Keep regex / threshold / allowlist in ONE place; invoke from multiple test functions for different scopes (per-file, per-module, repo-wide source, repo-wide config). Saves iters for follow-up extensions.**
+
+**Meta-lesson — audit documentation is itself a leak surface.** My own audit docs quoting fixture tokens by literal value triggered the M183 sweep as offenders. **Rule: when documenting fixture data in markdown, prefer redacted forms (`hf_<lit>...<yz>`) over full literals — keeps the docs portable + sweep-clean. OR allowlist the docs explicitly with rationale (path I took for backwards compat).** Same iter-14 M22 / iter-117 M182 "scrub matched substrings in test output" rule applied to documentation.
+
+**Items touched:**
+- M183 [x] — extended secrets sweep to 8 additional file types. 1 new test, 4 new allowlist entries.
+
+**Commit:** (this iteration)
+
+**Verification:** 78 ralph_runner tests pass (was 77, +1).
+
+**Closed-status tally:** 136 (iter 117) + M183 = 137 items touched, all closed. Zero known bugs as of iter-118 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: rate-limiting on jang-server endpoints (DoS surface).
+- **NEW**: license / copyright header invariant (cross-cutting like M182/M183, but for compliance).
+- **NEW**: audit jang-server frontend assets for hardcoded secrets (HTML/JS files weren't covered by M182 because not .py/.swift, nor by M183 because not config/script).
+
+**Next iteration should pick:** add HTML/JS to the secrets sweep coverage (small completion of M182/M183 line), OR rate-limiting on jang-server, OR a fresh non-security audit angle.

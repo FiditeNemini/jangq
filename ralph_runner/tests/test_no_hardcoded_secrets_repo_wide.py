@@ -83,6 +83,15 @@ ALLOWED_FIXTURES: set[tuple[str, str]] = {
     # DiagnosticsBundle scrub-sensitive regression test for the older
     # huggingface_* token format. Clearly fake (`abcdef_ghij...`).
     ("JANGStudio/Tests/JANGStudioTests/DiagnosticsBundleTests.swift", "HF legacy (huggingface_*)"),
+    # iter-118 M183 extension to non-source files surfaces our own audit
+    # docs as offenders — the docs reference test-fixture token names
+    # by literal value when explaining the M181/M182/M183 fixes.
+    # These are audit documentation, not real secret leaks. Allowlisted
+    # at the doc-file level for both regex flavors.
+    ("ralph_runner/AUDIT_CHECKLIST.md", "HF token (hf_*)"),
+    ("ralph_runner/AUDIT_CHECKLIST.md", "HF legacy (huggingface_*)"),
+    ("ralph_runner/INVESTIGATION_LOG.md", "HF token (hf_*)"),
+    ("ralph_runner/INVESTIGATION_LOG.md", "HF legacy (huggingface_*)"),
 }
 
 
@@ -95,6 +104,62 @@ def _iter_source_files(root: Path):
         if p.suffix not in (".py", ".swift"):
             continue
         yield p
+
+
+# M183 (iter 118): extend M182 to config + script + doc files. JSON
+# configs and shell scripts are common hardcode-leak vectors (CI env
+# files, deploy scripts, .env templates). README + docs sometimes
+# embed tokens in example output. Same regex set, same allowlist
+# mechanism, broader file coverage.
+NONSOURCE_EXTENSIONS = {".json", ".yaml", ".yml", ".sh", ".env", ".md", ".toml", ".cfg"}
+
+
+def _iter_nonsource_files(root: Path):
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        if any(part in SKIP_DIR_NAMES for part in p.parts):
+            continue
+        if p.suffix.lower() not in NONSOURCE_EXTENSIONS:
+            continue
+        # Skip pyproject.toml's [project.dependencies] entries that
+        # might look like hf_<long-package-name> — those are package
+        # specs, not tokens.
+        if p.name == "pyproject.toml":
+            continue
+        # Skip .env.example which BY CONVENTION has placeholder values
+        # that look like real secrets — that's the file's purpose.
+        if p.name == ".env.example":
+            continue
+        yield p
+
+
+def test_no_hardcoded_secrets_in_nonsource_files():
+    """M183 (iter 118): extends M182 to JSON / YAML / shell / docs.
+    Same patterns + allowlist mechanism. Common hardcode-leak vectors:
+    CI env files, deploy scripts, README example output, MCP/plugin
+    config blobs."""
+    offenders: list[str] = []
+    for path in _iter_nonsource_files(REPO_ROOT):
+        rel = str(path.relative_to(REPO_ROOT))
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for name, regex, desc in SECRET_PATTERNS:
+            if (rel, name) in ALLOWED_FIXTURES:
+                continue
+            for m in regex.finditer(content):
+                line = content[: m.start()].count("\n") + 1
+                masked = m.group(0)[:6] + "<...>" + m.group(0)[-2:]
+                offenders.append(f"  {rel}:{line} — {name} [{masked}] — {desc}")
+    assert not offenders, (
+        f"M183 regression: hardcoded secrets in non-source files:\n" +
+        "\n".join(offenders) +
+        "\n\nROTATE the secret at its source-of-truth FIRST, then remove "
+        "from the file. If a clearly-fake doc/example, add to "
+        "ALLOWED_FIXTURES with rationale."
+    )
 
 
 def test_no_hardcoded_secrets_repo_wide():
