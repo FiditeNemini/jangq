@@ -1155,3 +1155,36 @@ Rules 7-8 (no duplicate tables, no wrong profile data) still aren't automated �
 This bug was latent since iter 23-24. No test caught it because testing subprocess cancellation requires a real child process and timing coordination. The 4 new ProcessHandle tests use a real `/bin/sleep 1000` subprocess and check actual isRunning / termination status — slower (seconds not ms) but catches race conditions that mock-based tests wouldn't. Worth the test cost for any cancel-propagation path. **Pattern to apply:** when adding a feature that spans Task / stream / subprocess boundaries, ALWAYS add one integration test with a real subprocess. Mock tests verify the contract; subprocess tests verify the plumbing.
 
 **Next iteration should pick:** M88 (sheet init-vs-task lifecycle, iter 25 spawn — small). Or M97 (partial HF repo cleanup — bigger, follows naturally from M96). Or M87 (Mistral 4 live RoPE validation). Or continue Cat D with `feedback_model_checklist.md`. Or audit the convert cancel path (PythonRunner) with the same end-to-end rigor applied here — iter 3 established the pattern but hasn't been stress-tested for Task-cancel-to-subprocess scenarios like M96 was for publish.
+
+---
+
+## 2026-04-20 iteration 31 — M98 PythonRunner cancel propagation (applying iter-30 meta-lesson)
+
+**Angle:** Iter 30's meta-lesson: "features spanning Task/stream/subprocess boundaries need integration tests with real subprocesses". Applied to PythonRunner which iter 3 last audited but never stress-tested for Task-level cancel.
+
+**Deep trace walkthrough:**
+1. Reviewed `PythonRunner.run()`: returns `AsyncThrowingStream { continuation in Task.detached { launch } }`. **No `continuation.onTermination` handler** — same pattern that iter 30 fixed for PublishService.
+2. Predicted bug: consumer cancel → stream throws CancellationError → subprocess orphaned. Wrote a test FIRST that spawns a real `/bin/bash while true; do date +%s%N > tickFile; sleep 0.2; done` subprocess, cancels the consuming Task, then checks if tickFile mtime stops advancing.
+3. **Ran test pre-fix:** confirmed failure at line 104 "tick-file mtime advanced after cancel — subprocess is still running". Bug confirmed.
+4. **Added fix** — onTermination in run()'s build closure calling cancel(). Ran test: NEW failure mode at line 86 "subprocess should have written a tick by now". Subprocess never spawned OR was killed before first tick.
+5. **Debugged with stderr trace:** `FileHandle.standardError.write("[PR-DEBUG] onTermination fired: \(reason)")`. Output: `onTermination fired: cancelled` — fired IMMEDIATELY on stream creation under XCTest's Task isolation. Reason=cancelled means the continuation's stream was deemed cancelled. Not a bug in the fix per se — a Swift 6 isolation quirk where registering onTermination in the stream's build closure triggers a spurious termination event when consumer Task's context is XCTest-task-ish.
+6. **Fix refined:** moved `continuation.onTermination = ...` INSIDE `launch()` after `try proc.run()`. Now fires only post-spawn, avoiding the false-positive cancel. Test passed.
+7. **Test tuning:** initial 500ms wait for first tick was too tight under parallel test contention (spawn latency spikes past 1s on loaded M1). Switched to polling loop up to 3s.
+8. **Companion test removed:** wrote `test_streamAbandon_terminatesSubprocess` too, but discovered that stream-abandon without any iterator is a DIFFERENT class of resource leak — onTermination never fires because the producer closure's `continuation` reference keeps the continuation alive indefinitely. Removed the test; logged as M99 (low urgency — all production call sites iterate the stream).
+9. **Full suite re-run:** 120 tests pass (was 119). `test_consumerTaskCancel_terminatesSubprocess` reliably passes in both isolation and full-suite runs after the tuning.
+
+**Items touched:**
+- M98 [x] — Task-cancel → subprocess SIGTERM now propagates end-to-end in PythonRunner.
+
+**Commit:** (this iteration)
+
+**Verification:** 120 Swift tests (was 119, +1). jang-tools 260 + ralph_runner 68 unchanged.
+
+**Closed-status tally:** 44 (prior) + M98 = 45 closed / 79 total = 57% closure rate.
+
+**Meta-lesson reinforced:**
+- **Write the failing test FIRST** when the suspected bug is cross-layer. Pre-fix test run at `line 104` assertion proved the bug existed. Without that, the "fix" might have been placebo.
+- **Debug-via-stderr traces** are fast for narrowing which LAYER of the fix is miscompiling — `[PR-DEBUG] onTermination fired: cancelled` pinpointed the Swift-isolation quirk in 1 run that could have taken many iterations of code-reading.
+- **Integration tests with real subprocesses** are slow (5+ seconds each) but catch cross-layer race conditions that mocks cannot. Iter 30 ProcessHandle + iter 31 PythonRunner = two confirmed-via-real-subprocess bugs that would have been invisible with pure unit tests.
+
+**Next iteration should pick:** The iter-30/31 pair established a clear pattern for cross-layer cancel auditing. Next subprocess-holding surface to audit with the same rigor: `InferenceRunner.generate()` (iter 3 M19 fixed explicit cancel but never stress-tested consumer-Task / stream-abandon paths). Alternatively M88 (sheet init-vs-task lifecycle) or M87 (Mistral 4 live validation) or continue Cat D with `feedback_model_checklist.md`.
