@@ -85,6 +85,13 @@ def detect_capabilities(model_dir: Path) -> dict[str, Any]:
         "has_tool_parser": bool(tool_parser),
         "tool_parser": tool_parser or "",
         "has_reasoning": bool(reasoning_parser) or bool(cfg.get("enable_thinking")),
+        # M90 (iter 27): `feedback_readme_standards.md` rule 10 requires
+        # BOTH `reasoning` AND `thinking` tags for Qwen3.5 models. Before
+        # this, only `has_reasoning` was emitted — the template omitted a
+        # dedicated `thinking` tag. `has_thinking` specifically tracks the
+        # runtime `enable_thinking` config (what users toggle on/off during
+        # inference), while `has_reasoning` is the broader capability flag.
+        "has_thinking": bool(cfg.get("enable_thinking")),
     }
 
 

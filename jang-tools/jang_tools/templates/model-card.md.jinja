@@ -18,6 +18,9 @@ tags:
 {% if has_reasoning %}
   - reasoning
 {% endif %}
+{% if has_thinking %}
+  - thinking
+{% endif %}
 quantization_config:
   family: {{ family }}
   profile: {{ profile }}

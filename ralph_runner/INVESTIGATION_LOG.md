@@ -1009,3 +1009,41 @@ Sheet wiring: `isPublishing: Bool` → `progress: (done: Int64, total: Int64, la
 → **Three of four Cat D passes found a real coverage / drift bug.** The single clean pass (iter 22 Mistral 4 architecture) was the one where iter 9's loader.py audit had already verified the fixes. Suggests Cat D passes are MOST productive on memory files that haven't been cross-ref'd recently — focus rotation on oldest-unchecked memories for best yield.
 
 **Next iteration should pick:** M88 (sheet init-vs-task field-lifecycle unification — iter-25 spawn, small cleanup). Or continue Cat D with another memory file (iter-26 pattern suggests high yield — candidates: `project_qwen36.md`, `project_cascade2.md`, `project_minimax_m27.md`, `feedback_model_checklist.md`, `feedback_readme_standards.md`). Or M87 live Mistral 4 validation (needs real convert — possible iter-27 work if a Mistral 4 source is at hand).
+
+---
+
+## 2026-04-20 iteration 27 — Cat D fourth pass: M90 reasoning/thinking YAML tags
+
+**Angle:** Continue Cat D cadence since iter 26 showed the yield stays high on memory files that haven't been cross-ref'd recently. Scanned three candidates before picking M90.
+
+**Deep trace walkthrough:**
+1. `project_qwen36.md` (3 days old) — three flagged P1/P5/P10 items. **P1 already fixed** (GATED_DELTANET_CONFIGS uses `linear_attn.*` names now, per the explicit code comment at `architectures.py:217`). **P10 already fixed** (in_proj_b/a min_bits=4, preferred=8). **P5 unfixed but unfixable from our side** (mlx-lm internals) — logged as M92 for a "detect + warn" follow-up rather than a direct fix. → No concrete drift here; memory is current.
+2. `project_cascade2.md` (29 days old) — 128 experts < 256 threshold so post-M83 asymmetry floor correctly bypasses. hidden=2688 < 4096 so bfloat16 guard correctly bypasses. nemotron_h loader handling confirmed. → No drift.
+3. `feedback_readme_standards.md` (30 days old) — 12 rules for HF uploads. Most are about human-curated eval content. But **rule 10 is automatable**: "YAML frontmatter must include `reasoning` AND `thinking` tags for all Qwen3.5 models". Cross-referenced against `detect_capabilities` + `model-card.md.jinja`.
+4. **BUG M90 CONFIRMED.** `detect_capabilities` ORed `reasoning_parser` and `enable_thinking` into ONE `has_reasoning` boolean. The template emitted a single `- reasoning` YAML tag. The separate `- thinking` tag memory rule 10 requires was NEVER emitted, even on Qwen3.5 models with explicit `enable_thinking: true`. Every Qwen3.5 HF upload silently violated the rule.
+5. **Semantic argument for two flags:**
+   - `has_reasoning` = "this model can produce reasoning output at all" (broader capability)
+   - `has_thinking` = "the `enable_thinking` runtime toggle is available" (specific user-facing knob)
+   - Users filtering HF models by `thinking` tag want the latter specifically.
+6. **Fix pattern:**
+   - Added `has_thinking: bool(cfg.get("enable_thinking"))` as a NEW separate field. Preserved `has_reasoning` semantics so existing callers (Python snippet generator, etc.) keep working.
+   - Template gained a `{% if has_thinking %}- thinking{% endif %}` block alongside the existing reasoning block.
+7. **Positive + negative test pair critical:**
+   - Positive: Qwen3.5 + `enable_thinking: true` emits BOTH tags.
+   - Negative: plain model without `enable_thinking` gets NEITHER the thinking tag nor a stray one from the OR-fallback path. Prevents a future reversion that ORs again.
+
+**Additional drift noted but not fixed (logged as M91):**
+Memory `feedback_readme_standards.md` specifies 9+ other HARD upload requirements (per-subject MMLU, JANG-vs-MLX comparison, speed comparison, size comparison, Korean section, per-subject comparison table, no TBD, no duplicate tables, no wrong profile data). These are UNAUTOMATABLE without running MMLU evals, but the current template produces a skeleton that would silently fail the memory's rules if published directly. Solution is UX: either explicit TODO placeholders or a GenerateModelCardSheet warning banner. Scoped out of this iter; M91 captures the follow-up.
+
+**Items touched:**
+- M90 [x] — `thinking` YAML tag now emitted on Qwen3.5 models per rule 10; regression pinned.
+
+**Commit:** (this iteration)
+
+**Verification:** 255 jang-tools (was 251, +4). ralph_runner 68 + Swift 115 unchanged.
+
+**Closed-status tally:** 40 (prior) + M90 = 41 closed / 77 total = 53% closure rate.
+
+**Cat D yield now 4 of 5 passes found bugs (iter 5, 21, 22, 26, 27 — 4 real bugs + 1 clean).** Cadence is paying off. Good candidates for next-pass: `feedback_model_checklist.md`, `project_minimax_m27.md`, `reference_architecture_details.md`.
+
+**Next iteration should pick:** M91 (model-card skeleton vs rule-10 mismatch — UX gap, small scope). Or M88 (sheet init-vs-task unification from iter 25). Or M87 live Mistral 4 validation. Or another Cat D pass targeting `feedback_model_checklist.md` (untouched, would close the Cat D coverage loop).

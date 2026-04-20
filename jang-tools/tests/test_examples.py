@@ -130,6 +130,69 @@ def test_cli_python_snippet_compiles(dense_model_dir):
     compile(snippet, "<eval>", "exec")  # raises SyntaxError if broken
 
 
+# ────────────────────────────────────────────────────────────────────
+# Iter 27: M90 — has_thinking capability flag + `thinking` YAML tag
+# per feedback_readme_standards.md rule 10
+# ────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def qwen3_5_thinking_model_dir(tmp_path):
+    """A minimal Qwen3.5 model dir with enable_thinking set. Triggers both
+    has_reasoning AND has_thinking per the iter-27 capability split."""
+    d = tmp_path / "qwen3_5_thinking"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5_moe",
+        "num_hidden_layers": 28,
+        "enable_thinking": True,
+        "_name_or_path": "Qwen/Qwen3.5-MoE-Preview",
+    }))
+    (d / "jang_config.json").write_text(json.dumps({
+        "format": "jang", "family": "jang", "profile": "JANG_4K",
+        "quantization": {"actual_bits_per_weight": 4.0, "block_size": 64},
+    }))
+    (d / "tokenizer_config.json").write_text(json.dumps({
+        "chat_template": "x",
+        "tokenizer_class": "Qwen2Tokenizer",
+    }))
+    return d
+
+
+def test_capabilities_reports_has_thinking_for_qwen3_5(qwen3_5_thinking_model_dir):
+    caps = detect_capabilities(qwen3_5_thinking_model_dir)
+    assert caps["has_thinking"] is True
+    # has_reasoning is the broader capability — also true when enable_thinking is set
+    assert caps["has_reasoning"] is True
+
+
+def test_capabilities_has_thinking_false_when_no_enable_thinking(dense_model_dir):
+    """Plain Qwen3 without enable_thinking must NOT trip has_thinking."""
+    caps = detect_capabilities(dense_model_dir)
+    assert caps["has_thinking"] is False
+
+
+def test_modelcard_emits_both_reasoning_and_thinking_tags(qwen3_5_thinking_model_dir):
+    """feedback_readme_standards.md rule 10: Qwen3.5 models must carry BOTH
+    `reasoning` AND `thinking` YAML frontmatter tags. Prior to iter 27 only
+    `reasoning` was emitted — `thinking` was missing despite the memory
+    rule and despite being a DIFFERENT semantic flag (reasoning = capability,
+    thinking = runtime toggle).
+    """
+    from jang_tools.modelcard import generate_card
+    card = generate_card(qwen3_5_thinking_model_dir)
+    # Both tags must appear in the YAML tags list.
+    assert "- reasoning" in card, "missing `reasoning` tag"
+    assert "- thinking" in card, "missing `thinking` tag (M90 regression)"
+
+
+def test_modelcard_omits_thinking_tag_when_not_applicable(dense_model_dir):
+    """Negative: a plain model without enable_thinking must NOT get the
+    thinking tag. Prevents spurious tags on models that don't support it."""
+    from jang_tools.modelcard import generate_card
+    card = generate_card(dense_model_dir)
+    assert "- thinking" not in card, "thinking tag wrongly added to non-thinking model"
+
+
 def test_python_snippet_imports_resolve_to_real_symbols():
     """M45 (iter 20): compile-only validation doesn't catch import-name typos.
     The previous snippet said `from jang_tools.loader import load_model` —
