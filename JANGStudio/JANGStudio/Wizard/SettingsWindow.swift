@@ -347,8 +347,23 @@ private struct DiagnosticsTab: View {
         } else {
             dir = URL(fileURLWithPath: settings.logFileOutputDir)
         }
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(dir)
+        // M157 (iter 80): surface createDirectory failures. Pre-fix, `try?`
+        // silently swallowed permission-denied / read-only-volume / disk-full
+        // errors — NSWorkspace.open against the nonexistent dir then silently
+        // no-oped. User clicked "Open logs directory" → nothing happened,
+        // zero feedback. Post-fix: log the failure to stderr (picked up by
+        // Copy Diagnostics via iter-14 M22 pipeline) AND fall back to
+        // opening the parent directory so the user gets SOMEWHERE useful.
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(dir)
+        } catch {
+            FileHandle.standardError.write(
+                Data("[SettingsWindow] could not create \(dir.path): \(error)\n".utf8))
+            // Fall back to opening the parent, which should exist even if we
+            // can't create the leaf.
+            NSWorkspace.shared.open(dir.deletingLastPathComponent())
+        }
     }
 
     private func copySystemInfo() {

@@ -173,6 +173,45 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M157 (iter 80): SettingsWindow.openLogsDirectory surfaces failures
+    //
+    // Pre-M157 used `try? FileManager.default.createDirectory(...)` — silent
+    // swallow. NSWorkspace.open against a nonexistent dir is a no-op, so
+    // user clicking "Open logs directory" got ZERO feedback on a
+    // permission-denied / read-only-volume / disk-full path. Classic iter-35
+    // M107 silent-failure-on-user-action bug; just with a different verb.
+
+    func test_settingsWindow_openLogs_surfaces_createDirectory_failures() throws {
+        let settingsURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // JANGStudioTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // xcodeproj root
+            .appendingPathComponent("JANGStudio/Wizard/SettingsWindow.swift")
+        let src = try String(contentsOf: settingsURL, encoding: .utf8)
+        // The silent try? must be gone.
+        XCTAssertFalse(
+            src.contains("try? FileManager.default.createDirectory(at: dir"),
+            """
+            SettingsWindow.openLogsDirectory regressed to silent
+            try? FileManager.default.createDirectory(at:). Pre-M157 this
+            swallowed permission-denied / disk-full errors and
+            NSWorkspace.open against a nonexistent dir was a no-op —
+            user saw nothing when clicking the button. Must use
+            do/catch with stderr logging + parent-dir fallback.
+            See M157 iter 80.
+            """
+        )
+        // Check the fallback path exists in source.
+        XCTAssertTrue(
+            src.contains("dir.deletingLastPathComponent()"),
+            "openLogsDirectory must fall back to opening the parent dir on createDirectory failure."
+        )
+        XCTAssertTrue(
+            src.contains("[SettingsWindow] could not create"),
+            "openLogsDirectory must log createDirectory failures to stderr (Copy Diagnostics pipeline)."
+        )
+    }
+
     // MARK: - M143 (iter 65): SourceStep.applyRecommendation must respect
     // settings.defaultProfile, not a hardcoded "JANG_4K".
     //

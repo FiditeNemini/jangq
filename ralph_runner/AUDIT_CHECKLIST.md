@@ -892,6 +892,18 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M157 (SettingsWindow "Open logs directory" silent failure — iter-35 M107 class, different verb)** — Iter-80 re-audited `try?` patterns across the Swift app (iter-35 M107 swept user-action silent-failures). Grep for `try? FileManager` / `try? \w+.write` / `try? encoder.`:
+      - `SettingsWindow.swift:350` — **silent `try? FileManager.default.createDirectory`**. Real bug.
+      - `DiagnosticsBundle.swift:106,204` — tempdir cleanup on bundle write. Best-effort; silent-swallow correct (deferred cleanup path).
+      - `PostConvertVerifier.swift:96,161,164` — verify checks that read failures default to empty; correct (iter-14 M14 reports via check-status).
+      - `TestInferenceViewModel.swift:101` — JSON encode/decode roundtrip for the transcript export; malformed → empty messages defaults. Low-stakes data observation.
+      **The SettingsWindow bug:** user clicks "Open logs directory" button in Settings → Diagnostics tab. `try? createDirectory(at: dir, withIntermediateDirectories: true)` silently swallows permission-denied / read-only-volume / disk-full errors. Then `NSWorkspace.shared.open(dir)` against a nonexistent dir silently no-ops. **User clicks button, nothing happens.** Classic iter-35 M107 silent-user-action failure.
+      **Fix (iter 80):** `do/catch` the createDirectory. On failure:
+      - Log to stderr with `[SettingsWindow] could not create <path>: <error>` — picked up by Copy Diagnostics via iter-14 M22 sensitive-scrubbing pipeline.
+      - Fall back to opening the PARENT dir via `dir.deletingLastPathComponent()` — the user still gets SOMEWHERE useful (e.g., `~/Library/` opens if `~/Library/Logs/JANGStudio` can't be created).
+      **Tests (+1) in WizardStepContinueGateTests.swift:** `test_settingsWindow_openLogs_surfaces_createDirectory_failures` — source-inspection pin. Asserts (a) the silent `try?` pattern is gone, (b) the fallback `dir.deletingLastPathComponent()` path exists in source, (c) the stderr log literal is present.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/SettingsWindow.swift:336-368`. 178 Swift tests pass (was 177, +1). Python 348 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [x] **M156 (PublishService.dryRun was a 7th invokeCLI copy — iter-78 meta-rule applied)** — Iter-78 meta-rule: "grep the WHOLE codebase for structural matches, not just the expected home directory." Iter-79 applied it with a simpler code-shape grep: `proc.waitUntilExit()`. 3 hits:
       - `PythonCLIInvoker.swift:67` — canonical helper.
       - `PublishService.swift:310` — 7th copy. **Hiding in plain sight.**

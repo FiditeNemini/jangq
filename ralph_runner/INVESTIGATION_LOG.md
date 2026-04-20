@@ -3337,3 +3337,46 @@ Both are needed — location-based audit misses body-structure matches outside t
 - Deep-trace: walk every iter-15-era error-message in the production code to check if any still says "Error Domain=…" or raw exception-class names that M129-style typed errors would clean up.
 
 **Next iteration should pick:** routing_profile.py + codebook_vq.py json.loads migration (fast, uses mature _json_utils) OR fresh audit angle.
+
+## 2026-04-20 iteration 80 — M157 SettingsWindow openLogs silent-failure sweep
+
+**Angle:** Iter-79 forecast: fresh audit angle. Chose to re-run iter-35 M107's silent-user-action audit with the iter-78 meta-rule's broader grep. Last time ran iter-36 `.first!` force-unwraps (M109). This iter: `try? FileManager` / `try? write` / `try? encoder`.
+
+**Deep trace walkthrough:**
+1. **Six grep hits, triage each:**
+   - `SettingsWindow:350` — **user-action silent failure** (real bug).
+   - `DiagnosticsBundle:106,204` — deferred tempdir cleanup. Best-effort by design.
+   - `PostConvertVerifier:96,161,164` — verify checks fall back to defaults; VerifyCheck status surfaces the underlying issue.
+   - `TestInferenceViewModel:101` — transcript export edge case, low-stakes.
+2. **SettingsWindow is the clean M107 class.** User clicks button, no visible action, no log, no error. The silent `try?` wraps `createDirectory(at: dir, withIntermediateDirectories: true)`.
+3. **Failure modes that trigger this:**
+   - User configured `settings.logFileOutputDir = "/nonexistent/volume/logs"` manually.
+   - User on locked-down macOS where `.libraryDirectory` exists but isn't writable by the app (sandboxed preview, MDM-managed account).
+   - Disk full at click time.
+   - iCloud offline on `~/Library/Logs`.
+4. **Fix matches iter-35 M107 + iter-69 M147 template:**
+   - `do/catch` instead of `try?`.
+   - stderr log via `FileHandle.standardError.write(…)` — surfaces in Copy Diagnostics.
+   - Fallback behavior so the button still does something useful.
+5. **Fallback strategy — open the parent dir.** If `~/Library/Logs/JANGStudio` can't be created, open `~/Library/Logs` instead. If that can't either, open `~/Library`. The chain always bottoms out at a dir that exists since the user's account has SOME readable filesystem.
+6. **Tests:** source-inspection. No runtime simulation of a read-only filesystem in the test harness. Three pins: silent `try?` absent, fallback path present, log literal present.
+
+**Meta-lesson — re-run earlier audits periodically.** Iter-35 M107 was a sweep; iter-80 is a re-sweep 45 iters later with a broader pattern (`FileManager.create` vs iter-35's narrower scope). One real bug surfaced that iter-35 missed because it was looking at a different verb shape. Future rule: re-run every audit sweep every 20-30 iters — codebase evolves, old patterns re-creep in, and broader grep catches what tighter grep missed.
+
+**Items touched:**
+- M157 [x] — SettingsWindow "Open logs directory" now surfaces createDirectory failures via stderr log + parent-dir fallback.
+
+**Commit:** (this iteration)
+
+**Verification:** 18 WizardStepContinueGateTests pass (was 17, +1 for M157 source-inspection pin). Python 348 + ralph 73 unchanged. Total Swift 178.
+
+**Closed-status tally:** 92 (iter 79) + M157 = 93 closed / 100 total = 93.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: next M107-style re-sweep — grep for bare `try?` in production .swift that's NOT in a cleanup-path or read-defaults position. Most remaining hits are justified; re-classify to confirm.
+
+**Next iteration should pick:** another M107-class re-sweep (different grep axis — `try? String(data:)` / `try? Data(contentsOf:)` maybe) OR tackle one of the long-open M97/M117/M124.
