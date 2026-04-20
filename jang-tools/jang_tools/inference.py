@@ -170,11 +170,65 @@ def _generate_text(
     return {"text": text, "elapsed_s": elapsed, "tokens": n_toks, "tokens_per_sec": tok_s}
 
 
-def _generate_vl(model, processor, prompt: str, max_tokens: int, image_path: str | None, video_path: str | None) -> dict:
-    """Generate for a VL model using mlx_vlm."""
+def _generate_vl(
+    model,
+    processor,
+    prompt: str,
+    max_tokens: int,
+    image_path: str | None,
+    video_path: str | None,
+    *,
+    enable_thinking: bool = True,
+) -> dict:
+    """Generate for a VL model using mlx_vlm.
+
+    M123 (iter 47): when the caller requested ``--no-thinking`` (i.e. the
+    opt-in M121 smoke-test toggle) AND the VL processor exposes a
+    ``tokenizer.chat_template``, pre-apply the chat template with
+    ``enable_thinking=False`` here so the resulting string lands in
+    ``mlx_vlm.generate`` pre-formatted. Pre-iter-47 the VL path passed the
+    raw user prompt straight through and mlx_vlm re-templated it internally
+    with default ``enable_thinking=True`` — so the wizard smoke-test toggle
+    was silently a no-op for VL reasoning models like Qwen3.6-VL. Defaulting
+    to True preserves the existing always-thinking behavior when the user
+    hasn't ticked the toggle.
+    """
     from mlx_vlm import generate
     t0 = time.time()
-    kwargs: dict[str, Any] = {"model": model, "processor": processor, "prompt": prompt, "max_tokens": max_tokens}
+
+    # Reuse the LLM-side helper so the template-kwarg handling (including
+    # the strict-tokenizer retry-without-kwarg fallback) stays in one place.
+    prompt_for_generate: Any = prompt
+    if not enable_thinking:
+        tokenizer = getattr(processor, "tokenizer", None) or processor
+        templated = _apply_chat_template_if_any(
+            tokenizer, prompt, enable_thinking=False
+        )
+        # Some VL processors also expose an `apply_chat_template` at the
+        # processor level that wants a messages-list; prefer that when it
+        # exists, falling back to the tokenizer-level template we already
+        # applied. Only activate when the processor path exists AND accepts
+        # enable_thinking — otherwise we'd double-template.
+        if hasattr(processor, "apply_chat_template"):
+            try:
+                templated = processor.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                pass  # processor rejected the kwarg; keep tokenizer-level result
+            except Exception:
+                pass  # unexpected failure; fall back to raw prompt path below
+        prompt_for_generate = templated if isinstance(templated, str) else prompt
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "processor": processor,
+        "prompt": prompt_for_generate,
+        "max_tokens": max_tokens,
+    }
     if image_path:
         from PIL import Image
         kwargs["image"] = Image.open(image_path)
@@ -201,7 +255,11 @@ def cmd_inference(args) -> None:
         if _is_vl(model_dir):
             model, processor = _load_vlm(model_dir)
             load_s = time.time() - t_load
-            result = _generate_vl(model, processor, args.prompt, args.max_tokens, args.image, args.video)
+            result = _generate_vl(
+                model, processor, args.prompt, args.max_tokens,
+                args.image, args.video,
+                enable_thinking=not args.no_thinking,
+            )
         else:
             model, tokenizer = _load_llm(model_dir)
             load_s = time.time() - t_load

@@ -149,6 +149,122 @@ def test_cli_help_lists_no_thinking_flag():
     assert "--no-thinking" in r.stdout
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# M123 (iter 47): VL path honors enable_thinking too.
+#
+# Pre-iter-47, _generate_vl passed the raw user prompt straight through to
+# mlx_vlm.generate, which re-templated internally with default
+# enable_thinking=True. So wizard users ticking "Skip thinking" on a VL
+# reasoning model (Qwen3.6-VL, future VL reasoners) saw zero effect — silent
+# no-op, same UX pathology M121 tried to fix.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeVLProcessor:
+    """Stand-in for mlx_vlm processors.
+
+    Processors typically wrap a tokenizer AND expose their own
+    apply_chat_template for multimodal messages. Our helper should prefer
+    the processor-level template when present + accepting the kwarg, and
+    fall through gracefully otherwise.
+    """
+    def __init__(self, template_str: str, accepts_enable_thinking: bool):
+        self.tokenizer = _FakeInnerTokenizer(template=template_str)
+        self._accepts = accepts_enable_thinking
+        self.last_processor_level_call: dict = {}
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kwargs):
+        if "enable_thinking" in kwargs and not self._accepts:
+            raise TypeError("processor rejects enable_thinking")
+        self.last_processor_level_call = {
+            "tokenize": tokenize,
+            "add_generation_prompt": add_generation_prompt,
+            **kwargs,
+        }
+        tag = "[P-NO-THINK]" if kwargs.get("enable_thinking", True) is False else "[P-THINK]"
+        return f"<processor>{tag}{messages[0]['content']}</processor>"
+
+
+def _capture_vl_generate(monkeypatch):
+    """Replace mlx_vlm.generate with a recorder. Returns a dict the caller
+    can inspect for the prompt that the VL helper would have passed through."""
+    captured: dict = {}
+
+    def fake_generate(*, model, processor, prompt, max_tokens, **_ignored):
+        captured["prompt"] = prompt
+        captured["max_tokens"] = max_tokens
+        return "fake-vl-output"
+
+    # mlx_vlm is an optional dep — create a shim module if absent.
+    import types
+    import sys as _sys
+    mod = _sys.modules.get("mlx_vlm")
+    if mod is None:
+        mod = types.ModuleType("mlx_vlm")
+        _sys.modules["mlx_vlm"] = mod
+    monkeypatch.setattr(mod, "generate", fake_generate, raising=False)
+    return captured
+
+
+def test_vl_generate_preserves_raw_prompt_when_thinking_on(monkeypatch):
+    """Regression guard: the default path (enable_thinking=True) must NOT
+    pre-template — that would double-template for non-reasoning VL models
+    that mlx_vlm handles correctly on its own."""
+    from jang_tools.inference import _generate_vl
+    captured = _capture_vl_generate(monkeypatch)
+    processor = _FakeVLProcessor(template_str="ignored", accepts_enable_thinking=True)
+    _ = _generate_vl(
+        model=object(), processor=processor,
+        prompt="describe this image", max_tokens=32,
+        image_path=None, video_path=None,
+        # default enable_thinking=True
+    )
+    assert captured["prompt"] == "describe this image", (
+        f"default VL path should pass prompt raw, got {captured['prompt']!r}"
+    )
+    assert processor.last_processor_level_call == {}, (
+        "default VL path should not touch processor.apply_chat_template"
+    )
+
+
+def test_vl_generate_pretemplates_when_thinking_off(monkeypatch):
+    """M123: with enable_thinking=False, the VL helper must pre-template so
+    mlx_vlm sees a no-think prompt — otherwise mlx_vlm silently re-templates
+    with default enable_thinking=True."""
+    from jang_tools.inference import _generate_vl
+    captured = _capture_vl_generate(monkeypatch)
+    processor = _FakeVLProcessor(template_str="yes", accepts_enable_thinking=True)
+    _ = _generate_vl(
+        model=object(), processor=processor,
+        prompt="what color is the sky",
+        max_tokens=16, image_path=None, video_path=None,
+        enable_thinking=False,
+    )
+    assert "[P-NO-THINK]" in captured["prompt"], (
+        f"expected no-think tag in VL prompt, got {captured['prompt']!r}"
+    )
+    assert processor.last_processor_level_call.get("enable_thinking") is False
+
+
+def test_vl_generate_falls_back_to_tokenizer_when_processor_rejects_kwarg(monkeypatch):
+    """Strict VL processor that rejects enable_thinking — we must still get
+    a no-think-tagged prompt via the tokenizer-level template, not fall
+    silently back to raw user prompt."""
+    from jang_tools.inference import _generate_vl
+    captured = _capture_vl_generate(monkeypatch)
+    processor = _FakeVLProcessor(template_str="yes", accepts_enable_thinking=False)
+    _ = _generate_vl(
+        model=object(), processor=processor,
+        prompt="count the cats",
+        max_tokens=16, image_path=None, video_path=None,
+        enable_thinking=False,
+    )
+    # Tokenizer-level fallback's no-think tag leaks into the final prompt.
+    assert "[NO-THINK]" in captured["prompt"], (
+        f"expected tokenizer-level NO-THINK fallback tag, got {captured['prompt']!r}"
+    )
+
+
 def test_make_sampler_returns_none_for_greedy():
     from jang_tools.inference import _make_sampler
     assert _make_sampler(0.0) is None

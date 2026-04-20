@@ -1880,3 +1880,38 @@ Punted to M121 with a clear scope specification so a future iter can do the full
 - grep-audit classes remaining: bare `except Exception:` in jang-tools (not yet triaged like audit.py was).
 
 **Next iteration should pick:** Swift `assertionFailure()` / `precondition` grep-audit (natural mirror of this iter's Python class) OR M124 test-hang root cause (real CI reliability issue).
+
+## 2026-04-20 iteration 47 — M123 closes M121's VL-path gap
+
+**Angle:** Iter 46's forecast put Swift `assertionFailure()` / `precondition(` grep-audit first. Grepped — zero hits. Broadened to `fatalError(`, `try!`, `as!` — also zero hits. **Swift side is genuinely clean on the "stripped/unsafe" classes** (consistent with iter 37's "Swift saturation" observation).
+
+Pivoted to re-audit M121. Iter 45 closed the text path but the VL path is a SEPARATE helper I didn't touch. Re-reading `_generate_vl`: it passes raw `prompt` to `mlx_vlm.generate`. mlx_vlm then re-templates internally with enable_thinking defaulting to True. So the wizard's "Skip thinking" toggle was silently a no-op for any VL reasoning model (Qwen3.6-VL explicitly named in memory as a target).
+
+**Deep trace walkthrough:**
+1. **Diff between LLM and VL paths in inference.py:**
+   - `_generate_text` calls `_apply_chat_template_if_any(tokenizer, prompt, enable_thinking=…)` explicitly. Text goes through our control.
+   - `_generate_vl` kwargs["prompt"] = prompt (raw). mlx_vlm.generate calls `processor.apply_chat_template(messages)` internally. We never see or influence that call. **Silent no-op branch.**
+2. **Why didn't we catch this in iter 45?** The M121 discovery cited "GLM-5.1 / Qwen3.6 / MiniMax M2.7" — all LLM-path models in my head at write-time. Qwen3.6-VL is VL + reasoning but I grouped it with Qwen3.6 by default. Memory for `project_qwen36.md` mentions "27-layer ViT VL" but we haven't converted the VL version yet (only `35B-A3B` text on HF so far). Easy to mentally elide.
+3. **Fix strategy**: pre-template on OUR side so mlx_vlm sees a finished string and doesn't re-template. Two tiers of fallback — processor-level template first (correct for multimodal messages, if the processor accepts enable_thinking kwarg), then tokenizer-level via the shared helper. Preserves M121's strict-tokenizer retry path.
+4. **Why preserve raw-prompt in the default path?** Non-reasoning VL models (captioning, OCR, etc.) expect mlx_vlm's internal template. Pre-templating them would double-wrap. The `if not enable_thinking:` guard only pre-templates when the user opted in.
+5. **Test harness design**: `_FakeVLProcessor` surfaces BOTH processor-level AND tokenizer-level template calls, and can simulate strict rejection via `accepts_enable_thinking=False`. `_capture_vl_generate` shims `mlx_vlm.generate` via monkeypatch on a sys.modules stub — lets tests run in environments where mlx_vlm is actually installed AND where it isn't. Three tests nail: default passthrough, happy-path pre-template, strict-processor fallback.
+
+**Meta-lesson:** "closing an item" should include verifying ALL code paths — not just the one that surfaced the bug. Iter 45 closed M121 with text-path evidence and didn't re-grep for similar helpers. VL is a parallel helper, two calls away, same pathology. **Future rule for M-items with "wire-through" scope: grep for peer helpers in the same module after the fix lands, verify they have the same plumbing.**
+
+**Items touched:**
+- M123 [x] — VL path now honors enable_thinking via pre-templating. Covers Qwen3.6-VL and any future VL reasoning models.
+
+**Commit:** (this iteration)
+
+**Verification:** 286 jang-tools tests pass (was 283, +3 for the three VL-path tests). Swift 132 + ralph 73 unchanged (no Swift or UI changes needed — M121's `noThinking`/`--no-thinking` plumbing already carries the signal end-to-end).
+
+**Closed-status tally:** 60 (iter 46) + M123 = 61 closed / 95 total = 64.2% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (iter-30 spawn)
+- M117 in-wizard inference smoke (feedback_model_checklist.md rule 3)
+- M124 full-suite Swift-test hang (environmental, still not diagnosed)
+- **NEW grep-audit class**: "peer-helper" audit — given M121→M123 pattern, grep for helpers that look like `_generate_*` / `_load_*` / `_detect_*` / `_resolve_*` families and check for missing parameter plumbing. Broader class: **parameter asymmetry between sibling functions**.
+- grep-audit class: `open(` calls without context managers (file-descriptor leak class, complement to iter 43's `json.loads`).
+
+**Next iteration should pick:** peer-helper parameter-asymmetry grep-audit (generalization of this iter's finding — potentially rich seam) OR `open(` without `with` (concrete file-descriptor leak class).
