@@ -2332,3 +2332,55 @@ Pivoted to a sharper candidate. Grepped for other hardcoded profile → bits map
 - **NEW**: peer-helper sweep on Python publish.py vs convert.py (both spawn subprocess tools + talk to HF API).
 
 **Next iteration should pick:** M136 Task-handle discipline audit (generalizes iter-57's finding; grep-driven audit class likely to find more instances).
+
+## 2026-04-20 iteration 58 — M136 Task-handle discipline audit finds RunStep onAppear re-entry
+
+**Angle:** Iter 57's meta-lesson — discarded Task handles + re-entrant triggers = classic SwiftUI concurrency bug class. Iter 58 generalizes: grep every `Task\s*\{` in the app, classify each for the three risk patterns.
+
+**Deep trace walkthrough:**
+1. **Grep `Task\s*\{` across `JANGStudio/JANGStudio/`:** 17 hits in 8 files.
+2. **Triage each against the three safety conditions** — the Task is safe if ANY holds:
+   - (a) Handle stored and cancellable on re-entry.
+   - (b) Trigger button only shown in a post-completion state.
+   - (c) Called function self-guards against re-entry.
+3. **Classification:**
+   - SourceStep:200 — (a) via iter-57's `detectionTask`.
+   - PublishToHuggingFaceSheet:201 — (a) via `publishTask`.
+   - TestInferenceViewModel.send — (c) via `guard !isGenerating else { return }`.
+   - GenerateModelCardSheet:150 — (b) Retry only shows when errorMessage != nil (post-completion).
+   - UsageExamplesSheet:91 — (b) same pattern.
+   - UsageExamplesSheet:36 — structured concurrency via TaskGroup; auto-cancellation on view dismiss.
+   - SettingsWindow:453, TestInferenceSheet:264, SourceStep:229 — MainActor hops of small work, not re-entrant concern.
+   - TestInferenceSheet:179,183,187 — triggers `vm.send()`/`vm.cancel()` which have (c).
+   - **RunStep:105 — `.onAppear { Task { await start() } }`. Depends on `start()`'s guard.**
+4. **Read `start()` guard:** `guard coord.plan.run != .running else { return }`. Allows re-entry from `.succeeded`, `.failed`, `.cancelled`. NOT SAFE via (c).
+5. **Trigger analysis:** `.onAppear` fires on every view reappearance, not just first. User nav-backing from VerifyStep via the sidebar re-appears RunStep. `.onAppear` → Task → start() → sees non-.running state → sets run=.running → wipes logs → re-spawns conversion on top of the already-converted output dir. NO user consent.
+6. **This is distinct from iter-57 M135.** M135 was a race between TWO concurrent tasks. M136 is a stale-trigger: old task finished long ago, new task fires for the wrong reason. Different class but same grep-audit meta-rule finds both.
+7. **Fix: tighten onAppear to `if coord.plan.run == .idle`.** Retry buttons stay on the weaker `!= .running` guard because they're USER-INITIATED and meant to retry after failure.
+8. **Test gotcha: source inspection picks up comment text.** My iter-58 rationale comment at line 106 contains `.onAppear` as text. The first test version grepped for ".onAppear" and grabbed the first occurrence (in the comment), looked nearby, didn't find `coord.plan.run == .idle`, failed. Fix: filter out comment lines first (`trimmed.hasPrefix("//")`), then search the code-only substring. Tighter test without hitting prose.
+
+**Meta-audit summary for the `Task\s*\{` class (M135 + M136):**
+- 17 sites audited.
+- 2 real bugs (12%).
+- Audit pattern: grep + classify by (a)/(b)/(c) + investigate anything failing all three.
+- Future use: this class should be re-run whenever a new SwiftUI view is added.
+
+**Items touched:**
+- M136 [x] — RunStep onAppear now gates on `coord.plan.run == .idle`.
+
+**Commit:** (this iteration)
+
+**Verification:** 144 Swift tests pass (was 143, +1 for RunStep onAppear pin). Python 310 + ralph 73 unchanged.
+
+**Closed-status tally:** 70 (iter 57) + M136 = 71 closed / 100 total = 71.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW grep-audit class**: in Swift — `.task` modifier (structured concurrency variant of `Task {}`). Does .task fire on every appearance or just once? Double-check pairing with view-lifecycle state.
+- **NEW**: peer-helper sweep on Python `publish.py` vs `convert.py` (both spawn subprocesses + handle HF API).
+
+**Next iteration should pick:** `.task` modifier audit OR peer-helper sweep on publish/convert. Both are natural extensions.

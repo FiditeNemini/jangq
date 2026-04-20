@@ -102,7 +102,20 @@ struct RunStep: View {
             }
         }
         .padding()
-        .onAppear { Task { await start() } }
+        // M136 (iter 58): only auto-start on first entry (.idle). Without
+        // the run-state check, SwiftUI's .onAppear fires every time the view
+        // reappears — e.g., when the user nav-backs from VerifyStep via the
+        // sidebar to inspect logs. `start()`'s only guard was
+        // `run != .running`, so a completed / failed / cancelled run got
+        // restarted on nav-back, wiping logs + overwriting the finished
+        // output folder. Retry buttons below still call `start()` directly
+        // (they rely on the weaker guard inside start()); only the
+        // auto-start path needs the tighter gate.
+        .onAppear {
+            if coord.plan.run == .idle {
+                Task { await start() }
+            }
+        }
     }
 
     private func start() async {
