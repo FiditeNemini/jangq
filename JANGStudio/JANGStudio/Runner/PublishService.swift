@@ -132,9 +132,39 @@ enum PublishServiceError: Error, LocalizedError {
         case .missingToken:
             return "HuggingFace token missing — set HF_HUB_TOKEN env var or paste a token in Settings."
         case .cliError(let c, let s):
-            return "jang-tools publish exited \(c): \(s.trimmingCharacters(in: .whitespacesAndNewlines))"
+            let stderr = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "jang-tools publish exited \(c): \(stderr)\n→ \(Self.remediation(forStderr: stderr))"
         case .decodeError(let s): return s
         }
+    }
+
+    /// M168 (iter 91): pattern-match common huggingface_hub stderr shapes to
+    /// suggest a next action. Failure in a 30-minute publish dispatch is
+    /// user-disruptive — the error banner is the only UI they have after the
+    /// upload has blown up, so it MUST tell them what to try. Applies the
+    /// iter-90 M167 meta-lesson ("surface remediation, not just symptom")
+    /// to the highest-stakes error path in the app.
+    ///
+    /// Pattern detection is case-insensitive + substring-based (not regex)
+    /// so it survives minor HF error-message tweaks. Falls back to a generic
+    /// "token / network / retry" hint for unknown shapes so EVERY user gets
+    /// at least one next-action, not just the well-known error codes.
+    nonisolated static func remediation(forStderr stderr: String) -> String {
+        let lower = stderr.lowercased()
+        if lower.contains("401") || lower.contains("unauthorized") {
+            return "Auth failed — likely an invalid or expired token. Verify with `huggingface-cli whoami`, or regenerate at https://huggingface.co/settings/tokens."
+        }
+        if lower.contains("403") || lower.contains("forbidden") {
+            return "Permission denied — token is valid but lacks write access to this repo. Check the token's scope at https://huggingface.co/settings/tokens, or confirm the org admin granted write access."
+        }
+        if lower.contains("connection") || lower.contains("timeout")
+            || lower.contains("max retries") || lower.contains("network is unreachable") {
+            return "Network error — check connectivity + retry. If it persists, huggingface.co may be having an incident (check https://status.huggingface.co)."
+        }
+        if lower.contains("rate limit") || lower.contains("429") || lower.contains("too many requests") {
+            return "Rate limited — wait a few minutes and retry. HF imposes per-IP/per-token upload limits during peak hours."
+        }
+        return "Common fixes: verify the token (`huggingface-cli whoami`), check network connectivity, or retry in a few minutes."
     }
 }
 

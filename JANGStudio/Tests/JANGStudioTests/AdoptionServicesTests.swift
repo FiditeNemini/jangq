@@ -169,6 +169,76 @@ final class AdoptionServicesTests: XCTestCase {
             "trailing dot in ORG must fail")
     }
 
+    // MARK: - Iter 91 M168: context-aware remediation in publish-error description
+
+    @MainActor
+    func test_publish_cliError_401_suggests_token_check() {
+        // Common HF response for invalid/expired token. The error description
+        // must tell the user HOW to fix it (verify token / check settings),
+        // not just show the raw stderr. Mirrors iter-90 M167's "remediation
+        // command, not just symptom" pattern.
+        let err = PublishServiceError.cliError(
+            code: 1,
+            stderr: "HfHubHTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/api/…"
+        )
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("token"),
+            "401 error must mention the token as the likely cause. Got: \(desc)")
+        XCTAssertTrue(desc.contains("huggingface.co/settings/tokens"),
+            "401 error must link to the HF tokens settings page. Got: \(desc)")
+    }
+
+    @MainActor
+    func test_publish_cliError_403_suggests_permission_check() {
+        // Forbidden means token is valid but lacks scope for the target repo.
+        let err = PublishServiceError.cliError(
+            code: 1,
+            stderr: "HfHubHTTPError: 403 Client Error: Forbidden — you don't have write access to this repo"
+        )
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("permission") || desc.contains("write access"),
+            "403 must mention permission / write access. Got: \(desc)")
+    }
+
+    @MainActor
+    func test_publish_cliError_network_suggests_retry() {
+        // Connection errors during upload — user fix is "check network, retry."
+        let err = PublishServiceError.cliError(
+            code: 1,
+            stderr: "ConnectionError: HTTPSConnectionPool(host='huggingface.co', port=443): Max retries exceeded"
+        )
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("network") || desc.contains("retry"),
+            "Connection error must suggest network-check + retry. Got: \(desc)")
+    }
+
+    @MainActor
+    func test_publish_cliError_generic_falls_back_to_generic_hint() {
+        // Unknown error shape — fall back to a generic "check token or retry"
+        // hint so the user still gets a next-action, not just the raw stderr.
+        let err = PublishServiceError.cliError(
+            code: 99,
+            stderr: "some weird error we've never seen before"
+        )
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("weird error we've never seen"),
+            "generic fallback must still preserve the raw stderr context")
+        // Some form of next-action hint should still appear.
+        XCTAssertTrue(desc.contains("token") || desc.contains("network") || desc.contains("retry"),
+            "generic fallback should suggest at least one of: token / network / retry. Got: \(desc)")
+    }
+
+    @MainActor
+    func test_publish_cliError_preserves_stderr_in_all_branches() {
+        // Regression guard: the remediation hint is ADDED, not replacing the
+        // stderr. The user still needs to see what actually failed.
+        let stderr = "HfHubHTTPError: 401 Client Error: Unauthorized"
+        let err = PublishServiceError.cliError(code: 1, stderr: stderr)
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains(stderr),
+            "stderr must still appear in the description — remediation is appended, not substituted")
+    }
+
     @MainActor
     func test_repo_validator_still_accepts_safe_names_with_specials() {
         // Regression guard: the new rules shouldn't reject legitimate names.

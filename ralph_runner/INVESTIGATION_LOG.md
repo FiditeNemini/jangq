@@ -3886,3 +3886,57 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: apply the "remediation-command in error messages" pattern sweep across other error paths (RunStep failure messages, preflight failures, publish errors — do they all tell the user WHAT TO DO?).
 
 **Next iteration should pick:** remediation-command sweep (meta-lesson from this iter, small-scope audit pass across error surfaces), OR dead progressLog cleanup (vestigial code), OR rapid-click debounce.
+
+---
+
+## 2026-04-20 iteration 91 — M168 PublishServiceError remediation sweep (iter-90 meta-lesson applied)
+
+**Angle:** Iter-90 M167 codified the "surface remediation command, not just symptom" meta-lesson. Iter-91 applies it to the highest-stakes error surface in JANG Studio: `PublishServiceError.cliError`.
+
+**Deep trace walkthrough:**
+1. **Enumerated error paths via grep for `errorDescription` + `localizedDescription`.** Found ~15 error sites. Prioritized by user-impact:
+   - **P1 — blocks user, high-stakes:** `PublishServiceError.cliError` (fires after a 30-minute upload fails; user has no other UI to work with).
+   - **P2 — blocks user, low-stakes:** `SourceStep.detectionError` / `RunStep.[ERROR]`.
+   - **P3 — degrades but doesn't block:** Capabilities / Profiles / Recommendation errors (fall back to defaults).
+   - **P4 — informational:** save / export errors (user retries with different path).
+2. **Picked P1 for this iter.** `cliError.errorDescription` was: `"jang-tools publish exited \(c): \(stderr)"` — symptom-only. User sees "401 Client Error: Unauthorized" with no hint. They have to google "HF 401 error" after a 30-minute wait. Classic iter-90 meta-lesson violation.
+3. **Designed the remediation helper.** Three choices:
+   - (a) **Full regex-based parsing of huggingface_hub exceptions.** Too brittle — HF changes messages between versions; regexes would rot.
+   - (b) **Substring + case-insensitive detection of common error signatures.** Good balance: survives minor rewording, covers all known shapes.
+   - (c) **Exhaustive enum with every HF error code.** Overkill — we care about user-actionable differentiation, not every status code.
+   Went with (b). Added `nonisolated static func remediation(forStderr:) -> String` covering 4 common HF failure shapes + a generic fallback.
+4. **Tiered remediation design:** specific hints where we can detect (401, 403, Connection, 429), generic fallback ("verify token / check network / retry") for unknown shapes. Every failure gets AT LEAST one next-action — no user is left with "try googling." Important: the generic hint covers a new HF error shape (e.g., some future "423 Locked" that we don't pattern-match) until we add a specific case for it.
+5. **TDD flow:**
+   - Wrote 5 tests covering 401, 403, network, generic-fallback, and a regression guard that stderr must still appear in the description (remediation is APPENDED, not substituted).
+   - Ran: 4 expected failures (the 5th test — "stderr still preserved" — accidentally passed because the pre-fix branch already preserved stderr via `s.trimmingCharacters(in: .whitespacesAndNewlines)`). Red confirmed for the 4 meaningful cases.
+   - Applied fix. Reran: 31/31 AdoptionServicesTests pass. Green confirmed.
+6. **Preserved the stderr in all branches.** The remediation is APPENDED below the stderr with `\n→ ` separator, not substituted for it. User sees BOTH what failed AND what to do. Critical distinction: don't hide the symptom; augment it with the prescription.
+
+**Meta-lesson extension — tiered remediation beats per-case remediation.** Two-tier design (specific pattern-match + generic fallback) gets you:
+  - **Completeness by default:** new error shapes get some hint immediately via the fallback.
+  - **Graceful enhancement:** as you observe real-world failures in the wild, add more specific cases.
+  - **No maintenance cliff:** removing a specific case just falls back to the generic; nothing breaks.
+  Apply this pattern anywhere we're layering guidance on top of an unknown-variability error source (HF API, network stacks, user input). Avoids the "exhaustive enum that eventually drifts" maintenance pathology.
+
+**Meta-lesson — substring + case-insensitive is more robust than regex for error-message pattern-matching.** Error messages from third-party libraries tweak wording between versions (`—` vs `-`, `"` vs `'`, "Client Error" capitalization). Substring matching survives all of these; a regex that hardcodes word boundaries or punctuation doesn't. When identifying ERROR CATEGORIES (vs parsing STRUCTURED DATA), prefer substring over regex.
+
+**Items touched:**
+- M168 [x] — PublishServiceError.cliError now appends context-aware remediation hints covering 401 / 403 / Connection / rate-limit / fallback. 5 new regression tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 31 AdoptionServicesTests pass (was 26, +5). Python 351 unchanged. Ralph 73 unchanged.
+
+**Closed-status tally:** 107 (iter 90) + M168 = 108 items touched, all closed. Zero known bugs as of iter-91 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: continue remediation-sweep on P2 surfaces — `SourceStep.errorText = "Detection failed: <e>"` and `RunStep.logs.append("[ERROR] <e>")` don't have next-action guidance. These are user-blocking too; detection failure usually means bad config.json / wrong folder, which deserves a pointer to M120's error-message tree.
+- **NEW**: P3 — does CapabilitiesService's failure-to-load-JSON banner include a remediation? (It shouldn't need one — it's an internal load that falls back silently.)
+- **NEW**: PublishToHuggingFaceSheet dead progressLog cleanup.
+- **NEW**: rapid-click debouncing on "Choose Folder…".
+
+**Next iteration should pick:** continue the remediation sweep to P2 (SourceStep detection failure + RunStep convert error), OR tidy the vestigial `progressLog` state in PublishToHuggingFaceSheet.

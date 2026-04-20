@@ -892,6 +892,25 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M168 (PublishServiceError.cliError — remediation-command sweep after iter-90 M167 meta-lesson)** — Iter-90 M167 codified: "surface remediation, not just symptom." Iter-91 applies it to the highest-stakes error path in the app: `PublishServiceError.cliError`. After a 30-minute publish dispatch fails, the error banner is the user's only UI — it MUST tell them what to do next. Pre-M168 it showed raw stderr only ("jang-tools publish exited 1: HfHubHTTPError: 401 Client Error: Unauthorized"), leaving the user to google "HF 401 error" for every failure.
+      **Fix (iter 91):** added `PublishServiceError.remediation(forStderr:)` — a `nonisolated static` helper that pattern-matches common huggingface_hub stderr substrings (case-insensitive) and returns a concrete next-action string. `cliError.errorDescription` now appends the remediation below the stderr, separated by `→ `.
+      **Pattern coverage:**
+      - `401` / `Unauthorized` → "Auth failed — verify token with `huggingface-cli whoami`, or regenerate at https://huggingface.co/settings/tokens."
+      - `403` / `Forbidden` → "Permission denied — token valid but lacks write access. Check scope at settings/tokens, or confirm org admin granted write access."
+      - `Connection` / `timeout` / `Max retries` / `network is unreachable` → "Network error — check connectivity + retry. If persists, huggingface.co may be having an incident (https://status.huggingface.co)."
+      - `rate limit` / `429` / `too many requests` → "Rate limited — wait a few minutes and retry. HF imposes per-IP/per-token upload limits during peak hours."
+      - **Fallback:** "Common fixes: verify the token, check network, or retry." So EVERY failure gets at least one next-action, not just the well-known error codes.
+      **Why substring match, not regex:** HF error messages evolve slightly over versions. Substring + case-insensitive survives minor tweaks without needing exactly-matched regexes that break on dash vs em-dash, quote styles, etc.
+      **Tests (+5) in AdoptionServicesTests.swift:**
+      - `test_publish_cliError_401_suggests_token_check` — verifies 401 stderr produces a token-aware hint citing the HF settings URL.
+      - `test_publish_cliError_403_suggests_permission_check` — 403 → permission / write-access hint.
+      - `test_publish_cliError_network_suggests_retry` — Connection/timeout → network + retry hint.
+      - `test_publish_cliError_generic_falls_back_to_generic_hint` — unknown stderr → still gets token/network/retry suggestion.
+      - `test_publish_cliError_preserves_stderr_in_all_branches` — regression guard: remediation is APPENDED, stderr is preserved. User can still see what actually failed AND what to do.
+      TDD red (4 failures on the hint-specific assertions) → green after fix.
+      **Evidence:** `JANGStudio/JANGStudio/Runner/PublishService.swift:125-175`. 31 AdoptionServicesTests pass (was 26, +5). Python 351 unchanged. Ralph 73 unchanged.
+      **Meta-lesson extension — tiered remediation beats per-case remediation.** Rather than requiring an exhaustive case list (which would miss new HF error shapes), tier 1 is pattern-matched specific hints + tier 2 is a generic fallback. Every user gets AT LEAST one next-action; well-known shapes get more targeted guidance. Apply this pattern to future diagnostic layers: always include a fallback hint so coverage is complete even before the specific cases land.
+      **Commit:** (this iteration)
 - [x] **M167 (Broken-symlink in HF cache — cryptic traceback → actionable diagnostic)** — Iter-89 M166's symlink audit flagged the broken-symlink case as a UX gap. A `git gc`-style prune on the HF cache (or a disk-failure mid-download via `huggingface-cli download`) leaves snapshot-dir symlinks pointing at missing blobs. Pre-M167, `_total_bytes` ran `f.stat()` on a dangling symlink and raised a bare FileNotFoundError — user saw a cryptic multi-line Python traceback with the temp path in it, no hint that the fix is `huggingface-cli download <model>` or clearing the HF cache.
       **Fix (iter 90):** added `_find_broken_shard(model_path) -> Path | None` that iterates `glob("*.safetensors")` and checks `.exists()` (returns False for dangling symlinks). `cmd_inspect_source` calls it after config.json validation; if any shard is broken, emit an actionable error citing:
       - The broken shard filename.
