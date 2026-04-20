@@ -4048,3 +4048,58 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: update feedback_sheet_dismiss_cancel.md (if exists) or add a new memory for the generalized rule.
 
 **Next iteration should pick:** `.onAppear Task` sweep across wizard views (extends iter-93's finding to find any other M170-class issues), OR the long-deferred progressLog cleanup.
+
+---
+
+## 2026-04-20 iteration 94 — M171 SourceStep + dryRun `.onDisappear` cancel sweep (iter-93 M170 generalized rule executed)
+
+**Angle:** Iter-93 M170 codified the generalized rule: "ANY SwiftUI view that spawns a detached Task needs `.onDisappear` cancel wiring, regardless of sheet/window/main status." Iter-94 executes the sweep.
+
+**Deep trace walkthrough:**
+1. **Inventoried all Task-spawn sites** across `JANGStudio/Wizard/`:
+   - 11 `.onAppear` / `.task {` / `Task {` hits triaged.
+   - VerifyStep `.task { await refresh() }` — auto-cancels on dismount ✓.
+   - GenerateModelCardSheet `.task { await generate() }` + retry-button (iter-86 M163) ✓.
+   - UsageExamplesSheet `.task { await fetchGroup }` + retry-button (iter-86 M163) ✓.
+   - TestInferenceSheet `.onSubmit` / Send-button / Cancel-button + iter-85 M162 `.onDisappear { Task { await vm.cancel() } }` ✓.
+   - SettingsWindow `.task { await observeAndPersist }` — auto-cancels ✓.
+   - WizardCoordinator `.task { applyDefaults }` — short idempotent one-shot ✓.
+   - RunStep — iter-93 M170 fixed ✓.
+   - PublishToHuggingFaceSheet `publishTask` (iter-85 M162) ✓ but `dryRunTask` **missing**.
+   - SourceStep `detectionTask` iter-57 M135 cancels on new-pick, iter-84 M161 guards orphan writes, but no `.onDisappear` cancel — **missing**.
+   - Drop callbacks / Cancel-button hops — trivially fast, no subprocess, ignore.
+2. **Classified each gap:**
+   - **SourceStep gap:** iter-57 + iter-84 handled the STATE-CORRUPTION scenarios (concurrent picks, orphan writes) but not subprocess teardown. Gap between "state safe" and "subprocess torn down." Impact: Python inspect-source runs for its full ~5-second completion after the user has moved on, wasting CPU. Low-severity per-instance but violates the iter-93 uniform rule.
+   - **PublishSheet dryRun gap:** iter-85 M162 was framed around `publishTask` specifically. The Preview button's `runDryRun` Task was missed — different code path, different handle, same class of bug. User clicks Preview, realizes they need to change something, dismisses → dry-run subprocess orphans for ~seconds. Low-severity matches iter-86 M163's read-only-retry class.
+3. **Fix shape matches iter-85/86/93's `.onDisappear { handle?.cancel() }` template:**
+   - SourceStep: single-line `.onDisappear { detectionTask?.cancel() }` added after `.padding()`.
+   - PublishSheet: new `@State dryRunTask`, Preview button assigns into it (canceling previous handle for rapid-click safety), existing `.onDisappear` block extended to also cancel dryRunTask.
+4. **Tests pin both:** matches iter-85/86/93's source-inspection pattern. No integration test because driving SwiftUI view destruction from XCTest needs XCUITest; the pins guarantee the hooks are present.
+5. **Ran full regression:** WizardStepContinueGateTests 29/29 (+2), AdoptionServicesTests 31, PythonCLIInvokerTests 9 — all green.
+
+**Meta-lesson — generalized rules pay compound interest.** Iter-93 M170 invested in defining the uniform "every view with a Task needs .onDisappear cancel" rule. Iter-94 execution: 1 grep + 2 fixes + 2 tests in ~15 minutes. Without the iter-93 generalization, each gap would have been a separate iter with its own discovery + fix cost. The generalization saves 2-3 iter-lengths of investigation time per sweep, and compounds as more M170-class audits surface in future codebases.
+
+**Meta-lesson — "inventory before fix" prevents partial closure.** Fixing SourceStep first and stopping would have left PublishSheet dryRun as a future iter's work. The explicit inventory step (grep all Task-spawns, triage each, scope the fix to the real gaps) closes the whole sweep in one iter. Rule for future sweeps: always list ALL the call sites first, triage each, THEN fix — don't fix incrementally.
+
+**Meta-lesson — lifecycle cancel is belt-and-suspenders with content-match guards.** SourceStep now has THREE protections: (a) iter-57 M135 cancels on new-pickFolder, (b) iter-84 M161 URL-match guards orphan writes, (c) iter-94 M171 cancels on view unmount. Each handles a different attack vector; together they cover the full race space. This is intentional layering, not redundancy.
+
+**Items touched:**
+- M171 [x] — SourceStep `.onDisappear { detectionTask?.cancel() }`. PublishSheet dryRunTask @State + tracking + cancel in existing .onDisappear. Uniform lifecycle-cancel rule now holds for all 11 Task-spawn sites in the wizard.
+
+**Commit:** (this iteration)
+
+**Verification:** 29 WizardStepContinueGateTests pass (was 27, +2). 31 AdoptionServices + 9 PythonCLIInvoker unchanged. Python 351 unchanged.
+
+**Closed-status tally:** 110 (iter 93) + M171 = 111 items touched, all closed. Zero known bugs as of iter-94 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: codify the "every view with Task needs onDisappear cancel" rule as a memory note so it survives across sessions (like iter-83's pipe-drain pattern and iter-92's remediation pattern).
+- **NEW**: PublishToHuggingFaceSheet dead `progressLog` cleanup.
+- **NEW**: rapid-click debouncing on "Choose Folder…".
+- **NEW**: audit the Settings panel for similar Task-spawn patterns (observeAndPersist appears correct but check any other async operations there).
+
+**Next iteration should pick:** save the view-lifecycle-cancel memory note (1-2 min investment, saves future-me future iters), then pivot to the dead progressLog cleanup or a fresh audit angle.

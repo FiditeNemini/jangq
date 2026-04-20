@@ -27,6 +27,13 @@ struct PublishToHuggingFaceSheet: View {
     // Cancel can tear down the subprocess via continuation.onTermination.
     @State private var publishTask: Task<Void, Never>? = nil
     @State private var wasCancelled: Bool = false
+    // M171 (iter 94): handle for the Preview button's dry-run Task. Pre-M171
+    // the button did `Task { await runDryRun() }` fire-and-forget, so a
+    // user who clicked Preview then dismissed the sheet left a ~few-second
+    // Python subprocess orphaned. iter-85 M162's .onDisappear only cancels
+    // publishTask; this closes the matching gap for dryRun. Same class as
+    // iter-86 M163 (retry-task consistency fix for read-only sheets).
+    @State private var dryRunTask: Task<Void, Never>? = nil
 
     init(modelPath: URL, defaultRepoName: String = "") {
         self.modelPath = modelPath
@@ -75,6 +82,10 @@ struct PublishToHuggingFaceSheet: View {
             // via the iter-30 M96 wiring — SIGTERM + 3 s SIGKILL
             // escalation. Partial-repo cleanup is still M97 (deferred).
             publishTask?.cancel()
+            // M171 (iter 94): also cancel dry-run. Closes the sibling
+            // orphan gap iter-85 M162 missed (Preview button spawned a
+            // handle-less Task).
+            dryRunTask?.cancel()
         }
     }
 
@@ -205,7 +216,8 @@ struct PublishToHuggingFaceSheet: View {
         HStack {
             Spacer()
             Button {
-                Task { await runDryRun() }
+                dryRunTask?.cancel()
+                dryRunTask = Task { await runDryRun() }
             } label: {
                 if isDryRunning {
                     ProgressView().controlSize(.small)

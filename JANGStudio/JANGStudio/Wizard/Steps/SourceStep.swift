@@ -187,6 +187,20 @@ struct SourceStep: View {
         }
         .formStyle(.grouped)
         .padding()
+        .onDisappear {
+            // M171 (iter 94): cancel the detection Task when SourceStep
+            // unmounts. SwiftUI fires .onDisappear on sidebar-jump, window
+            // close, and app quit (cmd-Q). Pre-M171 the Python inspect-
+            // source subprocess would keep running for a few seconds after
+            // the user moved away. iter-57 M135's cancel-on-new-pickFolder
+            // handles the concurrent-pick case within a live SourceStep
+            // instance; iter-84 M161's URL-match guard handles orphan
+            // state-corruption; this hook closes the last gap (subprocess
+            // teardown on view destruction). Cancel propagates through
+            // iter-34 M105's SourceDetector + iter-76 M153's PythonCLIInvoker
+            // withTaskCancellationHandler → SIGTERM subprocess.
+            detectionTask?.cancel()
+        }
     }
 
     private func pickFolder() {

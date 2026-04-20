@@ -221,6 +221,40 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M171 (iter 94): .onAppear-Task sweep — SourceStep + dryRun gaps
+
+    func test_sourceStep_cancels_detectionTask_onDisappear() throws {
+        let src = try stepSource("SourceStep.swift")
+        // Must have .onDisappear { detectionTask?.cancel() } so sidebar-jump
+        // or window-close during detection tears down the Python subprocess
+        // promptly. iter-57 M135 handled concurrent picks; iter-84 M161
+        // handled orphan state-corruption; M171 closes the subprocess-
+        // teardown gap.
+        XCTAssertTrue(
+            src.contains(".onDisappear") && src.contains("detectionTask?.cancel()"),
+            "SourceStep must wire `.onDisappear { detectionTask?.cancel() }` for subprocess teardown on view unmount"
+        )
+    }
+
+    func test_publishSheet_cancels_dryRunTask_onDisappear() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard")
+        let src = try String(contentsOf: dir.appendingPathComponent("PublishToHuggingFaceSheet.swift"), encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("dryRunTask"),
+            "PublishToHuggingFaceSheet must track the Preview-button Task handle (M171)"
+        )
+        XCTAssertTrue(
+            src.contains("dryRunTask?.cancel()"),
+            "PublishToHuggingFaceSheet's .onDisappear must cancel dryRunTask so Preview orphans get torn down"
+        )
+        XCTAssertTrue(
+            src.contains("dryRunTask = Task { await runDryRun() }"),
+            "Preview button must assign the Task to dryRunTask instead of discarding it"
+        )
+    }
+
     // MARK: - M170 (iter 93): RunStep main-window orphan subprocess on quit/close
 
     func test_runStep_cancels_runTask_onDisappear() throws {
