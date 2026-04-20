@@ -4,14 +4,63 @@ struct PublishResult: Codable, Equatable {
     let dryRun: Bool
     let repo: String
     let url: String?
+    /// URL of the specific commit created by this upload, e.g.
+    /// `https://huggingface.co/foo/bar/commit/abc123`. Present only on successful
+    /// non-dry-run publishes. Decoded in iter 7 to close M44 — the commit link
+    /// was being emitted by Python but silently dropped on the Swift side, so
+    /// the UI only showed the repo URL and the user had no confirmation their
+    /// upload landed until they manually navigated there.
+    let commitUrl: String?
     let filesCount: Int?
     let totalSizeBytes: Int?
 
     enum CodingKeys: String, CodingKey {
         case dryRun = "dry_run"
         case repo, url
+        case commitUrl = "commit_url"
         case filesCount = "files_count"
         case totalSizeBytes = "total_size_bytes"
+    }
+}
+
+/// Validate an HF-style `org/name` repo identifier before we dispatch a 30-minute
+/// upload. HF requires the slash, disallows spaces, and enforces a char class.
+/// Returns a user-facing error string if invalid, nil if valid.
+///
+/// Rule summary (from huggingface_hub validation):
+/// - Must match `<org>/<name>`
+/// - org and name each start with alphanumeric
+/// - subsequent chars: alphanumeric, `_`, `.`, `-`
+/// - each segment max 96 chars
+/// - no spaces, no double-slash
+@MainActor
+enum HFRepoValidator {
+    static func validationError(_ repo: String) -> String? {
+        let trimmed = repo.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "Repo id is empty."
+        }
+        if trimmed.contains(" ") {
+            return "Repo id cannot contain spaces."
+        }
+        let parts = trimmed.split(separator: "/", omittingEmptySubsequences: false)
+        if parts.count != 2 {
+            return "Repo id must be in the format 'org/model-name' (one forward slash)."
+        }
+        let org = String(parts[0])
+        let name = String(parts[1])
+        if org.isEmpty || name.isEmpty {
+            return "Repo id must have both org and name: 'org/model-name'."
+        }
+        let segmentRegex = try? NSRegularExpression(
+            pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$", options: [])
+        for (label, segment) in [("org", org), ("name", name)] {
+            let range = NSRange(segment.startIndex..<segment.endIndex, in: segment)
+            if segmentRegex?.firstMatch(in: segment, options: [], range: range) == nil {
+                return "Invalid \(label) segment '\(segment)': start with a letter/digit, then letters/digits/._- up to 96 chars."
+            }
+        }
+        return nil
     }
 }
 

@@ -175,3 +175,35 @@ Each entry records ONE deep trace. Created by iterations under the new Ralph pro
 **New questions added:** 6 (M42-M47). Net +5 open items after closing M41.
 
 **Next iteration should pick:** Continue Category A (more adopter-journey surface area): model card generation for every supported arch (M45), OR the commit_url/progress gap (M43/M44) which together are the "this took 30 minutes and I have no idea what happened" UX failure. Alternatively rotate to Category K (Ralph runner on macstudio — untouched) since we're now 6 iterations deep and have never looked at the test harness that's supposed to be proving the app works.
+
+---
+
+## 2026-04-19 iteration 7 — publish UX completeness (Category A continued)
+
+**Angle:** Same adopter scenario as iter 6, but now the validation layer and the post-upload confirmation layer. Even with the security fix from iter 6, a user who fat-fingers their repo name still burns 30+ seconds on a bad auth probe before HF returns a cryptic error, and a user who successfully uploads still can't see the commit they just made without navigating manually.
+
+**Deep trace walkthrough:**
+1. Re-read `PublishToHuggingFaceSheet.swift` end-to-end after the iter-6 security fix landed.
+2. **BUG M46 CONFIRMED:** footer buttons disable only when `repoName.isEmpty || token.isEmpty`. Any non-empty string passes the gate. `runDryRun` / `runPublish` dispatch directly to `PublishService` → `huggingface_hub.create_repo(repo_id=args.repo, ...)`. `create_repo` raises `huggingface_hub.errors.InvalidRepoIdError` for bad ids, but that comes back through `PublishServiceError.cliError` 30+ seconds into the attempt (after the token roundtrip). User sees a giant Python traceback in a red pill with no actionable hint.
+3. **BUG M44 CONFIRMED:** `publish.py:71-76` emits `commit_url` in the result JSON. Swift `PublishResult` struct has no `CodingKeys` entry for it. JSONDecoder silently drops unknown keys (default policy) → the commit URL is gone by the time UI renders. Sheet only shows the repo URL, which is NOT proof the upload landed (repo might already exist, commit might have failed mid-flight). Users can't tell if their 30-minute upload actually wrote anything.
+4. **Fix M46:** Added `HFRepoValidator.validationError(_:)` in `PublishService.swift` (MainActor enum, Swift-side only — no subprocess overhead). Rules implemented from the HF docs: single `/`, both segments match `^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$`, reject spaces, reject empty segments, trim whitespace before checking. Returns user-facing strings like `"Invalid org segment 'bad-org': start with a letter/digit, then letters/digits/._- up to 96 chars."`. Hooked into both `runDryRun` and `runPublish` so no path skips validation.
+5. **Fix M44:** Added `commitUrl: String?` to `PublishResult` with `commit_url` JSON mapping (optional because dry-runs don't set it). Rendered as a second row in the "Published" section with its own Open button, guarded by `commit != url` so we don't double-display when HF happens to return identical values.
+6. **Tests:** 10 new Swift test cases in `AdoptionServicesTests`:
+   - 2 decode tests: `test_publish_result_decodes_commit_url` (full shape), `test_publish_result_commit_url_optional` (dry-run absence).
+   - 8 validator tests: canonical accept, empty, no-slash, spaces, double-slash + triple-segment, leading-special, overlength, whitespace-trim.
+7. **Verification:** 75/75 Swift tests pass (up from 65). Python side untouched this iter; 227 tests still green.
+
+**Items touched:**
+- M44 [x] — commit URL now decoded + rendered; user can click through to verify upload
+- M46 [x] — repo id validated pre-flight with actionable error messages
+- M48-M51 [ ] — 4 new publish-UX questions spawned:
+  - M48: default repoName is ALWAYS invalid (missing org prefix) — validator now blocks it
+  - M49: stale HF_HUB_TOKEN env var on long-running app
+  - M50: SecureField Keychain AutoFill interaction
+  - M51: private-repo commit URL opens to login page (confusing)
+
+**Commit:** (this iteration)
+
+**New questions added:** 4 (M48-M51). Net +2 open items after closing M44 + M46.
+
+**Closed-status tally:** M01, M12, M13, M14, M19, M29, M35, M41, M44, M46 = 10 closed / 51 total = 20% closure rate. Cat A (adopter) has gotten significant attention (M41/M44/M46/M47-M51 chain); next rotation should go to Cat K (Ralph runner on macstudio) which is STILL untouched, or an unexplored M-spawned question cluster. Alternative: Cat B data flow for `settings → UserDefaults → subprocess env` path (only did tokenizer lifecycle in iter 4).

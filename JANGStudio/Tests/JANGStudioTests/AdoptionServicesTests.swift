@@ -55,4 +55,77 @@ final class AdoptionServicesTests: XCTestCase {
             XCTFail("wrong error type \(error)")
         }
     }
+
+    // MARK: - Iter 7: M44 commit_url decode + M46 repo-name validation
+
+    func test_publish_result_decodes_commit_url() throws {
+        let json = #"""
+        {"dry_run":false,"repo":"dealignai/MyModel-JANG_4K","url":"https://huggingface.co/dealignai/MyModel-JANG_4K","commit_url":"https://huggingface.co/dealignai/MyModel-JANG_4K/commit/abc123"}
+        """#
+        let r = try JSONDecoder().decode(PublishResult.self, from: Data(json.utf8))
+        XCTAssertFalse(r.dryRun)
+        XCTAssertEqual(r.url, "https://huggingface.co/dealignai/MyModel-JANG_4K")
+        XCTAssertEqual(r.commitUrl, "https://huggingface.co/dealignai/MyModel-JANG_4K/commit/abc123")
+    }
+
+    func test_publish_result_commit_url_optional() throws {
+        // Dry-run responses don't carry a commit_url — make sure decoder tolerates absence.
+        let json = #"{"dry_run":true,"repo":"my/m","files_count":3,"total_size_bytes":100}"#
+        let r = try JSONDecoder().decode(PublishResult.self, from: Data(json.utf8))
+        XCTAssertNil(r.commitUrl)
+    }
+
+    @MainActor
+    func test_repo_validator_accepts_canonical() {
+        XCTAssertNil(HFRepoValidator.validationError("dealignai/MyModel-JANG_4K"))
+        XCTAssertNil(HFRepoValidator.validationError("a/b"))
+        XCTAssertNil(HFRepoValidator.validationError("org_name/model.v2"))
+        XCTAssertNil(HFRepoValidator.validationError("org-name/model-name"))
+    }
+
+    @MainActor
+    func test_repo_validator_rejects_empty() {
+        XCTAssertNotNil(HFRepoValidator.validationError(""))
+        XCTAssertNotNil(HFRepoValidator.validationError("   "))
+    }
+
+    @MainActor
+    func test_repo_validator_rejects_no_slash() {
+        let err = HFRepoValidator.validationError("justname")
+        XCTAssertNotNil(err)
+        XCTAssertTrue(err!.contains("org/model-name"), "got: \(err ?? "nil")")
+    }
+
+    @MainActor
+    func test_repo_validator_rejects_spaces() {
+        let err = HFRepoValidator.validationError("my org/my model")
+        XCTAssertNotNil(err)
+        XCTAssertTrue(err!.contains("spaces"), "got: \(err ?? "nil")")
+    }
+
+    @MainActor
+    func test_repo_validator_rejects_double_slash() {
+        XCTAssertNotNil(HFRepoValidator.validationError("org//name"))
+        XCTAssertNotNil(HFRepoValidator.validationError("org/name/extra"))
+    }
+
+    @MainActor
+    func test_repo_validator_rejects_leading_special_char() {
+        // Segments must START with a letter or digit (no leading `-`, `.`, `_`).
+        XCTAssertNotNil(HFRepoValidator.validationError("-badorg/model"))
+        XCTAssertNotNil(HFRepoValidator.validationError("org/-badname"))
+        XCTAssertNotNil(HFRepoValidator.validationError(".dotfile/model"))
+    }
+
+    @MainActor
+    func test_repo_validator_rejects_segment_overlength() {
+        // Max 96 chars per segment (HF enforced). 97 `a`s should fail.
+        let longOrg = String(repeating: "a", count: 97)
+        XCTAssertNotNil(HFRepoValidator.validationError("\(longOrg)/model"))
+    }
+
+    @MainActor
+    func test_repo_validator_trims_whitespace() {
+        XCTAssertNil(HFRepoValidator.validationError("  dealignai/MyModel  "))
+    }
 }

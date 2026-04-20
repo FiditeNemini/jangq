@@ -78,11 +78,25 @@ struct PublishToHuggingFaceSheet: View {
             }
             if let r = publishResult, let url = r.url {
                 Section("Published") {
-                    LabeledContent("URL") {
+                    LabeledContent("Repo URL") {
                         HStack {
                             Text(url).font(.caption).textSelection(.enabled)
                             Button("Open") {
                                 if let u = URL(string: url) { NSWorkspace.shared.open(u) }
+                            }
+                        }
+                    }
+                    // M44: show the commit URL the upload actually produced.
+                    // This is the immediate confirmation that the upload landed
+                    // — just showing the repo URL doesn't prove the commit
+                    // went through (it could point at an existing older commit).
+                    if let commit = r.commitUrl, !commit.isEmpty, commit != url {
+                        LabeledContent("Commit") {
+                            HStack {
+                                Text(commit).font(.caption).textSelection(.enabled)
+                                Button("Open") {
+                                    if let u = URL(string: commit) { NSWorkspace.shared.open(u) }
+                                }
                             }
                         }
                     }
@@ -130,6 +144,13 @@ struct PublishToHuggingFaceSheet: View {
     }
 
     private func runDryRun() async {
+        // M46: validate the repo id BEFORE dispatching — otherwise a typo
+        // like "my model" (space) or "justname" (no slash) only surfaces
+        // as a cryptic HfHubHTTPError ~30 seconds into the upload.
+        if let validationMsg = HFRepoValidator.validationError(repoName) {
+            errorMessage = validationMsg
+            return
+        }
         isDryRunning = true
         errorMessage = nil
         publishResult = nil
@@ -143,6 +164,10 @@ struct PublishToHuggingFaceSheet: View {
     }
 
     private func runPublish() async {
+        if let validationMsg = HFRepoValidator.validationError(repoName) {
+            errorMessage = validationMsg
+            return
+        }
         isPublishing = true
         errorMessage = nil
         do {
