@@ -281,6 +281,9 @@ def main():
     from .capabilities_cli import register as _register_capabilities
     _register_capabilities(subparsers)
 
+    from .estimate_model import register as _register_estimate_model
+    _register_estimate_model(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
