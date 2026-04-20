@@ -55,8 +55,8 @@ def load_tokenizer(model_dir: Path):
 
 
 def _load_llm(model_dir: Path):
-    from jang_tools.loader import load_model
-    return load_model(str(model_dir))
+    from jang_tools.loader import load_jang_model
+    return load_jang_model(str(model_dir))
 
 
 def _load_vlm(model_dir: Path):

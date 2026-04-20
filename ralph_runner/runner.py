@@ -167,6 +167,7 @@ def run_audits_remote(output_path: str, convert_wall_s: float) -> dict[str, Any]
     sync_tree(str(JANG_REPO_ROOT / "ralph_runner"), "jang/ralph_runner")
     cmd = (
         f"cd {REMOTE_WORKSPACE}/jang && "
+        f"PYTHONPATH=jang-tools:ralph_runner "
         f"python3 -m ralph_runner.audit "
         f"--model {output_path} "
         f"--convert-wall-s {convert_wall_s:.3f} "

@@ -30,8 +30,8 @@ def _resolve_resource_mb() -> float:
 
 def _load_llm(model_dir: Path):
     """Load a dense/MoE LLM via jang_tools.loader. Returns (model, tokenizer)."""
-    from jang_tools.loader import load_model
-    return load_model(str(model_dir))
+    from jang_tools.loader import load_jang_model
+    return load_jang_model(str(model_dir))
 
 
 def _load_vlm(model_dir: Path):
