@@ -18,11 +18,14 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
-from ruamel.yaml import YAML
+# ruamel.yaml is a runtime-only dependency used by activate_tier. Import it
+# lazily inside _yaml() so unit tests of pure state logic (recover_interrupted,
+# _assert_safe_repo_id) don't need the package installed in the test env.
 
 from .remote import REMOTE_HOST, REMOTE_WORKSPACE, remote_ok, remote_free_gb, run_remote, sync_tree
 
@@ -32,7 +35,10 @@ RESULTS_DIR = ROOT / "results"
 JANG_REPO_ROOT = ROOT.parent   # /Users/eric/jang
 
 
-def _yaml() -> YAML:
+def _yaml():
+    # Lazy import — only activate_tier() needs ruamel.yaml; pure state tests
+    # can exercise the rest of the module without the dependency installed.
+    from ruamel.yaml import YAML
     return YAML(typ="safe")
 
 
@@ -45,6 +51,46 @@ def load_state() -> dict[str, Any]:
 def save_state(state: dict[str, Any]) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, indent=2))
+
+
+def recover_interrupted(state: dict[str, Any]) -> int:
+    """Flip any `running` combos back to `pending`.
+
+    Called at the start of each `--next` invocation. Ralph is a single-worker
+    system (state.json is the single source of truth), so any combo stuck in
+    `running` when we start up is the leftover of a previous crash / SIGKILL /
+    `ctrl-C` mid-convert. Without this recovery step those combos would be
+    skipped forever by `pick_next` (which only selects `pending`).
+
+    Returns: count of combos recovered (for logging / assertion in tests).
+    """
+    count = 0
+    for s, info in state.get("combos", {}).items():
+        if info.get("status") == "running":
+            info["status"] = "pending"
+            info["recovered_from_interrupt"] = info.get("started", "")
+            info.pop("started", None)
+            count += 1
+    return count
+
+
+# Accept HF repo ids matching `org/name` with the same segment rules the Swift
+# side enforces in HFRepoValidator (`feedback_jang_studio_audit_coverage.md`).
+# Validates before splicing into shell strings — shuts the door on M52
+# (command injection via models.yaml if that file were ever populated from
+# an untrusted source).
+_HF_REPO_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+)
+
+
+def _assert_safe_repo_id(hf_repo: str) -> None:
+    if not _HF_REPO_PATTERN.match(hf_repo):
+        raise ValueError(
+            f"Unsafe HF repo id {hf_repo!r}: must match "
+            r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+            " (rejected before shell splicing — see M52 in ralph audit)."
+        )
 
 
 def slug(model_repo_or_path: str, profile: str) -> str:
@@ -98,6 +144,11 @@ def pick_next(state: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
 
 def ensure_source_model(hf_repo: str) -> str:
     """Ensure model is cached on macstudio. Returns the snapshot path."""
+    # M52 defence: validate before splicing into a shell-evaluated Python
+    # one-liner. A trusted `models.yaml` is the only source today, but a bad
+    # entry (or a future path that reads from elsewhere) would otherwise
+    # execute arbitrary code on macstudio via SSH.
+    _assert_safe_repo_id(hf_repo)
     cmd = (
         "python3 -c 'from huggingface_hub import snapshot_download; "
         f"print(snapshot_download(repo_id=\"{hf_repo}\"))'"
@@ -203,6 +254,11 @@ def cmd_next() -> int:
         print("BLOCKED: macstudio not reachable via SSH")
         return 0
     state = load_state()
+    # M54: recover anything stuck in `running` from a previous crash / ctrl-C.
+    recovered = recover_interrupted(state)
+    if recovered:
+        print(f"[ralph] recovered {recovered} interrupted combo(s) → pending")
+        save_state(state)
     picked = pick_next(state)
     if picked is None:
         return cmd_status()
@@ -263,8 +319,16 @@ def cmd_next() -> int:
         info["stderr_tail"] = result["stderr_tail"][-500:]
         save_state(state)
         print(f"COMBO {s} FAILED: convert exit {result['returncode']}")
-    # cleanup output to free disk
-    run_remote(f"rm -rf {result['output_path']}")
+    # M53: only cleanup on green. Failed runs leave the output dir intact so
+    # the human can ssh in and inspect — otherwise debugging an audit failure
+    # requires re-running the whole convert (hours for 200 GB models).
+    # Also record the retained path so the UI / caller knows where to look.
+    if info.get("status") == "green":
+        run_remote(f"rm -rf {result['output_path']}")
+    else:
+        info["retained_output_path"] = result["output_path"]
+        save_state(state)
+        print(f"[ralph] retained failed output at macstudio:{result['output_path']} for post-mortem")
     return 0
 
 

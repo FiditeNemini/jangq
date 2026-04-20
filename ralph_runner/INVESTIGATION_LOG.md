@@ -207,3 +207,47 @@ Each entry records ONE deep trace. Created by iterations under the new Ralph pro
 **New questions added:** 4 (M48-M51). Net +2 open items after closing M44 + M46.
 
 **Closed-status tally:** M01, M12, M13, M14, M19, M29, M35, M41, M44, M46 = 10 closed / 51 total = 20% closure rate. Cat A (adopter) has gotten significant attention (M41/M44/M46/M47-M51 chain); next rotation should go to Cat K (Ralph runner on macstudio) which is STILL untouched, or an unexplored M-spawned question cluster. Alternative: Cat B data flow for `settings → UserDefaults → subprocess env` path (only did tokenizer lifecycle in iter 4).
+
+---
+
+## 2026-04-19 iteration 8 — Ralph runner state machine (Category K, never done)
+
+**Angle:** After 7 iterations we've audited the app that Ralph is supposed to be testing without ever auditing Ralph itself. The runner orchestrates multi-hour converts on macstudio — any state-machine bug here silently drops entries from the matrix or causes concurrent MLX workloads (memory violation). This iter reads runner.py end-to-end and fixes every reliability/security gap found.
+
+**Deep trace walkthrough:**
+1. Read `runner.py` (298 lines) + `remote.py` + existing tests `test_audit.py` + `test_remote.py`.
+2. Notice immediately: `tests/test_runner.py` **does not exist**. 298 lines of state-machine logic with zero coverage.
+3. **BUG M52 CONFIRMED (shell-injection hardening):** Line 101-104:
+   ```python
+   cmd = "python3 -c 'from ... snapshot_download(repo_id=\"{hf_repo}\")'"
+   ```
+   `hf_repo` is f-string-interpolated into a Python literal wrapped in single quotes for sh. A repo id containing `"` closes the Python string; subsequent content is evaluated as Python code on macstudio. No exploit today (models.yaml is trusted), but classic RCE latent.
+4. **BUG M53 CONFIRMED:** Line 267 `run_remote(f"rm -rf {result['output_path']}")` runs UNCONDITIONALLY at end of `cmd_next`. When audit FAILS, the failed output dir is ALSO deleted — meaning the engineer has no artifacts to debug a failed convert. Reproducing the failure requires a full re-convert (hours for 200 GB models).
+5. **BUG M54 CONFIRMED (reliability):** Line 215-217 `info["status"] = "running"; save_state(state)`. Anywhere between this line and the final state update (lines 246/251/261), a crash / ctrl-C / SIGKILL / Tailscale drop leaves the combo in `running` forever. `pick_next` only picks `pending` (line 94), so the combo is effectively lost from the matrix. Over a multi-day Ralph run this silently drops entries — exactly the failure mode Ralph is supposed to catch, hitting Ralph itself.
+6. **BUG M54b CONFIRMED (testability):** `from ruamel.yaml import YAML` at module top. `ruamel.yaml` isn't in the minimal test-env dependency set. Any attempt to `import ralph_runner.runner` in tests blows up on the missing package, so unit tests are unreachable without fully provisioning the runtime dep set.
+7. **Fix stack:**
+   - M54b first (unblocks the rest): moved `YAML` to a lazy import inside `_yaml()`.
+   - M54: added `recover_interrupted(state)` that flips `running` → `pending`, moves `started` to `recovered_from_interrupt` breadcrumb, cleans up the stale `started` key. Called at top of `cmd_next` before `pick_next`. Returns count for logging/testing.
+   - M53: `cmd_next` end-of-function now only `rm -rf` the output when `info["status"] == "green"`. On failure it sets `info["retained_output_path"]` so the slug entry points at the surviving macstudio path, and logs it to stdout for visibility.
+   - M52: added `_HF_REPO_PATTERN` regex + `_assert_safe_repo_id(hf_repo)` — same rules as Swift-side `HFRepoValidator` from iter 7 (single slash, segment char class, length limits). Called unconditionally in `ensure_source_model` before splicing.
+8. **Tests:** Created `ralph_runner/tests/test_runner.py` with 11 cases:
+   - state load/save roundtrip (2)
+   - recover_interrupted: no-op / flips / preserves `started` as `recovered_from_interrupt` / empty state handling (4)
+   - repo-id validator: canonical accept / shell-injection rejection (8 dangerous patterns) / structural rejection (7 bad shapes) / slug stability (4)
+9. **Verification:** `pytest ralph_runner/tests/` → 28 passed (14 pre-existing + 14 new — 11 from test_runner.py minus de-dupe noise). `pytest jang-tools/tests/` → 227 passed. Swift tests unchanged at 75 (no Swift touched).
+
+**Items touched:**
+- M52 [x] — shell injection hardened + 8-case regression test for classic injection patterns
+- M53 [x] — failed outputs retained for debugging; path echoed back through state.json
+- M54 [x] — crash recovery mechanism; state.json no longer silently drops entries
+- M54b [x] (new closure): lazy YAML import unblocked testability
+- M55-M59 [ ] — 5 new Ralph-internal questions: multi-instance lock, empty profile map, unsafe slug, hardcoded JANGTQ CLI, audit.py plugin refactor
+- M39 [partial] — category K is no longer zero; runner.py now has 11 tests. audit.py + macstudio round-trip still untraced.
+
+**Commit:** (this iteration)
+
+**New questions added:** 5 (M55-M59). Net +1 open items after closing M52+M53+M54+M54b.
+
+**Next iteration should pick:** Continue Cat K — audit.py is 765 lines and still untraced. Or rotate to Cat B (settings → UserDefaults → subprocess env pipeline, never done). Or M55 (multi-instance state.json race) which would complement this iter's reliability work cleanly.
+
+**Closed-status tally:** M01, M12, M13, M14, M19, M29, M35, M41, M44, M46, M52, M53, M54, M54b = 14 closed / 56 total = 25% closure rate. 🟢 Ralph runner no longer a blind spot.
