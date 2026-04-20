@@ -184,7 +184,12 @@ struct RunStep: View {
         } catch {
             await MainActor.run {
                 coord.plan.run = .failed
-                logs.append("[ERROR] \(error)")
+                // M169 (iter 92): use localizedDescription so the log shows
+                // the tiered remediation (exit code + stderr + actionable
+                // next-step) instead of the raw `ProcessError(code:…, stderr:…)`
+                // struct print. For non-ProcessError types, localizedDescription
+                // falls back to the platform default — still better than `\(error)`.
+                logs.append("[ERROR] \(error.localizedDescription)")
             }
         }
     }

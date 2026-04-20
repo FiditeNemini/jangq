@@ -3940,3 +3940,55 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: rapid-click debouncing on "Choose Folder…".
 
 **Next iteration should pick:** continue the remediation sweep to P2 (SourceStep detection failure + RunStep convert error), OR tidy the vestigial `progressLog` state in PublishToHuggingFaceSheet.
+
+---
+
+## 2026-04-20 iteration 92 — M169 ProcessError remediation (iter-90/91 sweep continued to P2)
+
+**Angle:** Iter-91 M168 closed the P1 error surface (PublishServiceError). Iter-92 continues to P2: ProcessError thrown from PythonRunner when the convert subprocess fails.
+
+**Deep trace walkthrough:**
+1. **Traced the error path.** RunStep's `for try await ev in r.run()` throws `ProcessError(code:, lastStderr:)` on non-zero exit. RunStep catches: `logs.append("[ERROR] \(error)")`. Stringifying a struct gives the ugly Swift print format `ProcessError(code: 1, lastStderr: "...")`. No remediation, poor readability.
+2. **Enumerated common convert failure shapes:**
+   - **OOM** — MLX says "Failed to allocate N bytes," CPython says "MemoryError," macOS OOM-killer produces exit 137 with stderr "Killed" (one word, no traceback).
+   - **Disk full** — Python `OSError: [Errno 28] No space left on device`, alternatively "disk quota exceeded" on Linux.
+   - **trust_remote_code missing** — MiniMax M2, Cascade, etc. use custom `modeling_X.py`. Python raises `ModuleNotFoundError: No module named 'modeling_minimax_m2'`. Common user error: downloaded only `*.safetensors` without the .py files.
+   - **Corrupt shard** — safetensors library raises `SafetensorsError: Header too big / Invalid header`.
+3. **Exit code matters.** 137 = SIGKILL (usually OOM-killer on macOS), 139 = SIGSEGV (rare). These often produce NO stderr — you see a clean-exit-but-killed situation. Substring-only matching misses this; need to check `code == 137` too.
+4. **Made ProcessError conform to LocalizedError.** `errorDescription` returns `"jang-tools convert exited X: <stderr>\n→ <remediation>"`. Added `nonisolated static func remediation(code:stderr:) -> String` with tiered pattern matching + generic fallback (matches iter-91 M168's design).
+5. **Updated RunStep.swift:186** to use `error.localizedDescription` instead of `\(error)`. For `ProcessError` this surfaces the remediation; for other error types (unlikely but possible) it falls back to platform default — still better than struct print.
+6. **TDD flow:**
+   - Wrote 6 test methods covering the 4 specific cases + generic fallback + regression guard (stderr preserved).
+   - Ran — 6 compile errors because `errorDescription` didn't exist yet. (Instead of assertion failures, the tests failed to build — an even stronger "red" signal.)
+   - Applied fix.
+   - Ran — 10/10 PythonRunnerTests pass (was 4, +6). Full regression pass on AdoptionServices / InferenceRunner / PostConvertVerifier / Wizard-gate (79 tests all green).
+7. **Verified the RunStep consumer.** Before: `logs: ["[ERROR] ProcessError(code: 137, lastStderr: \"Killed\")"]`. After: `logs: ["[ERROR] jang-tools convert exited 137: Killed\n→ Convert ran out of memory. Try a smaller profile (e.g., JANG_2L or JANG_3L instead of JANG_4K), close other apps to free RAM, or run on a larger Mac (128+ GB recommended for 256+ expert models)."]`. User now knows what happened AND what to do.
+
+**Meta-lesson — substring detection scales across heterogeneous error sources.** Convert failures can originate from Python, MLX, CPython, POSIX, macOS kernel. Each layer has its own wording (MLX: "Failed to allocate", CPython: "MemoryError", kernel: "Killed"). Substring + case-insensitive catches all of them; regex-per-layer would require maintaining separate patterns per source. This builds on iter-91's substring-over-regex meta-lesson: not only is substring more robust to wording tweaks, it's also more scalable across error-source diversity.
+
+**Meta-lesson — exit code is a first-class signal alongside stderr.** Code 137 (SIGKILL) and 139 (SIGSEGV) often produce no stderr because the kernel reaps the process before it can write. Pattern-matching on CODE too (`code == 137`) catches the macOS OOM-killer case that has only `Killed\n` for stderr. Expanded iter-91's approach of only matching stderr substrings.
+
+**Meta-lesson — compile errors are even stronger "red" signals than assertion failures.** When tests fail to COMPILE (because I added a call to a method that doesn't exist yet), the red signal is undeniable. When they fail to ASSERT, I have to read the output carefully to confirm they're failing for the right reason. Prefer designing tests that exercise the *surface* I'm adding — if my change needs to add `.errorDescription` to a struct, my test uses `.errorDescription`. Compile failure = "you haven't done the work yet." Assertion failure = "the work is done but wrong."
+
+**Items touched:**
+- M169 [x] — ProcessError now conforms to LocalizedError with tiered remediation covering OOM / disk / trust_remote_code / corrupt-shard / generic fallback. RunStep log-line reads cleanly. 6 new regression tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 10 PythonRunnerTests pass (was 4, +6). 31 AdoptionServices + 9 InferenceRunner + 14 PostConvertVerifier + 25 Wizard-gate tests unchanged. Python 351 unchanged.
+
+**Closed-status tally:** 108 (iter 91) + M169 = 109 items touched, all closed. Zero known bugs as of iter-92 end.
+
+**Remediation-sweep status:** P1 (Publish) + P2 (convert) done. SourceDetectorError already has Python-side remediation via iter-21/89/90 work. Adoption-service errors (P3) are non-blocking and don't need remediation. Sweep is EFFECTIVELY COMPLETE for blocking error paths. Any future additions to blocking error surfaces should conform to LocalizedError with a tiered `remediation(…)` helper — codify as a new feedback memory?
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: save `feedback_remediation_pattern.md` memory so the tiered-remediation rule survives across sessions.
+- **NEW**: PublishToHuggingFaceSheet dead progressLog cleanup.
+- **NEW**: rapid-click debouncing.
+- **NEW**: run full Swift test-suite count update after iter-92.
+
+**Next iteration should pick:** save the remediation-pattern memory note, then tackle the vestigial progressLog OR pivot to an unrelated audit (keyboard shortcut / accessibility / URL-normalization).

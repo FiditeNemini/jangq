@@ -1,9 +1,62 @@
 // JANGStudio/JANGStudio/Runner/PythonRunner.swift
 import Foundation
 
-struct ProcessError: Error, Equatable {
+struct ProcessError: Error, Equatable, LocalizedError {
     let code: Int32
     let lastStderr: String
+
+    /// M169 (iter 92): applies iter-90 M167 / iter-91 M168's "surface
+    /// remediation, not just symptom" meta-lesson to the convert-subprocess
+    /// error path. Pre-M169, `RunStep.swift:187` stringified ProcessError
+    /// directly (`logs.append("[ERROR] \(error)")` → ugly
+    /// `ProcessError(code: 1, lastStderr: "...")` print format), leaving the
+    /// user with raw stderr and no next-action guidance. Now the log line
+    /// reads "jang-tools convert exited X: <stderr>\n→ <remediation>"
+    /// with a tiered hint system that covers the four most common convert
+    /// failure modes plus a generic fallback.
+    var errorDescription: String? {
+        let trimmed = lastStderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = trimmed.isEmpty
+            ? "jang-tools convert exited \(code)"
+            : "jang-tools convert exited \(code): \(trimmed)"
+        return "\(body)\n→ \(Self.remediation(code: code, stderr: trimmed))"
+    }
+
+    /// Tiered remediation matching iter-91 M168's substring + fallback
+    /// design. Substring (not regex) + case-insensitive survives upstream
+    /// error-message tweaks across MLX / HF / Python versions.
+    nonisolated static func remediation(code: Int32, stderr: String) -> String {
+        let lower = stderr.lowercased()
+
+        // OOM / allocation failures — MLX says "Failed to allocate N bytes",
+        // CPython says "MemoryError", macOS OOM-killer uses SIGKILL (exit 137).
+        let oomSignals = ["failed to allocate", "memoryerror", "cannot allocate memory", "out of memory"]
+        if oomSignals.contains(where: { lower.contains($0) }) || code == 137 || lower.contains("killed") {
+            return "Convert ran out of memory. Try a smaller profile (e.g., JANG_2L or JANG_3L instead of JANG_4K), close other apps to free RAM, or run on a larger Mac (128+ GB recommended for 256+ expert models)."
+        }
+
+        // Disk full — Python OSError 28 / POSIX ENOSPC.
+        if lower.contains("no space left") || lower.contains("[errno 28]") || lower.contains("disk quota") {
+            return "Out of disk space. Convert output needs roughly source-size × (avg-bits / 16). Free up space, or pick a different output folder on a larger volume."
+        }
+
+        // Missing trust_remote_code modules — MiniMax, Cascade, custom architectures.
+        // Python surfaces this as `ModuleNotFoundError: No module named 'modeling_X'`.
+        if lower.contains("no module named 'modeling_")
+            || lower.contains("trust_remote_code")
+            || (lower.contains("modulenotfounderror") && lower.contains("modeling_")) {
+            return "Model uses custom code (trust_remote_code) but modeling_*.py is missing from the source folder. Re-download INCLUDING .py files: `huggingface-cli download <repo> --include '*.py' --include '*.safetensors' --include '*.json'`."
+        }
+
+        // Corrupt safetensors shard — user needs to re-download (possibly a
+        // cache corruption or interrupted transfer).
+        if lower.contains("safetensorserror") || lower.contains("header too big")
+            || lower.contains("invalid header") || lower.contains("corrupt") {
+            return "Shard file appears corrupt. Re-download the source model (`huggingface-cli download <repo>` or `git clone`), then retry."
+        }
+
+        return "Check the log pane above for details, or click Copy Diagnostics to bundle logs for a bug report. Retrying with a smaller profile (JANG_2L / JANG_3L) often helps if the root cause is memory pressure."
+    }
 }
 
 actor PythonRunner {

@@ -125,6 +125,66 @@ final class PythonRunnerTests: XCTestCase {
     // pure stream-abandon cleanup would require language-level changes or
     // a finalizer pattern; logged as M99 for follow-up if needed.
 
+    // MARK: - Iter 92 M169: ProcessError remediation (iter-90/91 sweep)
+
+    func test_processError_oom_suggests_smaller_profile() {
+        let err = ProcessError(code: 1,
+            lastStderr: "MLXError: Failed to allocate 42949672960 bytes on the device")
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("out of memory") || desc.contains("smaller profile"),
+            "OOM must suggest a smaller profile. Got: \(desc)")
+        XCTAssertTrue(desc.contains("JANG_2L") || desc.contains("JANG_3L"),
+            "OOM hint must name a specific smaller profile so beginner users know what to try. Got: \(desc)")
+    }
+
+    func test_processError_killed_suggests_oom_root_cause() {
+        // macOS OOM-killer / activity-monitor force-quit leaves `Killed` in stderr.
+        let err = ProcessError(code: 137, lastStderr: "Killed")
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("out of memory") || desc.contains("OOM") || desc.contains("close other apps"),
+            "SIGKILL (137) is usually OOM — hint must mention it. Got: \(desc)")
+    }
+
+    func test_processError_disk_full_suggests_free_space() {
+        let err = ProcessError(code: 1,
+            lastStderr: "OSError: [Errno 28] No space left on device: '/Users/u/out.safetensors'")
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("disk") || desc.contains("space"),
+            "Errno 28 must mention disk space. Got: \(desc)")
+    }
+
+    func test_processError_trust_remote_code_suggests_redownload() {
+        // Models like MiniMax M2 use trust_remote_code — convert needs
+        // modeling_*.py in the source folder. Common user error: downloaded
+        // with --include '*.safetensors' only.
+        let err = ProcessError(code: 1,
+            lastStderr: "ModuleNotFoundError: No module named 'modeling_minimax_m2'")
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("modeling_") || desc.contains("trust_remote_code") || desc.contains(".py"),
+            "Missing modeling_*.py must cite the custom-code requirement. Got: \(desc)")
+        XCTAssertTrue(desc.contains("huggingface-cli download"),
+            "Must include the huggingface-cli command that includes .py files. Got: \(desc)")
+    }
+
+    func test_processError_generic_falls_back_to_check_logs() {
+        let err = ProcessError(code: 42, lastStderr: "Weird error not in any pattern")
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("Weird error not in any pattern"),
+            "generic fallback must preserve stderr context")
+        XCTAssertTrue(desc.contains("Copy Diagnostics") || desc.contains("profile") || desc.contains("retry"),
+            "generic fallback must include some next-action hint. Got: \(desc)")
+    }
+
+    func test_processError_preserves_code_and_stderr() {
+        // Regression guard — remediation is APPENDED, not substituted.
+        let err = ProcessError(code: 7, lastStderr: "Killed")
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("exited 7") || desc.contains("code 7"),
+            "exit code must still appear. Got: \(desc)")
+        XCTAssertTrue(desc.contains("Killed"),
+            "stderr must still appear. Got: \(desc)")
+    }
+
     private func makeTempScript(_ body: String) throws -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("ts-\(UUID().uuidString).sh")

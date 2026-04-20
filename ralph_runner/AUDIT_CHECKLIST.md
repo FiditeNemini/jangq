@@ -892,6 +892,29 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M169 (ProcessError remediation — convert-subprocess failure sweep, iter-90/91 pattern continued)** — Iter-91 M168 applied the "surface remediation, not just symptom" meta-lesson to `PublishServiceError`. Iter-92 continues the sweep to the second-highest-stakes error path: `ProcessError` (thrown from PythonRunner when the convert subprocess exits non-zero). Pre-M169, `ProcessError` was a plain struct — RunStep's catch did `logs.append("[ERROR] \(error)")` which stringified the struct to ugly `ProcessError(code: 1, lastStderr: "...")` with no remediation.
+      **Fix (iter 92):**
+      - `ProcessError` now conforms to `LocalizedError`. `errorDescription` returns `"jang-tools convert exited X: <stderr>\n→ <remediation>"`.
+      - Added `nonisolated static func remediation(code:stderr:) -> String` covering 4 most-common convert failure shapes + generic fallback:
+        - **OOM** (`failed to allocate` / `MemoryError` / `cannot allocate` / exit 137 / `Killed`) → "Try a smaller profile (JANG_2L or JANG_3L instead of JANG_4K), close other apps, or run on a larger Mac (128+ GB recommended for 256+ expert models)."
+        - **Disk full** (`no space left` / `[Errno 28]` / `disk quota`) → "Output needs source-size × (avg-bits/16). Free space or pick a different output folder."
+        - **trust_remote_code / missing modeling_*.py** (MiniMax, Cascade, custom architectures) → "Re-download INCLUDING .py files: `huggingface-cli download <repo> --include '*.py' --include '*.safetensors' --include '*.json'`."
+        - **Corrupt shard** (`safetensorsError` / `header too big` / `invalid header` / `corrupt`) → "Shard file appears corrupt. Re-download the source model."
+        - **Fallback** → "Check log pane, Copy Diagnostics for bug report, or retry with a smaller profile."
+      - `RunStep.swift:186` now uses `error.localizedDescription` instead of `\(error)` so the log line inherits the remediation on ProcessError AND falls back to platform default for other error types.
+      **Tests (+6) in PythonRunnerTests.swift:**
+      - `test_processError_oom_suggests_smaller_profile` — OOM stderr + specific profile name.
+      - `test_processError_killed_suggests_oom_root_cause` — exit 137 / "Killed" maps to OOM hint.
+      - `test_processError_disk_full_suggests_free_space` — Errno 28 → disk hint.
+      - `test_processError_trust_remote_code_suggests_redownload` — ModuleNotFoundError for `modeling_X` → HF-CLI command.
+      - `test_processError_generic_falls_back_to_check_logs` — unknown stderr → still gets a next-action hint.
+      - `test_processError_preserves_code_and_stderr` — regression guard: remediation appended, not substituted.
+      TDD: red on 6 (member-not-found until LocalizedError + errorDescription added) → fix → green.
+      **Evidence:** `JANGStudio/JANGStudio/Runner/PythonRunner.swift:4-66`, `JANGStudio/JANGStudio/Wizard/Steps/RunStep.swift:186`. 10 PythonRunnerTests pass (was 4, +6). 31 AdoptionServices + 9 InferenceRunner + 14 PostConvertVerifier + 25 Wizard-gate tests unchanged. Python 351 unchanged.
+      **Meta-lesson — substring detection covers cross-layer error sources.** Convert failures can come from Python, MLX, CPython, POSIX, or macOS kernel. Each layer has its own wording conventions. Substring matching case-insensitively catches ALL of them (e.g., "killed" matches both CPython's `KilledError` and macOS's bare `Killed\n`). A regex-per-layer approach would require maintaining separate patterns per error source.
+      **Meta-lesson — exit code is a first-class signal alongside stderr.** Code 137 = SIGKILL, code 139 = SIGSEGV, these are kernel signals that often don't produce any stderr. Pattern-match on CODE as well as stderr, so a clean-exit-but-killed subprocess still triggers the OOM hint. Expanded iter-91's substring-only approach.
+      **Sweep status:** P1 (PublishServiceError) done iter-91. P2 (ProcessError) done iter-92. Remaining surfaces — `SourceDetectorError.cliError` already emits Python-side messages with remediation (iter-21 M120 / iter-89 M166 / iter-90 M167), but the Swift wrapper lacks a tiered fallback for Python-subprocess-crash cases. P3 (adoption-service errors) degrade silently with frozen fallback and don't need remediation. Sweep is effectively complete for blocking error paths.
+      **Commit:** (this iteration)
 - [x] **M168 (PublishServiceError.cliError — remediation-command sweep after iter-90 M167 meta-lesson)** — Iter-90 M167 codified: "surface remediation, not just symptom." Iter-91 applies it to the highest-stakes error path in the app: `PublishServiceError.cliError`. After a 30-minute publish dispatch fails, the error banner is the user's only UI — it MUST tell them what to do next. Pre-M168 it showed raw stderr only ("jang-tools publish exited 1: HfHubHTTPError: 401 Client Error: Unauthorized"), leaving the user to google "HF 401 error" for every failure.
       **Fix (iter 91):** added `PublishServiceError.remediation(forStderr:)` — a `nonisolated static` helper that pattern-matches common huggingface_hub stderr substrings (case-insensitive) and returns a concrete next-action string. `cliError.errorDescription` now appends the remediation below the stderr, separated by `→ `.
       **Pattern coverage:**
