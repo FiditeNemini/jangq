@@ -2,9 +2,9 @@ import XCTest
 @testable import JANGKit
 
 final class JANGTQProbeTests: XCTestCase {
-    /// Documents that JANGTQ detection works even when we eventually route to the real loader.
-    /// Until commit 2 lands, this expects ModelError.modelLoadFailed (JANGTQ path exists) OR
-    /// ModelError.jangtqNotYetSupported (prior behavior).
+    /// Verifies that JANGTQ detection works and routes to the real JANGTQ loader.
+    /// A fake dir without real weights triggers a .modelLoadFailed (or .metalDeviceUnavailable
+    /// on non-Apple-Silicon CI), not .jangtqNotYetSupported (that error no longer exists).
     func test_jangtq_detection_probe() async throws {
         // Create a minimal fake JANGTQ dir to exercise the detection branch
         let tmp = FileManager.default.temporaryDirectory
@@ -27,12 +27,13 @@ final class JANGTQProbeTests: XCTestCase {
 
         do {
             _ = try await JANGKit.Model.load(at: tmp)
-            XCTFail("expected an error from fake JANGTQ dir without weights")
+            XCTFail("expected an error from fake JANGTQ dir without real weights")
         } catch let e as JANGKit.ModelError {
-            // Either error is acceptable — we're confirming the detection branch is exercised.
+            // Real JANGTQ loader is invoked; it fails on the fake dir.
+            // .metalDeviceUnavailable is acceptable on non-Apple-Silicon hosts.
             switch e {
-            case .modelLoadFailed, .jangtqNotYetSupported:
-                break  // expected: prior behavior is .jangtqNotYetSupported, post-commit-2 will be .modelLoadFailed
+            case .modelLoadFailed, .metalDeviceUnavailable, .tokenizerLoadFailed:
+                break  // expected — JANGTQ loading attempted, failed on missing weights/config
             default:
                 XCTFail("unexpected JANGKit.ModelError: \(e)")
             }

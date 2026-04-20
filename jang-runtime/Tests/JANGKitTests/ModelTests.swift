@@ -32,8 +32,10 @@ final class ModelTests: XCTestCase {
         }
     }
 
-    func test_load_jangtq_dir_throws_jangtqNotYetSupported() async throws {
-        // Build a minimal jang_config.json with weight_format == "mxtq"
+    func test_load_jangtq_dir_routes_to_jangtq_loader() async throws {
+        // JANGTQ models are now fully supported. A fake dir (no real weights) should
+        // fail with .modelLoadFailed (not .jangtqNotYetSupported) because we attempt
+        // real loading and fail at the bundle/config parsing stage.
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("jangtq_test_\(Int.random(in: 0..<100000))")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -48,8 +50,10 @@ final class ModelTests: XCTestCase {
             XCTFail("expected throw")
         } catch let e as JANGKit.ModelError {
             switch e {
-            case .jangtqNotYetSupported: break  // expected
-            default: XCTFail("wrong error kind: \(e)")
+            case .modelLoadFailed, .metalDeviceUnavailable, .tokenizerLoadFailed:
+                break  // expected — real JANGTQ loader fails on fake/empty dir
+            default:
+                XCTFail("unexpected JANGKit.ModelError: \(e)")
             }
         } catch {
             XCTFail("wrong error type: \(error)")

@@ -1,20 +1,23 @@
 // JANGKit.Model — unified high-level API for loading + generating with JANG models.
 //
-// Under the hood this composes loadModel + JANGInferenceEngine + JANGTokenizer
-// + JANGSampler. JANGTQ support via this facade is deferred; for JANGTQ models
-// use JANGTQGenerator directly from the JANG module.
+// Supports both standard JANG (MLX affine quantized, weight_format != "mxtq") and
+// JANGTQ (custom TQ-quantized, weight_format == "mxtq") through the same API surface.
+// The backend is detected from jang_config.json at load time.
 //
 // API gaps (Phase P2 work):
-//   - applyChatTemplate: JANGTokenizer only has encodeChatPrompt(system:user:),
-//     which implements the Qwen im_start/im_end template. The Model.chat() method
-//     uses that directly and documents the limitation. A generic Jinja template
-//     executor would be needed to support other families (LLaMA, Mistral, etc.).
-//   - JANGSampler.sample() requires an explicit vocabSize parameter; we read this
-//     from the loaded model config.
+//   - JANG (standard) generate(): uses a one-token-at-a-time prefill loop identical
+//     to the previous implementation.
+//   - JANGTQ generate(): pure greedy argmax only; temperature and topP from
+//     SamplingConfig are accepted but currently ignored (JANGTQSampler is argmax-only).
+//   - chat() on the JANG backend uses JANGTokenizer.encodeChatPrompt() which implements
+//     the Qwen im_start/im_end template only. For other families, format prompts manually.
+//   - chat() on the JANGTQ backend uses JANGTQTokenizer.applyChatTemplate() which
+//     implements the MiniMax M2.7 template. Other JANGTQ families may need adjustment.
 
 import Foundation
 import Metal
 import JANG
+import JANGCoreMetal
 
 extension JANGKit {
 
@@ -29,7 +32,7 @@ extension JANGKit {
         public let finishReason: FinishReason
 
         public enum FinishReason: String, Sendable, Equatable {
-            case stop       // EOS token produced
+            case stop       // EOS / stop token produced
             case maxTokens  // hit the maxTokens cap
             case cancelled  // reserved for future streaming cancellation
             case error      // mid-generation exception (text contains partial output)
@@ -39,6 +42,9 @@ extension JANGKit {
     // MARK: - SamplingConfig
 
     /// Sampling parameters for generate().
+    ///
+    /// Note: for JANGTQ models, `temperature` and `topP` are accepted but currently
+    /// unused — `JANGTQSampler` performs argmax (greedy) decoding only.
     public struct SamplingConfig: Sendable {
         public var temperature: Double
         public var topP: Double
@@ -74,9 +80,6 @@ extension JANGKit {
         case modelLoadFailed(String)
         case tokenizerLoadFailed(String)
         case generationFailed(String)
-        /// JANGTQ models are not yet supported by the JANGKit facade.
-        /// Use JANGTQGenerator directly from the JANG module for JANGTQ inference.
-        case jangtqNotYetSupported
 
         public var errorDescription: String? {
             switch self {
@@ -88,9 +91,6 @@ extension JANGKit {
                 return "Tokenizer load failed: \(m)"
             case .generationFailed(let m):
                 return "Generation failed: \(m)"
-            case .jangtqNotYetSupported:
-                return "JANGTQ models are not yet supported by JANGKit. "
-                    + "Use JANGTQGenerator directly from the JANG module."
             }
         }
     }
@@ -100,41 +100,48 @@ extension JANGKit {
     /// A loaded JANG model ready for single-shot generation.
     ///
     /// Create via `Model.load(at:)`. Thread safety: this type is an actor; all
-    /// generation state (KV cache position inside JANGInferenceEngine) is serialized.
+    /// generation state (KV cache) is serialized.
     ///
-    /// JANGTQ models (`weight_format == "mxtq"` in jang_config.json) are not yet
-    /// supported through this facade — `load(at:)` will throw `.jangtqNotYetSupported`.
-    /// Use `JANGTQGenerator` directly from the `JANG` module for those models.
+    /// Both standard JANG and JANGTQ models are supported. The correct backend is
+    /// auto-detected from `jang_config.json` at load time — callers use the same API
+    /// regardless of which family the model belongs to.
     public actor Model {
-        private let mxqModel: MXQModel
-        private let engine: JANGInferenceEngine
-        private let tokenizer: JANGTokenizer
-        private let vocabSize: Int
+
+        // MARK: Discriminated backend
+
+        private enum Backend {
+            /// Standard JANG model (MLX affine quantized weights).
+            case jang(mxqModel: MXQModel,
+                      engine: JANGInferenceEngine,
+                      tokenizer: JANGTokenizer)
+            /// JANGTQ model (custom TQ-quantized MoE weights).
+            case jangtq(generator: JANGTQGenerator)
+        }
+
+        private let backend: Backend
+
         /// The directory from which this model was loaded.
         public nonisolated let modelURL: URL
 
-        private init(mxqModel: MXQModel,
-                     engine: JANGInferenceEngine,
-                     tokenizer: JANGTokenizer,
-                     modelURL: URL) {
-            self.mxqModel = mxqModel
-            self.engine = engine
-            self.tokenizer = tokenizer
-            self.vocabSize = mxqModel.config.model.vocabSize
+        /// Model family: "jang" for standard models, "jangtq" for JANGTQ models.
+        public nonisolated let family: String
+
+        private init(backend: Backend, modelURL: URL, family: String) {
+            self.backend = backend
             self.modelURL = modelURL
+            self.family = family
         }
 
-        // MARK: load
+        // MARK: - load
 
         /// Load a JANG model from a directory.
         ///
-        /// Auto-detects format via jang_config.json. Throws `.jangtqNotYetSupported` for
-        /// JANGTQ (`weight_format == "mxtq"`) models.
+        /// Auto-detects format via `jang_config.json`. Both standard JANG and JANGTQ
+        /// (`weight_format == "mxtq"`) models are fully supported.
         ///
-        /// - Parameter url: Path to the model directory (must contain jang_config.json,
-        ///   config.json, tokenizer.json, and one or more .safetensors shards).
+        /// - Parameter url: Path to the model directory. Must contain `jang_config.json`,
+        ///   `config.json`, `tokenizer.json`, and one or more `.safetensors` shards.
         public static func load(at url: URL) async throws -> Model {
-            // 1. Check jang_config.json exists
             let configURL = url.appendingPathComponent("jang_config.json")
             guard FileManager.default.fileExists(atPath: configURL.path) else {
                 throw ModelError.modelLoadFailed(
@@ -142,21 +149,40 @@ extension JANGKit {
                 )
             }
 
-            // 2. Detect JANGTQ — bail early with a clear error
-            if let data = try? Data(contentsOf: configURL),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                // v2 shape: top-level "weight_format" == "mxtq"
-                if (obj["weight_format"] as? String)?.lowercased() == "mxtq" {
-                    throw ModelError.jangtqNotYetSupported
-                }
-                // Legacy / alternate shape: nested quantization.method == "jangtq"
-                if let quant = obj["quantization"] as? [String: Any],
-                   (quant["method"] as? String)?.lowercased() == "jangtq" {
-                    throw ModelError.jangtqNotYetSupported
-                }
-            }
+            let isJANGTQ = detectJANGTQ(configURL: configURL)
 
-            // 3. Create Metal device (JANGMetalDevice owns its own MTLDevice)
+            if isJANGTQ {
+                return try await loadJANGTQ(from: url)
+            } else {
+                return try await loadJANG(from: url)
+            }
+        }
+
+        // MARK: Detection
+
+        private static func detectJANGTQ(configURL: URL) -> Bool {
+            guard let data = try? Data(contentsOf: configURL),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return false
+            }
+            // Top-level weight_format == "mxtq"
+            if (obj["weight_format"] as? String)?.lowercased() == "mxtq" { return true }
+            // Nested quantization.method == "jangtq"
+            if let q = obj["quantization"] as? [String: Any],
+               (q["method"] as? String)?.lowercased() == "jangtq" {
+                return true
+            }
+            // Nested quantization.family == "jangtq"
+            if let q = obj["quantization"] as? [String: Any],
+               (q["family"] as? String)?.lowercased() == "jangtq" {
+                return true
+            }
+            return false
+        }
+
+        // MARK: - Standard JANG loading
+
+        private static func loadJANG(from url: URL) async throws -> Model {
             let metalDevice: JANGMetalDevice
             do {
                 metalDevice = try JANGMetalDevice()
@@ -164,7 +190,6 @@ extension JANGKit {
                 throw ModelError.metalDeviceUnavailable
             }
 
-            // 4. Load model weights
             let mxqModel: MXQModel
             do {
                 mxqModel = try loadModel(url: url, device: metalDevice.device)
@@ -172,7 +197,6 @@ extension JANGKit {
                 throw ModelError.modelLoadFailed("\(error)")
             }
 
-            // 5. Create inference engine
             let engine: JANGInferenceEngine
             do {
                 engine = try JANGInferenceEngine(model: mxqModel, metalDevice: metalDevice)
@@ -180,7 +204,6 @@ extension JANGKit {
                 throw ModelError.modelLoadFailed("inference engine init: \(error)")
             }
 
-            // 6. Load tokenizer — JANGTokenizer takes the path to tokenizer.json
             let tokenizerFileURL = url.appendingPathComponent("tokenizer.json")
             let tokenizer: JANGTokenizer
             do {
@@ -190,101 +213,96 @@ extension JANGKit {
             }
 
             return Model(
-                mxqModel: mxqModel,
-                engine: engine,
-                tokenizer: tokenizer,
-                modelURL: url
+                backend: .jang(mxqModel: mxqModel, engine: engine, tokenizer: tokenizer),
+                modelURL: url,
+                family: "jang"
             )
         }
 
-        // MARK: generate
+        // MARK: - JANGTQ loading
+
+        private static func loadJANGTQ(from url: URL) async throws -> Model {
+            // MetalContext owns device + queue + compiled Metal library for JANGTQ kernels.
+            let context: MetalContext
+            do {
+                context = try MetalContext()
+            } catch {
+                throw ModelError.metalDeviceUnavailable
+            }
+
+            // JANGTQLoader reads .safetensors shards and runtime sidecar.
+            let loader = JANGTQLoader(device: context.device)
+            let bundle: JANGTQModelBundle
+            do {
+                bundle = try loader.load(from: url)
+            } catch {
+                throw ModelError.modelLoadFailed("JANGTQ bundle load: \(error)")
+            }
+
+            // JANGTQModel wires embedding + decoder layers + KV cache.
+            let model: JANGTQModel
+            do {
+                model = try JANGTQModel(bundle: bundle, context: context)
+            } catch {
+                throw ModelError.modelLoadFailed("JANGTQ model init: \(error)")
+            }
+
+            // JANGTQTokenizer reads tokenizer.json + generation_config.json for stop IDs.
+            let tokenizer: JANGTQTokenizer
+            do {
+                tokenizer = try JANGTQTokenizer(modelDir: url)
+            } catch {
+                throw ModelError.tokenizerLoadFailed("JANGTQ tokenizer: \(error)")
+            }
+
+            // JANGTQSampler is argmax-only (greedy). Wrap everything in a generator.
+            let sampler = JANGTQSampler()
+            let generator = JANGTQGenerator(model: model, tokenizer: tokenizer, sampler: sampler)
+
+            return Model(
+                backend: .jangtq(generator: generator),
+                modelURL: url,
+                family: "jangtq"
+            )
+        }
+
+        // MARK: - generate
 
         /// Generate text from a raw prompt string.
         ///
-        /// This is one-shot (not streaming) — the full response is returned as a single
-        /// `GenerationResult`. For streaming use the lower-level `JANGInferenceEngine`
-        /// directly.
+        /// For JANGTQ models, the prompt is treated as a user message and wrapped via
+        /// the model's chat template. If you need raw-token generation with JANGTQ,
+        /// use `JANGTQGenerator` directly from the `JANG` module.
         ///
         /// - Parameters:
-        ///   - prompt: The raw prompt string (already formatted with any special tokens
-        ///     you need). For chat formatting use `chat(messages:config:)` instead.
-        ///   - config: Sampling parameters. Defaults to greedy (temperature=0).
+        ///   - prompt: The prompt string.
+        ///   - config: Sampling parameters. Note: `temperature` and `topP` are used only
+        ///     for standard JANG models; JANGTQ uses greedy (argmax) decoding.
         public func generate(
             prompt: String,
             config: SamplingConfig = SamplingConfig()
         ) async throws -> GenerationResult {
-            let t0 = Date()
-
-            // Tokenize prompt
-            let promptIds = tokenizer.encode(prompt)
-
-            // Reset KV cache for a fresh sequence
-            engine.reset()
-
-            // Prefill: forward every prompt token to build the KV cache
-            for tokenId in promptIds {
-                _ = try engine.forward(tokenId: tokenId)
-            }
-
-            // Decode loop
-            let sampler = JANGSampler()
-            let samplingParams = config.asSamplingParams
-            var generatedIds: [Int] = []
-            var reason: GenerationResult.FinishReason = .maxTokens
-            let eosId = tokenizer.eosTokenId
-
-            for step in 0..<config.maxTokens {
-                // For step 0 we need the logits produced by the last prefill token
-                // which engine.forward already returned — so on step 0 we use the
-                // previous token (last prompt token) to generate the next one.
-                // On step > 0 we use the last generated token.
-                let inputTokenId: Int
-                if step == 0 {
-                    // Run one forward pass for the first decode step
-                    inputTokenId = promptIds.last ?? eosId
-                } else {
-                    inputTokenId = generatedIds.last ?? eosId
-                }
-
-                let logits = try engine.forward(tokenId: inputTokenId)
-                let nextId = sampler.sample(
-                    logits: logits,
-                    vocabSize: vocabSize,
-                    params: samplingParams
+            switch backend {
+            case .jang(let mxq, let engine, let tokenizer):
+                return try generateJANG(
+                    mxqModel: mxq, engine: engine, tokenizer: tokenizer,
+                    prompt: prompt, config: config
                 )
-
-                if nextId == eosId {
-                    reason = .stop
-                    break
-                }
-                generatedIds.append(nextId)
+            case .jangtq(let generator):
+                return try generateJANGTQ(generator: generator, userMessage: prompt, config: config)
             }
-
-            let text = tokenizer.decode(generatedIds)
-            let elapsed = Date().timeIntervalSince(t0)
-            let tps = elapsed > 0 ? Double(generatedIds.count) / elapsed : 0
-
-            return GenerationResult(
-                text: text,
-                tokens: generatedIds.count,
-                elapsedSeconds: elapsed,
-                tokensPerSecond: tps,
-                finishReason: reason
-            )
         }
 
-        // MARK: chat
+        // MARK: - chat
 
-        /// Apply the Qwen im_start/im_end chat template and generate.
+        /// Apply a chat template and generate.
         ///
-        /// **Limitation (Phase P2 work):** `JANGTokenizer` implements the Qwen
-        /// `<|im_start|>` / `<|im_end|>` template via `encodeChatPrompt(system:user:)`.
-        /// It does not support arbitrary Jinja templates (LLaMA, Mistral, etc.).
-        /// For other model families, format your prompt manually and call `generate`
-        /// directly, or use the Python `mlx_lm` path which has full Jinja support.
+        /// For standard JANG models, uses `JANGTokenizer.encodeChatPrompt()` (Qwen
+        /// im_start/im_end template). For JANGTQ models, uses
+        /// `JANGTQTokenizer.applyChatTemplate()` (MiniMax M2.7 template).
         ///
         /// - Parameters:
-        ///   - system: Optional system prompt. Defaults to "You are a helpful assistant."
+        ///   - system: Optional system prompt. Defaults to the model's default system message.
         ///   - user: The user message content.
         ///   - config: Sampling parameters.
         public func chat(
@@ -292,19 +310,33 @@ extension JANGKit {
             user: String,
             config: SamplingConfig = SamplingConfig()
         ) async throws -> GenerationResult {
-            let t0 = Date()
+            switch backend {
+            case .jang(let mxq, let engine, let tokenizer):
+                return try chatJANG(mxqModel: mxq, engine: engine, tokenizer: tokenizer,
+                                    system: system, user: user, config: config)
+            case .jangtq(let generator):
+                return try chatJANGTQ(generator: generator, system: system,
+                                      user: user, config: config)
+            }
+        }
 
-            // encodeChatPrompt returns [Int] directly (no throws, no generic messages array)
-            let promptIds = tokenizer.encodeChatPrompt(system: system, user: user)
+        // MARK: - Standard JANG generate impl
+
+        private func generateJANG(
+            mxqModel: MXQModel,
+            engine: JANGInferenceEngine,
+            tokenizer: JANGTokenizer,
+            prompt: String,
+            config: SamplingConfig
+        ) throws -> GenerationResult {
+            let t0 = Date()
+            let promptIds = tokenizer.encode(prompt)
 
             engine.reset()
-
-            // Prefill
             for tokenId in promptIds {
                 _ = try engine.forward(tokenId: tokenId)
             }
 
-            // Decode
             let sampler = JANGSampler()
             let samplingParams = config.asSamplingParams
             var generatedIds: [Int] = []
@@ -318,14 +350,12 @@ extension JANGKit {
                 } else {
                     inputTokenId = generatedIds.last ?? eosId
                 }
-
                 let logits = try engine.forward(tokenId: inputTokenId)
                 let nextId = sampler.sample(
                     logits: logits,
-                    vocabSize: vocabSize,
+                    vocabSize: mxqModel.config.model.vocabSize,
                     params: samplingParams
                 )
-
                 if nextId == eosId {
                     reason = .stop
                     break
@@ -336,7 +366,6 @@ extension JANGKit {
             let text = tokenizer.decode(generatedIds)
             let elapsed = Date().timeIntervalSince(t0)
             let tps = elapsed > 0 ? Double(generatedIds.count) / elapsed : 0
-
             return GenerationResult(
                 text: text,
                 tokens: generatedIds.count,
@@ -344,6 +373,117 @@ extension JANGKit {
                 tokensPerSecond: tps,
                 finishReason: reason
             )
+        }
+
+        // MARK: - Standard JANG chat impl
+
+        private func chatJANG(
+            mxqModel: MXQModel,
+            engine: JANGInferenceEngine,
+            tokenizer: JANGTokenizer,
+            system: String?,
+            user: String,
+            config: SamplingConfig
+        ) throws -> GenerationResult {
+            let t0 = Date()
+            let promptIds = tokenizer.encodeChatPrompt(system: system, user: user)
+
+            engine.reset()
+            for tokenId in promptIds {
+                _ = try engine.forward(tokenId: tokenId)
+            }
+
+            let sampler = JANGSampler()
+            let samplingParams = config.asSamplingParams
+            var generatedIds: [Int] = []
+            var reason: GenerationResult.FinishReason = .maxTokens
+            let eosId = tokenizer.eosTokenId
+
+            for step in 0..<config.maxTokens {
+                let inputTokenId: Int
+                if step == 0 {
+                    inputTokenId = promptIds.last ?? eosId
+                } else {
+                    inputTokenId = generatedIds.last ?? eosId
+                }
+                let logits = try engine.forward(tokenId: inputTokenId)
+                let nextId = sampler.sample(
+                    logits: logits,
+                    vocabSize: mxqModel.config.model.vocabSize,
+                    params: samplingParams
+                )
+                if nextId == eosId {
+                    reason = .stop
+                    break
+                }
+                generatedIds.append(nextId)
+            }
+
+            let text = tokenizer.decode(generatedIds)
+            let elapsed = Date().timeIntervalSince(t0)
+            let tps = elapsed > 0 ? Double(generatedIds.count) / elapsed : 0
+            return GenerationResult(
+                text: text,
+                tokens: generatedIds.count,
+                elapsedSeconds: elapsed,
+                tokensPerSecond: tps,
+                finishReason: reason
+            )
+        }
+
+        // MARK: - JANGTQ generate impl
+
+        private func generateJANGTQ(
+            generator: JANGTQGenerator,
+            userMessage: String,
+            config: SamplingConfig
+        ) throws -> GenerationResult {
+            // JANGTQGenerator wraps the user message in the model's chat template internally.
+            let result = try generator.generate(
+                userMessage: userMessage,
+                maxTokens: config.maxTokens
+            )
+            return GenerationResult(
+                text: result.text,
+                tokens: result.outputTokens,
+                elapsedSeconds: result.elapsedSec,
+                tokensPerSecond: result.tokensPerSec,
+                finishReason: mapJANGTQStopReason(result.stopReason)
+            )
+        }
+
+        // MARK: - JANGTQ chat impl
+
+        private func chatJANGTQ(
+            generator: JANGTQGenerator,
+            system: String?,
+            user: String,
+            config: SamplingConfig
+        ) throws -> GenerationResult {
+            let result = try generator.generate(
+                messages: [JANGTQChatMessage(role: "user", content: user)],
+                system: system,
+                maxTokens: config.maxTokens
+            )
+            return GenerationResult(
+                text: result.text,
+                tokens: result.outputTokens,
+                elapsedSeconds: result.elapsedSec,
+                tokensPerSecond: result.tokensPerSec,
+                finishReason: mapJANGTQStopReason(result.stopReason)
+            )
+        }
+
+        // MARK: - Helpers
+
+        private func mapJANGTQStopReason(
+            _ reason: JANGTQGenerationResult.StopReason
+        ) -> GenerationResult.FinishReason {
+            switch reason {
+            case .stopToken: return .stop
+            case .maxTokens: return .maxTokens
+            case .error:     return .error
+            }
         }
     }
 }
