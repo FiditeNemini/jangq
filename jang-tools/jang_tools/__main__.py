@@ -269,6 +269,9 @@ def main():
     from .examples import register as _register_examples
     _register_examples(subparsers)
 
+    from .modelcard import register as _register_modelcard
+    _register_modelcard(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
