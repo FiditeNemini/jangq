@@ -225,6 +225,26 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M181 (jang-server hardcoded HF write-token in source — CRITICAL, requires token rotation)** — **🚨 ACTION REQUIRED FROM ERIC: rotate the leaked token at https://huggingface.co/settings/tokens.** Fix here only stops the leak going forward; anyone with repo or git-history access already has the original.
+      **Bug:** Iter-116 ran a scan-for-secrets sweep across the repo. Found a real `hf_*` write-token committed as the default value of `HF_UPLOAD_TOKEN` in `jang-server/server.py:51-53`:
+      ```
+      HF_UPLOAD_TOKEN = os.environ.get("HF_UPLOAD_TOKEN", "hf_<redacted>")
+      ```
+      The second arg to `os.environ.get` is a default that fires when the env var isn't set — meaning the server would silently use this leaked token for HF uploads in any deployment that didn't explicitly set the env. The token grants write access to the `JANGQ-AI` HF org.
+      **Severity:** HIGH. Compromised the moment the source was first committed. Anyone who:
+      - Cloned the repo at any point.
+      - Has read access to git history.
+      - Saw the file in a code review / screen share / search index.
+      …has the token. Even after this fix, they retain it.
+      **Fix (iter 116):** removed the default value. `HF_UPLOAD_TOKEN = os.environ.get("HF_UPLOAD_TOKEN", "")`. Server now requires explicit env var; missing-token publish attempts will fail-fast with a clear error instead of silently using a default that may be leaked or revoked.
+      **Tests (+2) in new `jang-server/tests/test_no_hardcoded_secrets.py`:**
+      - `test_no_hardcoded_hf_token_in_server_py` — regex `\bhf_[A-Za-z0-9_-]{20,}\b` catches any future `hf_*` literal in server.py.
+      - `test_HF_UPLOAD_TOKEN_default_is_empty` — semantic check that the env-var-read line uses `""` or `None` as default (not a real value).
+      **Cross-repo sweep:** also grep'd the rest of `/Users/eric/jang/` for `hf_*` literals. Only matches outside our source were in third-party library code (transformers' public test token in `testing_utils.py`) and our own test fixtures (which use clearly-fake tokens like `hf_abcdefghijklmnopqrstuvwxyz1234567890`). Repo source is clean post-M181.
+      **Evidence:** `jang-server/server.py:51-60`. 20 jang-server tests pass (was 18, +2).
+      **Meta-lesson — secrets audits with regex sweep find what manual review misses.** Iter-113/114 found SSRF + authz with adversarial-framing audits but didn't grep for hardcoded tokens. Iter-116's targeted regex caught the leak in the first pass. **Rule: every fresh codebase audit should include a hardcoded-secret sweep early — `hf_*`, `sk-*`, `AKIA*`, `password\s*=\s*['"]...['"]`, `api_key\s*=\s*['"]...['"]`. Cheap to run; high consequence when it hits.**
+      **Meta-lesson — `os.environ.get(KEY, DEFAULT)` is a leak vector by default.** The pattern is convenient but dangerous when DEFAULT is a real secret. **Rule: any env-var read for a secret must use `""` or `None` as default, then check at use-site and fail-fast if missing.** Convert silent-fall-through into actionable error. Same iter-101/108 "don't lie to the user" rule applied to operators: don't silently use a fallback secret.
+      **Commit:** (this iteration)
 - [x] **M180 (jang-server `_sse_subscribers` ghost-key slow leak — observation flagged iter-114, fixed iter-115)** — Iter-114 noted during the unbounded-resource sweep. Pre-M180 the SSE event-generator's `finally:` block removed a disconnecting client's queue from `_sse_subscribers[job_id]` but left the dict ENTRY behind (with empty list value). Over thousands of job submissions + subscriber disconnects, the dict accumulated ghost keys.
       **Fix (iter 115):** added `if not subs and job_id in _sse_subscribers: del _sse_subscribers[job_id]` to the finally block. When the last subscriber leaves, drop the key entirely. Defense-in-depth: `/admin/purge` also `pop()`s subscribers entries for purged job IDs, in case some subscribers haven't disconnected by purge time (e.g., long-running streams hanging on idle).
       **Tests (+2) in new `jang-server/tests/test_sse_subscribers_cleanup.py`:**

@@ -48,9 +48,16 @@ from pydantic import BaseModel, Field
 # Config
 # ---------------------------------------------------------------------------
 
-HF_UPLOAD_TOKEN = os.environ.get(
-    "HF_UPLOAD_TOKEN", "REDACTED_LEAKED_HF_TOKEN"
-)
+# M181 (iter 116): pre-M181 the default value was a real HF write-token
+# committed to source. CRITICAL: the leaked token MUST be rotated at
+# https://huggingface.co/settings/tokens regardless of this fix —
+# anyone who pulled the repo or has git-history access already has it.
+# Fix here only stops the leak going forward.
+#
+# Now requires the env var to be set explicitly. Empty string fallback
+# means publish/upload paths fail with a clear "missing token" error
+# instead of silently using a default that may be revoked or leaked.
+HF_UPLOAD_TOKEN = os.environ.get("HF_UPLOAD_TOKEN", "")
 HF_ORG = os.environ.get("HF_ORG", "JANGQ-AI")
 WORK_DIR = Path(os.environ.get("JANG_WORK_DIR", "/tmp/jang-server"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)

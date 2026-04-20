@@ -5054,3 +5054,47 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: scan repo for hardcoded credentials / tokens / secrets.
 
 **Next iteration should pick:** rate-limiting audit + fix (concrete + addressable), OR scan-for-secrets sweep (security-adjacent, common audit angle).
+
+---
+
+## 2026-04-20 iteration 116 — M181 hardcoded HF token in jang-server (CRITICAL — needs rotation)
+
+**Angle:** Iter-115 forecast option 2: scan-for-secrets sweep. Picked because security-adjacent and the cross-codebase regex is cheap to run.
+
+**Deep trace walkthrough:**
+1. **Built the secret-pattern regex:** `hf_*`, `sk-*`, `AKIA*`, `password=...`, `api_key=...`, `secret=...`. Standard set.
+2. **Grep'd across the repo** — found ONE high-severity hit: `jang-server/server.py:52` — a real `hf_*` write-token as the default value of `HF_UPLOAD_TOKEN`.
+3. **Confirmed severity.** The pattern `os.environ.get("HF_UPLOAD_TOKEN", "hf_<real_token>")` makes the leaked token the FALLBACK value when the env var isn't set. Production deployments without explicit env config would silently use this token.
+4. **Token has write access** to the JANGQ-AI HF org (per HF_ORG = "JANGQ-AI" line 54).
+5. **Reasoned about exposure surface.** Token committed at first server.py commit; anyone who cloned the repo, has read access to git history, or saw the file in a code review / search index has it. Even after I remove it now, those parties retain it. **The token MUST be rotated at HF settings — this fix only stops the leak going forward.**
+6. **Fix:** removed the default value. `HF_UPLOAD_TOKEN = os.environ.get("HF_UPLOAD_TOKEN", "")`. Empty string fallback means missing-token failures surface as actionable errors (publish refuses) instead of silently using a leaked default.
+7. **Two regression tests:**
+   - Regex catches any `hf_<20+ chars>` literal in server.py (token shape is well-defined).
+   - Semantic test asserts the env-var-read line uses `""` or `None` as default — catches a future engineer who re-introduces a real value via different syntax.
+8. **Cross-repo sweep** to confirm no other hits in our source. Only third-party transformers `testing_utils.py` (well-known public test token) + our own clearly-fake test fixtures (`hf_abcdef...`) showed up. Repo source clean post-M181.
+
+**Meta-lesson — secrets audits with regex catch what adversarial framing misses.** Iter-113/114's adversarial sweeps found SSRF + authz issues but didn't catch the hardcoded token because the audit lens was "how could the server be abused?" not "what secrets does it ship with?" Different lenses catch different bug classes. **Rule: every fresh codebase audit should include a dedicated secrets-regex sweep — `hf_*`, `sk-*`, `AKIA*`, `password=...`, `api_key=...`. Cheap (one grep); high consequence when it hits.**
+
+**Meta-lesson — `os.environ.get(KEY, REAL_SECRET)` is a leak vector by default.** The pattern is convenient (server runs without explicit config) but dangerous when DEFAULT is sensitive. **Rule: env-var reads for secrets must use `""` or `None` as default, then check at use-site and fail-fast if missing.** Same iter-101 / iter-108 "don't lie to the user" rule applied to operators — don't silently fall back to a leaked default.
+
+**Meta-lesson — fixing the leak is necessary but insufficient.** A leaked secret stays leaked even after source removal. The fix STOPS THE LEAK going forward; the OPERATIONAL action is rotation at the secret's source-of-truth (HF settings page in this case). Always document the operational follow-up alongside the code fix. Eric must rotate the token; my code change alone doesn't make the token safe.
+
+**Items touched:**
+- M181 [x] — hardcoded HF token removed from source. 2 regression tests. **REQUIRES OPERATIONAL FOLLOW-UP: rotate the leaked token at https://huggingface.co/settings/tokens.**
+
+**Commit:** (this iteration). The commit message will explicitly call out the rotation requirement so it's visible in git log.
+
+**Verification:** 20 jang-server tests pass (was 18, +2).
+
+**Closed-status tally:** 134 (iter 115) + M181 = 135 items touched, all closed. Zero KNOWN bugs as of iter-116 end. **Open operational task: rotate the leaked HF_UPLOAD_TOKEN at HF settings.**
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: rate-limiting audit on jang-server (DoS surface).
+- **NEW**: extend the secrets-regex test from jang-server to JANGStudio Swift + jang-tools Python — a similar invariant per project would prevent future hardcodes anywhere in the repo.
+
+**Next iteration should pick:** extend the secrets invariant to all Python + Swift files (cross-repo coverage of the M181 rule), OR rate-limiting on jang-server.
