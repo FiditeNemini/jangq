@@ -690,3 +690,35 @@ green/fail matrix has been lying.
 **Closed-status tally:** 31 (prior) + M82 = 32 closed / 71 total = 45% closure rate.
 
 **Next iteration should pick:** Cat A publish remainder (M42/M43/M45) — NOW 5 iters on the forecast list, STILL unpicked. M43 progress streaming is the biggest adopter-UX win. Alternatively M42 (verify cancellation — PostConvertVerifier's `jang validate` subprocess can't be cancelled). Alternatively Cat D memory cross-ref second pass (idle 13 iters) would surface any recent drift between memory claims and actual code.
+
+---
+
+## 2026-04-19 iteration 19 — M42 verify cancellation + timeout (Cat A finally picked)
+
+**Angle:** Close M42 from the Cat A publish/verify adopter journey, on the forecast list for 5 iters. Applies the same actor-friendly subprocess pattern that's proven across PythonRunner (iter 3), InferenceRunner (iter 3), and audit.py (iter 18) to the last remaining synchronous `waitUntilExit` call in the Swift subprocess surface.
+
+**Deep trace walkthrough:**
+1. `PostConvertVerifier.runJangValidate` was a 6-line function using `proc.waitUntilExit()` directly. No timeout, no cancellation.
+2. Called from `PostConvertVerifier.run` (@MainActor) via `await Self.runJangValidate(outputDir: out)`. `async` + `nonisolated static` means it runs off MainActor on a cooperative thread — so it didn't block the main thread, but it DID hold a cooperative thread until the subprocess exited.
+3. **Worst case:** `jang validate` hangs (heavy import stall, corrupted JSON parser loop, locking issue). The entire VerifyStep never completes. User navigates away → view dismounts → but the `Task` spawned by `.onAppear { Task { ... } }` is DETACHED from view lifecycle → keeps running. Python subprocess keeps running. Resource leak.
+4. **Two independent bugs combined into one hang scenario:**
+   - BUG-1: `runJangValidate` has no timeout. A hung subprocess makes `refresh()` block forever.
+   - BUG-2: `VerifyStep.onAppear { Task { ... } }` isn't tied to view lifecycle. SwiftUI dismount doesn't cancel the task.
+5. **Fix layer 1 (subprocess):** Apply the M19 / iter-3 pattern. `withCheckedContinuation` + `proc.terminationHandler` races against `Task.sleep(timeoutSeconds)`. First winner resolves. DispatchQueue guard against double-resume (CheckedContinuation fatal-errors on double-resume). On timeout: SIGTERM + 3s SIGKILL escalation.
+6. **Fix layer 2 (view):** `.onAppear { Task { ... } }` → `.task { ... }`. SwiftUI's `.task` modifier IS tied to view lifecycle — auto-cancelled on dismount, which flows through Task.isCancelled checks (future refresh() work can observe this).
+7. **Timeout rationale:** normal `jang validate` completes in ≤5s (file inspection only — no model load, no inference). 60s default = 10× headroom. Pin with a test that the default stays in [30, 300] to prevent regressions in either direction.
+8. **Timeout test strategy:** Can't easily mock a hanging jang validate from Swift tests without subprocess override infrastructure. Instead: pass `timeoutSeconds: 0.1` against a real subprocess; even Python startup loses that race. Assert `elapsed < 10s` (NOT waiting full 60s) and result is false.
+9. **Caught during implementation:** `Task.sleep(for: .seconds(Double))` accepts Double timeouts; I initially worried 0.1 would be rounded to 0 but `.seconds(0.1)` is `100ms` as expected.
+
+**Items touched:**
+- M42 [x] — validate can no longer hang VerifyStep; view task lifecycle cleaned up.
+
+**Tests (3 new):** default timeout ∈ [30, 300]s, runJangValidate returns false on bogus path (exercises terminationHandler branch), 0.1s timeout bounds wall time under 10s.
+
+**Commit:** (this iteration)
+
+**Verification:** 109 Swift (was 106). Python unchanged at 299 across jang-tools + ralph_runner.
+
+**Closed-status tally:** 32 (prior) + M42 = 33 closed / 71 total = 46% closure rate.
+
+**Next iteration should pick:** M43 (publish progress streaming) is the HIGHEST REMAINING ADOPTER-UX ITEM — users stare at a spinner for 30-minute uploads with zero feedback. Architecturally meatier (needs JSONL stream from Python + Swift parser) but high value. Alternatively M45 (modelcard per-arch coverage) is mid-size. Cat D memory cross-ref is 14 iters idle and would surface any drift between memory and the 10,000+ lines of code that landed since iter 5.

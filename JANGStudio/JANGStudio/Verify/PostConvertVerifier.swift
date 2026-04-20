@@ -135,13 +135,61 @@ struct PostConvertVerifier {
         return checks
     }
 
-    private static func runJangValidate(outputDir: URL) async -> Bool {
+    /// Default wall-time budget for `jang validate`. Validation is file-inspection
+    /// only (no model load, no inference) — it should complete in ≤5 seconds
+    /// on any reasonable machine. 60s is a 10× safety margin that still caps
+    /// the worst case so a hung Python subprocess can't stall VerifyStep
+    /// indefinitely if the user leaves the wizard open in the background.
+    /// Exposed as a parameter for tests; prod callers use the default.
+    static let defaultValidateTimeoutSeconds: Double = 60
+
+    /// Run `jang validate` and return whether it exited 0 within the timeout.
+    /// M42 (iter 19): previously used `proc.waitUntilExit()` which blocks the
+    /// calling thread indefinitely if the subprocess hangs. Now uses the same
+    /// actor-friendly pattern as PythonRunner/InferenceRunner (iter 3): a
+    /// CheckedContinuation tied to `terminationHandler`, plus a Task.sleep
+    /// timeout race that SIGTERMs on expiry.
+    static func runJangValidate(outputDir: URL,
+                                timeoutSeconds: Double = defaultValidateTimeoutSeconds) async -> Bool {
         let proc = Process()
         proc.executableURL = BundleResolver.pythonExecutable
         proc.arguments = ["-m", "jang_tools", "validate", outputDir.path]
         proc.standardOutput = Pipe(); proc.standardError = Pipe()
         do { try proc.run() } catch { return false }
-        proc.waitUntilExit()
-        return proc.terminationStatus == 0
+
+        // Race the natural exit against a timeout sleep. First winner resolves
+        // the continuation; if the timeout wins, SIGTERM the subprocess + a
+        // 3-second SIGKILL escalation so a truly deadlocked child still dies.
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            // Atomic-ish guard — Process APIs don't expose a built-in "already
+            // resolved" flag, and a double-resume on CheckedContinuation is a
+            // fatal error. Wrap with a dispatch queue so exit + timeout can't
+            // resume in parallel.
+            let lock = DispatchQueue(label: "PostConvertVerifier.runJangValidate")
+            var resolved = false
+
+            proc.terminationHandler = { p in
+                lock.sync {
+                    if resolved { return }
+                    resolved = true
+                    cont.resume(returning: p.terminationStatus == 0)
+                }
+            }
+
+            Task.detached {
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                lock.sync {
+                    if resolved { return }
+                    resolved = true
+                    // SIGTERM + 3s SIGKILL escalation, same pattern as PythonRunner.
+                    if proc.isRunning { proc.terminate() }
+                    Task.detached {
+                        try? await Task.sleep(for: .seconds(3))
+                        if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+                    }
+                    cont.resume(returning: false)
+                }
+            }
+        }
     }
 }

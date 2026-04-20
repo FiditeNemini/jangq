@@ -92,7 +92,12 @@ struct VerifyStep: View {
             }
         }
         .formStyle(.grouped).padding()
-        .onAppear { Task { await refresh() } }
+        // `.task` ties the refresh to the VIEW lifecycle — SwiftUI auto-cancels
+        // it on dismount, so navigating away mid-verify doesn't leave an
+        // orphan Python subprocess running. Prior to iter 19 (M42) this was
+        // `.onAppear { Task { await refresh() } }` which spawned a detached
+        // Task unbound to the view lifecycle.
+        .task { await refresh() }
         .sheet(isPresented: $showingInference) {
             if let url = coord.plan.outputURL {
                 TestInferenceSheet(
