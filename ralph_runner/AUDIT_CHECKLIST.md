@@ -892,6 +892,23 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M158 (PostConvertVerifier.runJangValidate — unread Pipe() hang + terminationHandler race)** — Iter-81 deep-traced `PostConvertVerifier.runJangValidate` on the audit of subprocess-helper race / silent-failure patterns. Found two distinct latent bugs, both reporting "validate failed" for a validation that would have passed:
+      1. **Pipe-fill hang.** Code wired `proc.standardOutput = Pipe(); proc.standardError = Pipe()` without ever reading either pipe. macOS pipe buffers are ~64 KB; once the subprocess writes past that, `write(2)` blocks forever because nobody is draining. `jang validate` normally stays small but a Python traceback stacked on a deep shard listing is easy to push over. Result: subprocess blocks → runJangValidate waits the full 60 s default timeout → returns false → user sees "jang validate passes: FAIL" on a model that's actually fine. **Silent mis-report, not a crash.**
+      2. **terminationHandler wired AFTER `run()`.** A subprocess that exits in the microsecond window between `try proc.run()` returning and the handler assignment will never fire the handler — Foundation doesn't call terminationHandler on an already-terminated process. Result: same symptom (wait for 60 s timeout, return false). The window is tiny (<1 ms) so the bug is rare but real — worse, it's a "the model the convert succeeded on now fails to validate half the time" Heisenbug.
+
+      **Fix (iter 81):**
+      - Swapped `Pipe()` → `FileHandle.nullDevice` for stdout + stderr. We don't surface the subprocess's output anywhere, so discarding is the correct primitive. Zero risk of re-introducing the hang.
+      - Moved `proc.terminationHandler = { ... }` to BEFORE `try proc.run()`. Closed the race entirely. The error branch for `proc.run()` throwing now runs inside the same lock.sync guard as the timeout + handler paths so the CheckedContinuation is always resumed exactly once.
+      - Added `executableOverride: URL? = nil` parameter (mirrors InferenceRunner iter-32 M100 / PythonCLIInvoker iter-76 M153) so tests can drive the bug path with a shell script instead of needing a real Python runtime.
+
+      **Tests (+3) in PostConvertVerifierTests.swift:**
+      - `test_runJangValidate_does_not_hang_on_large_stderr_output` — subprocess blasts 400 KB to stderr+stdout then exits 0. Bug would hang at 64 KB → timeout → false. Fix: completes in <1 s, returns true. Measured: 0.907 s.
+      - `test_runJangValidate_returns_true_on_immediate_zero_exit` — subprocess is `exit 0` (exits in microseconds). Bug would miss the handler → timeout → false. Fix: handler wired before run(), returns true in <1 s.
+      - `test_runJangValidate_returns_false_on_nonzero_exit` — symmetric: subprocess is `exit 7`, must still be reported as failure. Guards against the fix accidentally returning true regardless of exit code.
+
+      **Evidence:** `JANGStudio/JANGStudio/Verify/PostConvertVerifier.swift:216-302`. 14/14 PostConvertVerifierTests pass (was 11, +3). Pre-existing concurrency warnings on the `resolved` capture are untouched by this edit — they cover the timeout Task which is already serialized through `lock.sync`.
+      **Meta-lesson:** When a `Pipe()` is wired to a subprocess, either READ it (synchronously at end via `readDataToEndOfFile` after `waitUntilExit`, or asynchronously via `bytes.lines`) OR discard it with `FileHandle.nullDevice`. Unread `Pipe()` is a latent hang waiting for a chatty subprocess. Grepped the whole Swift app for this pattern (`proc\.standardOutput\s*=\s*Pipe\(\)`) — this was the only offender post-fix; the 5 adoption services and PublishService all correctly drain their pipes.
+      **Commit:** (this iteration)
 - [x] **M157 (SettingsWindow "Open logs directory" silent failure — iter-35 M107 class, different verb)** — Iter-80 re-audited `try?` patterns across the Swift app (iter-35 M107 swept user-action silent-failures). Grep for `try? FileManager` / `try? \w+.write` / `try? encoder.`:
       - `SettingsWindow.swift:350` — **silent `try? FileManager.default.createDirectory`**. Real bug.
       - `DiagnosticsBundle.swift:106,204` — tempdir cleanup on bundle write. Best-effort; silent-swallow correct (deferred cleanup path).

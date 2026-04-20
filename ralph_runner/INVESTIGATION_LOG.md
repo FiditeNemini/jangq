@@ -3380,3 +3380,51 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: next M107-style re-sweep — grep for bare `try?` in production .swift that's NOT in a cleanup-path or read-defaults position. Most remaining hits are justified; re-classify to confirm.
 
 **Next iteration should pick:** another M107-class re-sweep (different grep axis — `try? String(data:)` / `try? Data(contentsOf:)` maybe) OR tackle one of the long-open M97/M117/M124.
+
+---
+
+## 2026-04-20 iteration 81 — M158 PostConvertVerifier.runJangValidate: unread-Pipe hang + termHandler race
+
+**Angle:** Iter-80 forecast listed "another M107-class re-sweep (different grep axis)" and "long-open M97/M117/M124" as candidates. I picked neither directly and instead deep-traced one of iter-80's triage hits: `PostConvertVerifier:96,161,164`. Those particular lines were correct (verify-check fallbacks) but the *file* hadn't been deeply audited for subprocess race/silent-failure patterns — and it's the third-biggest subprocess-launcher in the app behind PythonRunner and PythonCLIInvoker. That's a gap.
+
+**Deep trace walkthrough:**
+1. **Read the full file (281 lines, 14-check verifier + diskSizeSanityCheck helper + `runJangValidate`).** Main `run()` reads jang_config / tokenizer_config / index / config.json via silent-default `try?` chains — appropriate (iter-14 M14 surfaces failures as VerifyCheck statuses). Not a bug.
+2. **`runJangValidate` (lines 216-280) is the interesting piece.** Three racing completion paths (subprocess exit, timeout, consumer-Task cancel) coordinated via `DispatchQueue.sync` + `resolved: Bool` flag. Verified the 3-way race:
+   - `terminationHandler`: takes lock, checks resolved, resumes with exit==0 bool.
+   - Timeout `Task.detached`: sleeps timeoutSeconds, takes lock, checks resolved, SIGTERMs + resumes false.
+   - `onCancel`: ONLY calls `proc.terminate()` — doesn't participate in the lock. Correct because the subsequent terminationHandler fire resolves via the lock normally.
+3. **Found bug 1 — unread `Pipe()` deadlock.** Line 229: `proc.standardOutput = Pipe(); proc.standardError = Pipe()`. Pipes are wired but NEVER READ. macOS pipe buffer is ~64 KB; once a subprocess writes past that, write(2) blocks. `jang validate` normally stays small but a traceback + deep shard listing can easily cross 64 KB. Result: subprocess deadlocks → 60 s timeout fires → returns false → "jang validate passes: FAIL" reported for a validate that would have passed. **Silent mis-report.**
+4. **Found bug 2 — terminationHandler wired AFTER `run()`.** Line 230 calls `try proc.run()`, then the code enters `withCheckedContinuation` and sets `proc.terminationHandler = { ... }`. Between run() and the handler assignment there's a microsecond window where a fast-exiting subprocess terminates and Foundation never fires the handler (it's not called on already-terminated processes). Result: continuation deadlocks until the 60 s timeout → false. Rare but real — a flaky "validate sometimes fails" bug with no visible explanation.
+5. **Both bugs collapse to the same symptom.** "runJangValidate reports false on a pass." In production this shows up as the Verify step marking "jang validate passes" as FAIL intermittently — users see inconsistent verify output on identical model dirs. Maps cleanly to feedback_model_checklist.md rule 3 ("wizard never lies").
+6. **Fix shape:**
+   - **Unread-Pipe fix:** `FileHandle.nullDevice` for both std streams. We don't surface subprocess output anywhere (only exit code matters), so discarding is the correct primitive. Zero risk of re-introducing the hang; `.nullDevice` drains in the kernel.
+   - **Race fix:** Move `proc.terminationHandler = { ... }` BEFORE `try proc.run()`. The `do { try proc.run() } catch { ... }` block now lives inside the CheckedContinuation closure so the error path also resumes the continuation (via the same lock.sync) — previously `catch { return false }` was OK because it was outside the continuation; now it has to participate.
+   - **Testability:** Added `executableOverride: URL? = nil` (mirrors iter-32 M100 / iter-76 M153). Tests drive via shell scripts — no real Python runtime needed.
+7. **Regression tests (+3):**
+   - `test_runJangValidate_does_not_hang_on_large_stderr_output` — subprocess emits 400 KB (200 KB stderr + 200 KB stdout) then exits 0. Pre-fix: hits 64 KB → blocks → 10 s timeout → returns false. Post-fix: 0.907 s, returns true.
+   - `test_runJangValidate_returns_true_on_immediate_zero_exit` — subprocess is `exit 0` (exits in microseconds). Pre-fix: flaky miss of handler → timeout → false. Post-fix: handler wired before run() → returns true <1 s.
+   - `test_runJangValidate_returns_false_on_nonzero_exit` — symmetric guard: `exit 7` must STILL be reported as false. Prevents the fix from accidentally returning true regardless of exit.
+8. **Whole-codebase Pipe audit.** Grepped `proc\.standardOutput\s*=\s*Pipe\(\)` across all Swift. Only hit was PostConvertVerifier (the one I fixed). 5 adoption services + PublishService all drain their pipes correctly (synchronous `readDataToEndOfFile()` at end or `for try await line in bytes.lines`). No other unread-Pipe bugs lurking.
+
+**Meta-lesson — unread `Pipe()` is a latent hang.** When wiring a `Pipe()` to a subprocess, you have exactly three options: (a) drain it synchronously at the end (`readDataToEndOfFile` after `waitUntilExit`), (b) drain it asynchronously (`for try await line in bytes.lines`), or (c) don't capture — use `FileHandle.nullDevice`. An unread `Pipe()` is a timebomb that only goes off when the subprocess happens to cross the kernel buffer boundary. The subprocess is the victim, so there's no stack trace pointing at your code — debug loops can take hours.
+
+**Meta-lesson — order-of-wiring matters with `Process.terminationHandler`.** Foundation's Process doesn't invoke `terminationHandler` on an already-terminated process. Pattern: always set `terminationHandler` BEFORE `run()`. Any async cleanup that depends on the handler firing needs the handler installed before the subprocess has a chance to exit. The race window is tiny for most subprocesses but not zero, and a race that only triggers 1-in-10000 launches is exactly the kind of user-visible flakiness that's hardest to debug.
+
+**Items touched:**
+- M158 [x] — `runJangValidate` can no longer hang on chatty subprocesses; termHandler race closed; 3 new regression tests; new `executableOverride` param for testability.
+
+**Commit:** (this iteration)
+
+**Verification:** 14/14 PostConvertVerifierTests pass (was 11, +3). Pre-existing concurrency warnings on `resolved` are untouched. Python 348 + ralph 73 unchanged. Full Swift suite count: 181 (was 178, +3).
+
+**Closed-status tally:** 93 (iter 80) + M158 = 94 closed / 100 total = 94.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: audit `PythonRunner.swift` for the same two bugs — it's the largest subprocess helper and predates PythonCLIInvoker; could have similar unread-Pipe or post-run-handler patterns.
+- **NEW**: audit `InferenceRunner.swift` same way.
+
+**Next iteration should pick:** `PythonRunner` / `InferenceRunner` pipe-wiring audit, or `test_runJangValidate_timeoutFiresWithinTolerance` hardening using `executableOverride` now that it exists (the existing test relies on real Python startup being >0.1 s — brittle, the new override lets us drive a real infinite-loop script instead).

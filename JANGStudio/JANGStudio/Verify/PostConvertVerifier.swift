@@ -221,13 +221,42 @@ struct PostConvertVerifier {
     /// actor-friendly pattern as PythonRunner/InferenceRunner (iter 3): a
     /// CheckedContinuation tied to `terminationHandler`, plus a Task.sleep
     /// timeout race that SIGTERMs on expiry.
+    ///
+    /// M158 (iter 81): two silent-failure bugs audited + fixed:
+    ///
+    ///   1. Pipe-fill hang. The old code wired `Pipe()` to stdout + stderr
+    ///      without ever reading them. macOS pipe buffers are ~64 KB; if the
+    ///      subprocess writes more than that before exiting, the write blocks,
+    ///      the process never exits, and we report validation as failed even
+    ///      though the validator never got to say yes or no. `jang validate`
+    ///      usually stays well under 64 KB, but a traceback on top of a deep
+    ///      shard listing is easy to push over. Swapped to
+    ///      `FileHandle.nullDevice` — we don't surface subprocess output
+    ///      anywhere, so discarding is the right primitive.
+    ///
+    ///   2. terminationHandler wired AFTER run(). A fast-exiting subprocess
+    ///      could terminate in the microsecond window between `try proc.run()`
+    ///      returning and the handler assignment, and Foundation would never
+    ///      invoke the handler on a process that already terminated. Result:
+    ///      continuation deadlocks until the 60 s timeout → false. Reordered
+    ///      so the handler is wired before `run()`, which closes the window
+    ///      entirely.
+    ///
+    /// - Parameter executableOverride: test-only hook, mirrors the
+    ///   InferenceRunner / PythonCLIInvoker pattern (iter-32 M100 / iter-76
+    ///   M153). Production passes nil (defaults to BundleResolver.pythonExecutable);
+    ///   tests supply a shell script that exercises the pipe-fill and
+    ///   fast-exit paths without spinning up a real Python runtime.
     static func runJangValidate(outputDir: URL,
-                                timeoutSeconds: Double = defaultValidateTimeoutSeconds) async -> Bool {
+                                timeoutSeconds: Double = defaultValidateTimeoutSeconds,
+                                executableOverride: URL? = nil) async -> Bool {
         let proc = Process()
-        proc.executableURL = BundleResolver.pythonExecutable
+        proc.executableURL = executableOverride ?? BundleResolver.pythonExecutable
         proc.arguments = ["-m", "jang_tools", "validate", outputDir.path]
-        proc.standardOutput = Pipe(); proc.standardError = Pipe()
-        do { try proc.run() } catch { return false }
+        // M158: discard subprocess output. Capturing into Pipe() with no
+        // reader deadlocks the subprocess once the 64 KB kernel buffer fills.
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
 
         // Race the natural exit against a timeout sleep. First winner resolves
         // the continuation; if the timeout wins, SIGTERM the subprocess + a
@@ -246,12 +275,26 @@ struct PostConvertVerifier {
                 let lock = DispatchQueue(label: "PostConvertVerifier.runJangValidate")
                 var resolved = false
 
+                // M158: wire terminationHandler BEFORE run() so a subprocess
+                // that exits immediately still fires the handler. Setting it
+                // post-run() races the process's own termination.
                 proc.terminationHandler = { p in
                     lock.sync {
                         if resolved { return }
                         resolved = true
                         cont.resume(returning: p.terminationStatus == 0)
                     }
+                }
+
+                do {
+                    try proc.run()
+                } catch {
+                    lock.sync {
+                        if resolved { return }
+                        resolved = true
+                        cont.resume(returning: false)
+                    }
+                    return
                 }
 
                 Task.detached {

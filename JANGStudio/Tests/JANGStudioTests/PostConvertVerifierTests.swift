@@ -150,6 +150,78 @@ final class PostConvertVerifierTests: XCTestCase {
         XCTAssertEqual(check.status, .pass)
     }
 
+    // MARK: - Iter 81: M158 runJangValidate silent-failure regressions
+
+    private func makeTempScript(_ body: String) throws -> URL {
+        // Same pattern as PythonCLIInvokerTests (iter-77 M154). Isolated copy
+        // because the two test suites are linked into the same bundle but
+        // helpers aren't shared — keeping them local preserves the rule that
+        // each test file is readable standalone.
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pcv-\(UUID().uuidString).sh")
+        try "#!/bin/bash\n\(body)\n".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    func test_runJangValidate_does_not_hang_on_large_stderr_output() async throws {
+        // Regression guard for M158 bug 1. Old code wired `Pipe()` to stdout
+        // and stderr without ever reading them; macOS pipe buffer is 64 KB,
+        // so any subprocess writing more than that before exit would block
+        // on write(2) forever — and the validator would wait the full 60 s
+        // timeout before returning false on a validate that actually passed.
+        //
+        // We push 200 KB to stderr, 200 KB to stdout, then exit 0. The fix
+        // (FileHandle.nullDevice) lets the subprocess exit promptly; if the
+        // bug regresses, the subprocess blocks on the first write past 64 KB
+        // and we hit the 10 s timeout below → test fails with `ok == false`.
+        let script = try makeTempScript(#"""
+        dd if=/dev/urandom bs=1024 count=200 2>/dev/null | base64 >&2
+        dd if=/dev/urandom bs=1024 count=200 2>/dev/null | base64
+        exit 0
+        """#)
+        let start = Date()
+        let ok = await PostConvertVerifier.runJangValidate(
+            outputDir: URL(fileURLWithPath: "/tmp/irrelevant-\(UUID().uuidString)"),
+            timeoutSeconds: 10,
+            executableOverride: script
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertTrue(ok, "subprocess exited 0 — pipe-fill regression if this reads false (hit timeout)")
+        XCTAssertLessThan(elapsed, 5, "took \(elapsed)s — pipe-fill regression, should be <1s")
+    }
+
+    func test_runJangValidate_returns_true_on_immediate_zero_exit() async throws {
+        // Regression guard for M158 bug 2. If terminationHandler is wired
+        // AFTER proc.run(), a subprocess that exits in the microsecond window
+        // between run() returning and the handler assignment will never fire
+        // the handler → deadlock until the timeout → false. Fix ordering and
+        // use a subprocess that exits as fast as possible so we maximize the
+        // chance of triggering the race if it regresses.
+        let script = try makeTempScript("exit 0")
+        let start = Date()
+        let ok = await PostConvertVerifier.runJangValidate(
+            outputDir: URL(fileURLWithPath: "/tmp/irrelevant-\(UUID().uuidString)"),
+            timeoutSeconds: 5,
+            executableOverride: script
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertTrue(ok, "fast-exit subprocess returned false — terminationHandler race regression")
+        XCTAssertLessThan(elapsed, 3, "took \(elapsed)s — expected sub-second")
+    }
+
+    func test_runJangValidate_returns_false_on_nonzero_exit() async throws {
+        // Symmetric coverage for the exit-0 test: make sure we correctly
+        // report failure too, not just accidentally return true regardless.
+        let script = try makeTempScript("exit 7")
+        let ok = await PostConvertVerifier.runJangValidate(
+            outputDir: URL(fileURLWithPath: "/tmp/irrelevant-\(UUID().uuidString)"),
+            timeoutSeconds: 5,
+            executableOverride: script
+        )
+        XCTAssertFalse(ok, "exit 7 must map to false")
+    }
+
     func test_runJangValidate_timeoutFiresWithinTolerance() async {
         // Use an intentionally unreachable executable override so the child
         // subprocess just hangs waiting for stdin / never returns. The timeout
