@@ -847,6 +847,23 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `test_load_method_split_is_present_in_source`: source-inspection pin ensures the log message literal survives future refactors (prevents re-collapsing back to `try?`).
       **Evidence:** `JANGStudio/JANGStudio/Models/AppSettings.swift:147-175`. 170 Swift tests pass (was 169, +1 tracked in WizardStepContinueGateTests; AppSettingsTests grew 20→23, +3). Python 314 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M148 (jangspec manifest load: symmetric-path hardening + schema-migration diagnostics)** — Iter-69's meta-rule "symmetric paths must have symmetric error handling" applied to the jangspec bundle format. `write_manifest` raises on write failure (top-level convert catches). `load_manifest` was weaker: bare `json.loads(Path(path).read_text())` + `Manifest(**data)` — both produced cryptic tracebacks on corruption or schema drift.
+      **Pre-M148 failure modes:**
+      - Disk read fault (OSError) → raw traceback, no path context.
+      - Malformed JSON in jangspec.json → `json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)` — no file path, no hint.
+      - Non-dict JSON root (e.g., `[1,2,3]`) → `AttributeError: 'list' object has no attribute 'get'` via `data.get("bundle_version")`.
+      - Schema migration (missing or extra field) → `TypeError: Manifest.__init__() missing 1 required positional argument: 'draft_jang'` — gives field name but no bundle path, no hint about version drift.
+      **Fix (iter 70):** mirror iter-43 M120 + iter-69 M147 patterns. Every error path:
+      - Wraps as `ValueError` with the bundle path in the message.
+      - Hints about the cause: "not valid JSON", "expected a JSON object", "schema validation (likely a bundle written by a different jang-tools version)".
+      - `from exc` chaining preserves the original for debugging.
+      **Tests (+4) in tests/jangspec/test_manifest.py:**
+      - `test_manifest_rejects_malformed_json`: invalid JSON → ValueError with path + "not valid JSON".
+      - `test_manifest_rejects_non_dict_root`: `[1,2,3]` → ValueError with "expected a JSON object".
+      - `test_manifest_rejects_missing_required_field`: simulates schema migration → ValueError with "schema validation" + "different jang-tools version" hint.
+      - `test_manifest_missing_file_raises_value_error`: OSError → ValueError with "could not read manifest" + path.
+      **Evidence:** `jang-tools/jang_tools/jangspec/manifest.py:49-104`. 318 Python tests pass (was 314, +4). Swift 170 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

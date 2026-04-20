@@ -2885,3 +2885,74 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 - Python-side analog: grep all `try:` blocks in jang-tools that silently pass / log vs raise — ensure consistency with peer functions.
 
 **Next iteration should pick:** symmetric-path audit (directly applies this iter's meta-lesson; likely finds more) OR return to Python side for a refreshing context switch.
+
+## 2026-04-20 iteration 70 — M148 jangspec load_manifest symmetric-path hardening
+
+**Angle:** Iter-69 meta-rule "symmetric paths must have symmetric error handling" applied to the jangspec bundle format. Read `write_manifest` vs `load_manifest` for error-path symmetry.
+
+**Deep trace walkthrough:**
+1. **write_manifest** is simple: creates parent dir, opens for write, json.dumps + newline. Raises on failure; convert.py's top-level catch + main's structured-error progress event surface it cleanly.
+2. **load_manifest (pre-M148):**
+   ```python
+   def load_manifest(path: Path) -> Manifest:
+       data = json.loads(Path(path).read_text())
+       bv = data.get("bundle_version")
+       if bv != fmt.BUNDLE_VERSION:
+           raise ValueError(f"unsupported bundle_version {bv}, …")
+       return Manifest(**data)
+   ```
+   Version check is clean — but every OTHER failure mode produces a raw Python exception:
+   - OSError on read_text → `PermissionError: [Errno 13] Permission denied: …` — raw stdlib class, no ValueError wrapping.
+   - JSONDecodeError on bad JSON → cryptic `Expecting value: line 1 column 1 (char 0)`, no bundle path.
+   - Missing dict keys (schema migration) → `TypeError: Manifest.__init__() missing 1 required positional argument: 'draft_jang'` — field name is useful but no path + no "why" hint.
+3. **Real-user scenarios:**
+   - User points vMLX or any loader at a partial/corrupt bundle (interrupted download). Gets JSONDecodeError with no hint which file.
+   - User has multiple bundles on disk, updates jang-tools, some bundles were written by the older version. Schema drift → cryptic TypeError.
+   - User's disk has a permission issue on the bundle dir. Gets PermissionError with no hint that it's a manifest-read failure specifically.
+4. **Fix strategy — mirror M120/M147:**
+   - Wrap every error as ValueError for a single exception type the caller can rely on.
+   - Include `path` in every error message.
+   - Use `from exc` chaining to preserve the original for debugging.
+   - Give schema-migration errors a "likely written by a different jang-tools version" hint.
+5. **Test strategy — capture each failure mode:**
+   - Malformed JSON.
+   - Non-dict root.
+   - Missing required field (schema migration).
+   - Missing file (OSError class).
+   All four should produce ValueError with path context.
+
+**Meta-lesson reinforcement.** The symmetric-path audit class (iter-69) pays off each time applied. Three fixes with the same shape so far (M120 inspect_source, M147 AppSettings.load, M148 jangspec manifest) — they all look like:
+```python
+try:
+    raw = read()
+except (OSError, UnicodeDecodeError) as e:
+    raise ValueError(f"<context path>: {e}") from e
+try:
+    parsed = decode(raw)
+except SpecificDecodeError as e:
+    raise ValueError(f"<context path>: bad format at <loc>: {e}") from e
+if not isinstance(parsed, ExpectedType):
+    raise ValueError(f"<context path> has type {type(parsed).__name__}, expected …")
+# downstream validation
+```
+Three iters building the same pattern — it's now a template. Future read-side loaders should follow this template from the start.
+
+**Items touched:**
+- M148 [x] — `jangspec.manifest.load_manifest` now wraps OSError / UnicodeDecodeError / JSONDecodeError / TypeError as ValueError with bundle-path context + schema-migration hint.
+
+**Commit:** (this iteration)
+
+**Verification:** 318 jang-tools tests pass (was 314, +4 for the 4 error-path pins). Swift 170 + ralph 73 unchanged.
+
+**Closed-status tally:** 82 (iter 69) + M148 = 83 closed / 100 total = 83.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW**: continue the symmetric-path audit on Python side. `format/reader.py` + writer pair is next candidate — reader uses bare json.loads on config.json + jang_config.json + index.json.
+- **NEW**: routing_profile.py has `json.loads(config_path.read_text())` at three places (iter-43 re-grep noted). Same M148 template.
+
+**Next iteration should pick:** format/reader.py symmetric-path hardening (direct continuation) OR a fresh category.

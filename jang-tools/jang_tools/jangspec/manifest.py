@@ -47,10 +47,54 @@ def write_manifest(path: Path, manifest: Manifest) -> None:
 
 
 def load_manifest(path: Path) -> Manifest:
-    data = json.loads(Path(path).read_text())
+    """Load and validate a jangspec bundle manifest.
+
+    M148 (iter 70): harden error reporting symmetrically with
+    ``write_manifest`` and with the iter-43 M120 pattern on
+    inspect_source/recommend. Pre-iter-70 a corrupted or
+    schema-migrated bundle produced raw ``JSONDecodeError`` /
+    ``TypeError: Manifest.__init__() missing 1 required positional
+    argument`` tracebacks — opaque to the end user. The iter-70
+    version:
+      * Catches OSError / UnicodeDecodeError on the read so disk
+        faults produce actionable stderr.
+      * Catches JSONDecodeError and surfaces the bad file path
+        and decode location.
+      * Catches Manifest(**data) TypeError (missing/extra keys
+        from a schema migration) and hints that the bundle was
+        written by an older or newer tool version.
+    Every error path includes the ``path`` so diagnostics are
+    unambiguous when users have multiple bundles on disk.
+    """
+    p = Path(path)
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"could not read manifest at {p}: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"manifest at {p} is not valid JSON "
+            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"manifest at {p} has a top-level {type(data).__name__}, "
+            f"expected a JSON object"
+        )
     bv = data.get("bundle_version")
     if bv != fmt.BUNDLE_VERSION:
         raise ValueError(
-            f"unsupported bundle_version {bv}, this build supports {fmt.BUNDLE_VERSION}"
+            f"unsupported bundle_version {bv} at {p}, "
+            f"this build supports {fmt.BUNDLE_VERSION}"
         )
-    return Manifest(**data)
+    try:
+        return Manifest(**data)
+    except TypeError as exc:
+        # Schema-migration mismatch: missing or extra field. Hint the user
+        # about version drift so they know where to look.
+        raise ValueError(
+            f"manifest at {p} failed schema validation "
+            f"(likely a bundle written by a different jang-tools version): {exc}"
+        ) from exc
