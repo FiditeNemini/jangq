@@ -99,3 +99,46 @@ def test_warn_never_throttled():
     em.tick(2, 100, "b")
     types = [e["type"] for e in _drain(em)]
     assert "warn" in types
+
+
+# ──────────────────────────────────────────────────────────────────
+# Iter 11: M62 env passthrough — JANG_TICK_THROTTLE_MS resolution
+# ──────────────────────────────────────────────────────────────────
+
+def test_tick_throttle_default_when_env_unset(monkeypatch):
+    from jang_tools.progress import _resolve_tick_interval_s
+    monkeypatch.delenv("JANG_TICK_THROTTLE_MS", raising=False)
+    assert _resolve_tick_interval_s() == 0.1
+
+
+def test_tick_throttle_reads_env(monkeypatch):
+    from jang_tools.progress import _resolve_tick_interval_s
+    monkeypatch.setenv("JANG_TICK_THROTTLE_MS", "250")
+    assert _resolve_tick_interval_s() == 0.25
+
+
+def test_tick_throttle_garbage_env_falls_back(monkeypatch):
+    # Misconfigured env must NOT hang the emit loop (zero or negative interval
+    # would mean the throttle never coalesces, which is worse than a too-long
+    # interval). Any invalid value falls back to the 100 ms default.
+    from jang_tools.progress import _resolve_tick_interval_s
+    for val in ["", "not-a-number", "0", "-50", "   "]:
+        monkeypatch.setenv("JANG_TICK_THROTTLE_MS", val)
+        assert _resolve_tick_interval_s() == 0.1, f"should fall back for {val!r}"
+
+
+def test_emitter_applies_env_throttle(monkeypatch):
+    # End-to-end: with throttle=1ms, a tight loop of 100 ticks should emit
+    # ALMOST all of them (vs the default 100ms throttle test above which keeps
+    # <50). This verifies the per-instance throttle actually overrides the
+    # module constant.
+    monkeypatch.setenv("JANG_TICK_THROTTLE_MS", "1")
+    em = ProgressEmitter(json_to_stderr=True, quiet_text=True, _stderr=io.StringIO(), _stdout=io.StringIO())
+    # Add a 2 ms sleep between ticks so the 1 ms throttle lets each through.
+    import time
+    for i in range(10):
+        em.tick(i, 10, f"t{i}")
+        time.sleep(0.002)
+    events = _drain(em)
+    # All 10 should land, not coalesced to single digits.
+    assert len(events) >= 8, f"1 ms throttle should preserve most ticks, got {len(events)}"

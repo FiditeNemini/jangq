@@ -287,16 +287,27 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - 6 new tests (persist mirror, clear removes key, resolver reads UserDefaults, empty string ignored, load re-syncs on fresh process, reset clears leaf mirror).
       **Evidence:** 81 Swift tests pass (was 75).
       **Commit:** (this iteration)
-- [ ] **M62** — Remaining UI-lie settings. **Iter 10 closed 6 of 9** (see M62 sub-items below); **3 still inert**:
-  - ~~`autoDeletePartialOnCancel` → should drive RunStep cancel handler~~ ✅ iter 10
-  - ~~`revealInFinderOnFinish` → should fire NSWorkspace.activateFileViewerSelecting~~ ✅ iter 10
-  - ~~`defaultProfile` / `defaultFamily` / `defaultMethod` / `defaultHadamardEnabled` → should seed ConversionPlan at wizard init~~ ✅ iter 10
-  - `customJangToolsPath` → should set PYTHONPATH in PythonRunner env
-  - `tickThrottleMs` → should be passed to Python via env var / CLI flag
-  - `logVerbosity` → should set JANG_LOG_LEVEL env
-  - `mlxThreadCount` → should set OMP_NUM_THREADS / MLX_THREADS env
-  - `preAllocateRam*` → should set MLX_BUFFER_POOL_SIZE_GB env
-  - `anonymizePathsInDiagnostics` → DiagnosticsBundle should obey
+- [ ] **M62** — Remaining UI-lie settings. **Iter 10 closed 6, iter 11 closed 3 more** (9/12 done, 3 still inert):
+  - ~~`autoDeletePartialOnCancel`~~ ✅ iter 10
+  - ~~`revealInFinderOnFinish`~~ ✅ iter 10
+  - ~~`defaultProfile` / `defaultFamily` / `defaultMethod` / `defaultHadamardEnabled`~~ ✅ iter 10
+  - ~~`customJangToolsPath` → PYTHONPATH prepend~~ ✅ iter 11
+  - ~~`tickThrottleMs` → JANG_TICK_THROTTLE_MS env var, Python side reads it~~ ✅ iter 11
+  - ~~`mlxThreadCount` → OMP_NUM_THREADS + MLX_NUM_THREADS env vars~~ ✅ iter 11
+  - `logVerbosity` → would need JANG_LOG_LEVEL in every emit site (wide refactor — deferred)
+  - `preAllocateRam*` → no standard MLX env var for buffer pool (deferred — needs upstream feature)
+  - `anonymizePathsInDiagnostics` → DiagnosticsBundle pre-process rewrite (medium-size — deferred)
+- [x] **M62d** — `tickThrottleMs` / `mlxThreadCount` / `customJangToolsPath` were UI-only. Persisted to UserDefaults, never consulted by any subprocess-spawning code.
+      **Fix (iter 11):** Unified env-addition builder `BundleResolver.childProcessEnvAdditions(inherited:)` reads dedicated leaf UserDefaults keys (same pattern as M61) and returns the env dict. Merged into all three subprocess entry points: `PythonRunner.launch`, `InferenceRunner.generate`, `PublishService.invoke`. Publish path inherits too since it's a python3 child just like convert.
+      - tickThrottleMs → `JANG_TICK_THROTTLE_MS`. `progress.py` `_resolve_tick_interval_s()` reads it, falls back to 100 ms on empty / non-integer / zero / negative. Per-ProgressEmitter-instance so a bad env value doesn't poison the module-level constant.
+      - mlxThreadCount → both `OMP_NUM_THREADS` (BLAS) and `MLX_NUM_THREADS` (MLX) so the user doesn't have to know which layer consumes which. 0 = "auto" → no env var set (can't wedge the child with `OMP_NUM_THREADS=0`).
+      - customJangToolsPath → PYTHONPATH PREPEND (not replace) so bundled jang_tools still resolves for anything the custom path doesn't override.
+      **Invariants pinned by tests:**
+      - default settings → zero env additions (non-users pay zero cost)
+      - returning a setting to its default REMOVES the leaf key (fall through to defaults, not frozen at stale value)
+      - load() re-syncs all three leaf keys on fresh process (defends against leaf-key drift from other consumers)
+      **Evidence:** `BundleResolver.swift:15-69`, `AppSettings.swift:155-175`, `progress.py:22-42`, 6 new `BundleResolverTests` + 4 new `AppSettingsTests` + 4 new Python progress tests.
+      **Commit:** (this iteration)
 - [x] **M62a** — `defaultProfile` / `defaultFamily` / `defaultMethod` / `defaultHadamardEnabled` were persisted but never read. Wizard always started at hardcoded `JANG_4K / jang / mse / false` regardless of user's saved defaults.
       **Fix:** Added `ConversionPlan.applyDefaults(from: AppSettings)` (MainActor) that seeds profile/family/method/hadamard from settings. Empty profile is a no-op (corruption guard). Method strings "mse-all"/"mseall"/"mse_all" all map to `.mseAll`. Per-conversion STATE (sourceURL/detected/outputURL/run) is never touched — verified by test. Called from `WizardView.task` once on first entry + from `VerifyStep.reset()` ("Convert another") so the fresh plan still reflects user settings.
       **Evidence:** `ConversionPlan.swift:57-88`, `WizardCoordinator.swift:36-68`, `VerifyStep.swift:158-168`. 5 new tests in `ConversionPlanTests` (accept normal, ignore empty, ignore unknown method, alias coverage, preserve per-conversion state).

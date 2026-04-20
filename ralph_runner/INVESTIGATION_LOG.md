@@ -348,3 +348,46 @@ Each entry records ONE deep trace. Created by iterations under the new Ralph pro
 **Closed-status tally:** 16 (prior) + M62a + M62b + M62c = 19 closed / 61 total = 31% closure rate.
 
 **Next iteration should pick:** The remaining M62 sub-items are either (a) purely env-var passthrough (tickThrottleMs, logVerbosity, mlxThreadCount, preAllocateRam) which could all land in a single patch to PythonRunner, or (b) a harder path anonymization rewrite of DiagnosticsBundle. Option (a) is the efficient batch. Or rotate to M55 (multi-instance state.json race — reliability complement to iter 8) which has been sitting idle since iter 8.
+
+---
+
+## 2026-04-19 iteration 11 — env passthrough batch (Cat B continued)
+
+**Angle:** Finish the cheap inert-setting cleanup by giving every subprocess-
+spawning entry point (PythonRunner, InferenceRunner, PublishService) a single
+unified way to merge user settings into the child env. Target: 3 more M62
+sub-items in one patch.
+
+**Deep trace walkthrough:**
+1. Re-grep the 6 remaining M62 fields to confirm no stray reads landed since iter 10:
+   ```
+   grep -rn "tickThrottleMs\|mlxThreadCount\|customJangToolsPath\|logVerbosity\|preAllocateRam\|anonymizePathsInDiagnostics" JANGStudio/JANGStudio --include="*.swift" | grep -v AppSettings.swift | grep -v SettingsWindow.swift
+   ```
+   Still zero — all 6 remain inert.
+2. Categorise by implementation cost:
+   - **tickThrottleMs, mlxThreadCount, customJangToolsPath** — single env-var assignment each. Small, safe, testable.
+   - **logVerbosity** — would need JANG_LOG_LEVEL reads in every emit site in Python (bare `print()` calls scattered through the codebase). Wide refactor, deferred.
+   - **preAllocateRam*** — MLX has no standard env for buffer pool size. Deferred pending upstream feature.
+   - **anonymizePathsInDiagnostics** — DiagnosticsBundle needs a pre-process pass that rewrites file paths. Medium-sized. Deferred.
+3. **Architecture decision:** rather than duplicate `env[x] = ...` snippets across the 3 subprocess entry points, introduce one helper on `BundleResolver`: `childProcessEnvAdditions(inherited:)`. Callers merge the return value into their already-constructed env. Same leaf-key pattern as M61 (iter 9) — AppSettings writes, BundleResolver reads.
+4. **Cross-cutting invariants the implementation must satisfy** (pinned by tests):
+   - Default settings → zero env additions. Users who never open Settings shouldn't pay any cost.
+   - "Return to default" must REMOVE the leaf key, not freeze a stale value. Example: user set threads=8, then chose "Auto" — OMP_NUM_THREADS must not remain set.
+   - `0` thread count means "auto" in the UI. Writing OMP_NUM_THREADS=0 to the child would wedge the Python process. So the mirror MUST skip zero.
+   - PYTHONPATH is PREPEND, not replace. Bundled jang_tools must still resolve for anything the custom path doesn't override. Otherwise an incomplete custom path would break the conversion.
+5. **Python side:** `_TICK_MIN_INTERVAL_S` was a module-level constant used inside `tick()`. Replaced with `_resolve_tick_interval_s()` that reads `JANG_TICK_THROTTLE_MS` at ProgressEmitter-instance time. Garbage values (empty / non-integer / zero / negative) fall back to 100 ms default so a misconfigured env can't hang emit loops. `ProgressEmitter.__init__` stores the resolved value on `self`.
+6. **Tests:** 14 new total:
+   - **Python (4):** env-unset default, env-reads-integer, garbage fallback (5 cases: empty, non-numeric, "0", "-50", whitespace), end-to-end emit-loop throttle application with 1 ms env + sleep assertion.
+   - **Swift BundleResolver (6):** empty additions on no settings, tick throttle wired, thread count writes BOTH OMP + MLX keys, zero thread count writes NOTHING, PYTHONPATH prepend with existing inherited, PYTHONPATH with no inherited.
+   - **Swift AppSettings (4):** tick throttle mirrors only non-default (with return-to-default test), mlxThreadCount mirrors only non-zero, customJangToolsPath mirrors only non-empty, load() re-syncs all three on fresh process.
+
+**Items touched:**
+- M62d [x] — tickThrottleMs / mlxThreadCount / customJangToolsPath now live end-to-end (UI → leaf key → env → subprocess → Python)
+
+**Commit:** (this iteration)
+
+**Verification:** 96 Swift (was 86), 231 Python (was 227), 28 ralph_runner all pass.
+
+**Closed-status tally:** 19 (prior) + M62d = 20 closed / 61 total = 33% closure rate. M62 parent item now 9/12 sub-items done; 3 remaining are intentionally deferred (logVerbosity wide-refactor, preAllocateRam upstream-gap, anonymizePathsInDiagnostics medium-rewrite).
+
+**Next iteration should pick:** M55 (multi-instance state.json race — sitting idle since iter 8) would be a natural reliability follow-up to the iter-8 Ralph runner hardening. Alternatively Cat K audit.py (765 lines, never traced). Alternatively spawned-M easy picks: M02 (data-shaped-but-wrong-content HF clones), M07 (non-standard nested model_type), M15 (publish token clear-on-complete), M22 (DiagnosticsBundle race during running convert).

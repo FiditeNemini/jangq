@@ -36,6 +36,13 @@ actor PythonRunner {
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONNOUSERSITE"] = "1"
+        // Merge user-settings-driven env vars (tick throttle, thread count,
+        // PYTHONPATH prepend). These flow from AppSettings → UserDefaults
+        // leaf keys → BundleResolver.childProcessEnvAdditions. See M62 in
+        // the Ralph audit log.
+        for (k, v) in BundleResolver.childProcessEnvAdditions(inherited: env) {
+            env[k] = v
+        }
         proc.environment = env
 
         let outPipe = Pipe()

@@ -146,6 +146,28 @@ final class AppSettings {
         } else {
             defaults.set(pythonOverridePath, forKey: BundleResolver.pythonOverrideDefaultsKey)
         }
+
+        // Child-process env passthrough (M62 — iter 11). Only non-default
+        // values get mirrored so BundleResolver.childProcessEnvAdditions can
+        // treat "missing key" and "default value" as the same "fall through
+        // to Python default" state.
+        if tickThrottleMs == 100 {
+            defaults.removeObject(forKey: BundleResolver.tickThrottleMsDefaultsKey)
+        } else {
+            defaults.set(tickThrottleMs, forKey: BundleResolver.tickThrottleMsDefaultsKey)
+        }
+
+        if mlxThreadCount == 0 {
+            defaults.removeObject(forKey: BundleResolver.mlxThreadCountDefaultsKey)
+        } else {
+            defaults.set(mlxThreadCount, forKey: BundleResolver.mlxThreadCountDefaultsKey)
+        }
+
+        if customJangToolsPath.isEmpty {
+            defaults.removeObject(forKey: BundleResolver.customJangToolsPathDefaultsKey)
+        } else {
+            defaults.set(customJangToolsPath, forKey: BundleResolver.customJangToolsPathDefaultsKey)
+        }
     }
 }
 

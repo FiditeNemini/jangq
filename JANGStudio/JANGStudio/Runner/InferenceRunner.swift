@@ -79,6 +79,10 @@ actor InferenceRunner {
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONNOUSERSITE"] = "1"
+        // M62 env-passthrough: user settings → child env.
+        for (k, v) in BundleResolver.childProcessEnvAdditions(inherited: env) {
+            env[k] = v
+        }
         proc.environment = env
 
         let out = Pipe()

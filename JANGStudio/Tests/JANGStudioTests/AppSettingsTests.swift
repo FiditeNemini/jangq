@@ -3,16 +3,23 @@ import XCTest
 
 @MainActor
 final class AppSettingsTests: XCTestCase {
+    private static let allLeafKeys: [String] = [
+        BundleResolver.pythonOverrideDefaultsKey,
+        BundleResolver.tickThrottleMsDefaultsKey,
+        BundleResolver.mlxThreadCountDefaultsKey,
+        BundleResolver.customJangToolsPathDefaultsKey,
+    ]
+
     override func setUp() {
         super.setUp()
-        // Wipe defaults before each test to avoid cross-contamination
+        // Wipe defaults before each test to avoid cross-contamination.
         UserDefaults.standard.removeObject(forKey: "JANGStudioSettings")
-        UserDefaults.standard.removeObject(forKey: BundleResolver.pythonOverrideDefaultsKey)
+        for k in Self.allLeafKeys { UserDefaults.standard.removeObject(forKey: k) }
     }
 
     override func tearDown() {
         UserDefaults.standard.removeObject(forKey: "JANGStudioSettings")
-        UserDefaults.standard.removeObject(forKey: BundleResolver.pythonOverrideDefaultsKey)
+        for k in Self.allLeafKeys { UserDefaults.standard.removeObject(forKey: k) }
         super.tearDown()
     }
 
@@ -146,5 +153,75 @@ final class AppSettingsTests: XCTestCase {
             UserDefaults.standard.string(forKey: BundleResolver.pythonOverrideDefaultsKey),
             "reset() must also clear leaf-consumer mirrors (reset() calls persist internally)"
         )
+    }
+
+    // MARK: - Iter 11: M62 env passthrough mirroring
+
+    func test_tick_throttle_mirrors_only_non_default() {
+        let s = AppSettings()
+        // Default is 100 ms — mirrored value should be absent (fall through to
+        // Python default) so the env var is never set for users who never
+        // touched the slider.
+        s.persist()
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: BundleResolver.tickThrottleMsDefaultsKey), 0,
+                       "default 100 ms → leaf key absent (0 from .integer() means absent)")
+
+        s.tickThrottleMs = 250
+        s.persist()
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: BundleResolver.tickThrottleMsDefaultsKey), 250)
+
+        // Returning to default must REMOVE the key.
+        s.tickThrottleMs = 100
+        s.persist()
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: BundleResolver.tickThrottleMsDefaultsKey), 0,
+                       "returning to default must remove the mirror key")
+    }
+
+    func test_mlx_thread_count_mirrors_only_non_zero() {
+        let s = AppSettings()
+        s.persist()  // defaults: mlxThreadCount=0 (auto)
+        XCTAssertNil(UserDefaults.standard.object(forKey: BundleResolver.mlxThreadCountDefaultsKey),
+                     "0 means auto → leaf key must be absent")
+
+        s.mlxThreadCount = 8
+        s.persist()
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: BundleResolver.mlxThreadCountDefaultsKey), 8)
+
+        s.mlxThreadCount = 0
+        s.persist()
+        XCTAssertNil(UserDefaults.standard.object(forKey: BundleResolver.mlxThreadCountDefaultsKey),
+                     "returning to auto must remove the mirror key")
+    }
+
+    func test_custom_jang_tools_path_mirrors_only_non_empty() {
+        let s = AppSettings()
+        s.customJangToolsPath = "/Users/eric/custom"
+        s.persist()
+        XCTAssertEqual(UserDefaults.standard.string(forKey: BundleResolver.customJangToolsPathDefaultsKey),
+                       "/Users/eric/custom")
+
+        s.customJangToolsPath = ""
+        s.persist()
+        XCTAssertNil(UserDefaults.standard.string(forKey: BundleResolver.customJangToolsPathDefaultsKey))
+    }
+
+    func test_load_resyncs_env_passthrough_keys_on_fresh_process() {
+        let s1 = AppSettings()
+        s1.tickThrottleMs = 200
+        s1.mlxThreadCount = 4
+        s1.customJangToolsPath = "/prior/session"
+        s1.persist()
+
+        // Simulate drift
+        UserDefaults.standard.set(999, forKey: BundleResolver.tickThrottleMsDefaultsKey)
+        UserDefaults.standard.set(999, forKey: BundleResolver.mlxThreadCountDefaultsKey)
+        UserDefaults.standard.set("/wrong", forKey: BundleResolver.customJangToolsPathDefaultsKey)
+
+        // Fresh AppSettings() → load() → mirrorLeafConsumerKeys() re-syncs.
+        _ = AppSettings()
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: BundleResolver.tickThrottleMsDefaultsKey), 200)
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: BundleResolver.mlxThreadCountDefaultsKey), 4)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: BundleResolver.customJangToolsPathDefaultsKey),
+                       "/prior/session")
     }
 }

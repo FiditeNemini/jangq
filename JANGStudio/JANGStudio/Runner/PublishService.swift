@@ -129,6 +129,12 @@ enum PublishService {
                     var env = ProcessInfo.processInfo.environment
                     env["HF_HUB_TOKEN"] = token
                     env["PYTHONUNBUFFERED"] = "1"
+                    // M62 env-passthrough for PYTHONPATH / thread count /
+                    // throttle. Publish is a one-shot Python invoke just like
+                    // PythonRunner, so it benefits from the same user settings.
+                    for (k, v) in BundleResolver.childProcessEnvAdditions(inherited: env) {
+                        env[k] = v
+                    }
                     proc.environment = env
                     let out = Pipe(); let err = Pipe()
                     proc.standardOutput = out
