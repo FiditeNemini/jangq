@@ -4149,3 +4149,50 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: verify the full-Swift-test-count after iter-95's churn.
 
 **Next iteration should pick:** M66 stale-UserDefaults audit (concrete open observation from iter-14), rapid-click debounce (small UX polish), OR preflight disk-space estimation verification.
+
+---
+
+## 2026-04-20 iteration 96 — M66 closure: AppSettings silent-coercion fix
+
+**Angle:** M66 was an open observation from iter-14's AppSettings work. Specific finding: `Snapshot.apply` coerces invalid LogVerbosity and UpdateChannel rawValues to defaults silently. Good small-scope iter to close a long-open item.
+
+**Deep trace walkthrough:**
+1. **Identified the sites** — 2 occurrences in AppSettings.swift:289, 303:
+   ```
+   s.logVerbosity = LogVerbosity(rawValue: logVerbosity) ?? .normal
+   s.updateChannel = UpdateChannel(rawValue: updateChannel) ?? .stable
+   ```
+2. **Enumerated real-world triggers:**
+   - Schema rename in app updates (e.g., `.normal` → `.standard` — old saves have `"normal"` string that no longer matches).
+   - Cross-version downgrade: user on v2.0 picks `.verbose-v2` (new case), downgrades to v1.9 which doesn't have that case → coerce.
+   - Manual `defaults write` with typo.
+   In all three: user's custom setting silently reverts to default with no indication. iter-35 M107 / iter-80 M157's surface-silent-failures pattern applies.
+3. **Designed the fix** — restructure `?? .normal` into an `if let parsed = ... else { log; apply default }` block. The `else` branch writes a specific stderr line naming the bad value + the fallback + a "re-save in Settings" hint. Consistent shape for both coercion sites.
+4. **Tests** — three new tests:
+   - Two source-inspection pins for the stderr literals (catches accidental removal in a future simplification).
+   - One functional test constructing a Snapshot JSON with invalid values, writing to UserDefaults, spawning AppSettings() (which calls load → apply), asserting fallback behavior is still correct. Guards against a future "fix" that changes the fallback silently.
+5. **TDD note:** initial attempt used `s.load()` directly — private access. Corrected to write UserDefaults BEFORE construction, since `AppSettings()` init calls load() internally. This is the correct mental model: the load path runs on construction, so corrupting UserDefaults first then constructing gives the same effect.
+
+**Meta-lesson — open "observation" items from early iters are still worth closing.** M66 was flagged in iter-14 but marked as "consider" rather than actioned. Left open for 80+ iters. Closing it took ~15 minutes and prevents one specific class of user-frustration ("why doesn't my verbose setting persist after the update?"). Rule for future audits: when the audit log shows "open observation" items from pre-iter-30 work, revisit them periodically — they're still real bugs even if severity is low.
+
+**Meta-lesson — private APIs complicate testing.** AppSettings's `load()` is intentionally private (init-time orchestration). Testing the coercion path required writing UserDefaults BEFORE construction. This works but is slightly awkward. Keep a note: if `load()` becomes internal for other testing needs, simplify this test.
+
+**Items touched:**
+- M66 [x] — both coercion sites now log to stderr with actionable recovery hint. 3 new regression tests (2 source-inspection + 1 functional).
+
+**Commit:** (this iteration)
+
+**Verification:** 26 AppSettingsTests pass (was 23, +3).
+
+**Closed-status tally:** 112 (iter 95) + M66 = 113 items touched, all closed. Zero known bugs as of iter-96 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: scan AUDIT_CHECKLIST.md for remaining `- [ ]` open-observation items that could be closed in small iters like M66.
+- **NEW**: rapid-click debounce on "Choose Folder…".
+- **NEW**: preflight disk-space estimation accuracy check.
+
+**Next iteration should pick:** scan the checklist for other cheap-to-close open-observation items, OR the preflight disk-space accuracy audit (could find a real bug if the math is off on >100 GB models).

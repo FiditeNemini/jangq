@@ -286,7 +286,22 @@ private struct Snapshot: Codable {
         s.defaultHFOrg = defaultHFOrg
         s.pythonOverridePath = pythonOverridePath
         s.customJangToolsPath = customJangToolsPath
-        s.logVerbosity = LogVerbosity(rawValue: logVerbosity) ?? .normal
+        // M66 (iter 96): surface stale-UserDefaults coercion to stderr.
+        // Pre-M66, `LogVerbosity(rawValue: logVerbosity) ?? .normal`
+        // silently reset the user's custom setting to the default when
+        // the persisted string didn't match any enum case (triggered by:
+        // schema renames in app updates, cross-version downgrades with
+        // newer enum cases, or manual `defaults write` with a typo).
+        // User saw default behavior with no hint why. iter-35 M107 /
+        // iter-80 M157 pattern: log to stderr so Copy Diagnostics picks
+        // it up. Apply the default AFTER logging.
+        if let parsed = LogVerbosity(rawValue: logVerbosity) {
+            s.logVerbosity = parsed
+        } else {
+            FileHandle.standardError.write(Data(
+                "[AppSettings] logVerbosity=\"\(logVerbosity)\" is not a valid case; coercing to .normal. If you recently downgraded JANG Studio, re-save your preferred verbosity in Settings → Diagnostics.\n".utf8))
+            s.logVerbosity = .normal
+        }
         s.jsonlLogRetentionLines = jsonlLogRetentionLines
         s.logFileOutputDir = logFileOutputDir
         s.tickThrottleMs = tickThrottleMs
@@ -300,7 +315,14 @@ private struct Snapshot: Codable {
         s.anonymizePathsInDiagnostics = anonymizePathsInDiagnostics
         s.githubIssuesUrl = githubIssuesUrl
         s.autoOpenIssueTrackerOnCrash = autoOpenIssueTrackerOnCrash
-        s.updateChannel = UpdateChannel(rawValue: updateChannel) ?? .stable
+        // M66 (iter 96): same silent-coercion surface as logVerbosity above.
+        if let parsed = UpdateChannel(rawValue: updateChannel) {
+            s.updateChannel = parsed
+        } else {
+            FileHandle.standardError.write(Data(
+                "[AppSettings] updateChannel=\"\(updateChannel)\" is not a valid case; coercing to .stable. Re-save in Settings → Updates if this is unexpected.\n".utf8))
+            s.updateChannel = .stable
+        }
         s.autoCheckForUpdates = autoCheckForUpdates
     }
 }

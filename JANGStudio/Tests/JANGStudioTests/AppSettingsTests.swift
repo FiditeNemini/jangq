@@ -346,4 +346,79 @@ final class AppSettingsTests: XCTestCase {
             "AppSettings.load() must log decode failures to stderr per M147 iter 69."
         )
     }
+
+    // MARK: - Iter 96 M66: stale-UserDefaults coercion surfaces to stderr
+
+    func test_snapshot_apply_logs_coercion_for_invalid_logVerbosity() throws {
+        // Source inspection: a coercion of an invalid LogVerbosity rawValue
+        // must emit a stderr log. Without it, a user who downgraded from a
+        // future version silently loses their verbose setting with no
+        // explanation in Copy Diagnostics.
+        let srcURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Models/AppSettings.swift")
+        let src = try String(contentsOf: srcURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("logVerbosity=\\\"") && src.contains("coercing to .normal"),
+            "Snapshot.apply must write a stderr line naming the bad logVerbosity value + the fallback (M66 iter 96)"
+        )
+    }
+
+    func test_snapshot_apply_logs_coercion_for_invalid_updateChannel() throws {
+        let srcURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Models/AppSettings.swift")
+        let src = try String(contentsOf: srcURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("updateChannel=\\\"") && src.contains("coercing to .stable"),
+            "Snapshot.apply must write a stderr line naming the bad updateChannel value + the fallback (M66 iter 96)"
+        )
+    }
+
+    func test_snapshot_apply_still_coerces_invalid_values_to_defaults() {
+        // Functional test: behavior is preserved — an invalid rawValue still
+        // results in the default being applied. The M66 fix ADDS logging
+        // but doesn't change the fallback behavior. AppSettings() calls
+        // load() internally, so corrupting UserDefaults BEFORE init gets
+        // picked up.
+        let badSnapshot = #"""
+        {
+            "version": 1,
+            "logVerbosity": "this-is-not-a-real-verbosity-case",
+            "updateChannel": "also-not-real",
+            "defaultProfile": "",
+            "defaultFamily": "jang",
+            "defaultMethod": "mse",
+            "defaultHadamardEnabled": false,
+            "defaultCalibrationSamples": 128,
+            "outputNamingTemplate": "{src}-{profile}",
+            "autoDeletePartialOnCancel": true,
+            "revealInFinderOnFinish": true,
+            "defaultHFOrg": "",
+            "pythonOverridePath": "",
+            "customJangToolsPath": "",
+            "jsonlLogRetentionLines": 500,
+            "logFileOutputDir": "",
+            "tickThrottleMs": 100,
+            "maxBundleSizeWarningMb": 200,
+            "mlxThreadCount": 0,
+            "metalPipelineCacheEnabled": true,
+            "preAllocateRam": false,
+            "preAllocateRamGb": 32,
+            "convertConcurrency": 2,
+            "copyDiagnosticsAlwaysVisible": false,
+            "anonymizePathsInDiagnostics": false,
+            "githubIssuesUrl": "",
+            "autoOpenIssueTrackerOnCrash": false,
+            "autoCheckForUpdates": true
+        }
+        """#
+        UserDefaults.standard.set(Data(badSnapshot.utf8), forKey: "JANGStudioSettings")
+        defer { UserDefaults.standard.removeObject(forKey: "JANGStudioSettings") }
+        let s = AppSettings()   // init calls load() which runs Snapshot.apply
+        XCTAssertEqual(s.logVerbosity, .normal,
+            "invalid logVerbosity must coerce to .normal (behavior preserved while logging added)")
+        XCTAssertEqual(s.updateChannel, .stable,
+            "invalid updateChannel must coerce to .stable (behavior preserved while logging added)")
+    }
 }
