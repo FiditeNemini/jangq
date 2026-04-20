@@ -14,6 +14,7 @@ let package = Package(
         .executable(name: "jang-spec-iobench", targets: ["JangSpecIOBench"]),
         .executable(name: "jang-core", targets: ["JangCoreCLI"]),
         .library(name: "JANG", targets: ["JANG"]),
+        .library(name: "JANGKit", targets: ["JANGKit"]),
         .library(name: "JANGCore", targets: ["JANGCore"]),
         .library(name: "JANGCoreMetal", targets: ["JANGCoreMetal"]),
     ],
@@ -23,6 +24,7 @@ let package = Package(
     targets: [
         .target(name: "JANGMetal", dependencies: [], path: "Sources/JANGMetal"),
         .target(name: "JANG", dependencies: ["JANGMetal", "JANGCoreMetal"], path: "Sources/JANG"),
+        .target(name: "JANGKit", dependencies: ["JANG"], path: "Sources/JANGKit"),
         .target(name: "JANGCore", dependencies: [], path: "Sources/JANGCore"),
         .target(
             name: "JANGCoreMetal",
@@ -51,6 +53,7 @@ let package = Package(
             path: "Sources/jang-core"
         ),
         .testTarget(name: "JANGTests", dependencies: ["JANG", "JANGCoreMetal"], path: "Tests/JANGTests"),
+        .testTarget(name: "JANGKitTests", dependencies: ["JANGKit"], path: "Tests/JANGKitTests"),
         .testTarget(name: "JANGCoreTests", dependencies: ["JANGCore"], path: "Tests/JANGCoreTests"),
         .testTarget(
             name: "JANGCoreMetalTests",
