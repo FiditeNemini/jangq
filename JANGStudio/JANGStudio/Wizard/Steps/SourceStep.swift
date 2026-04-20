@@ -3,6 +3,13 @@ import SwiftUI
 
 struct SourceStep: View {
     @Bindable var coord: WizardCoordinator
+    // M143 (iter 65): access AppSettings so applyRecommendation can tell
+    // whether the current profile is still at the user's configured
+    // default (safe to overwrite) vs. a value the user manually picked in
+    // ProfileStep (must preserve). Pre-iter-65 the check was hardcoded
+    // `== "JANG_4K"` which misfired for any user whose
+    // settings.defaultProfile wasn't JANG_4K.
+    @Environment(AppSettings.self) private var settings
     @State private var isDetecting = false
     @State private var isRecommending = false
     @State private var errorText: String?
@@ -252,8 +259,16 @@ struct SourceStep: View {
         // Family — replace unconditionally since user hasn't visited Step 3 yet
         plan.family = (rec.recommended.family == "jangtq") ? .jangtq : .jang
 
-        // Profile — replace if still at the app-level default (JANG_4K)
-        if plan.profile == "JANG_4K" {
+        // Profile — replace if still at the user-configured default.
+        // M143 (iter 65): the "user hasn't manually changed it" signal is
+        // whether plan.profile still matches settings.defaultProfile
+        // (what applyDefaults seeded it with). Pre-fix this was hardcoded
+        // to "JANG_4K", so any user who configured a different default
+        // (e.g., JANG_2L for regular MoE work) never got the per-source
+        // recommendation applied — their Settings default stuck even for
+        // dense LLMs where JANG_4K would have been better.
+        let seedDefault = settings.defaultProfile.isEmpty ? "JANG_4K" : settings.defaultProfile
+        if plan.profile == seedDefault {
             plan.profile = rec.recommended.profile
         }
 

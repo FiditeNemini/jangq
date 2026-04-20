@@ -760,6 +760,21 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - Python (+4) in test_recommend.py: `_recommend_hadamard_uses_JANG_PROFILES_compress_tier` (exhaustive JANG_1L through JANG_6M), `_handles_JANGTQ_variants` (JANGTQ2/3/4), `_k_quant_profiles` (3K/4K/5K/6K), `_unknown_profile_defaults_to_on`.
       **Evidence:** `JANGStudio/JANGStudio/Verify/PreflightRunner.swift:69-88, 141-161`, `jang-tools/jang_tools/recommend.py:305-334`. 162 Swift tests pass (was 156, +6). 314 Python tests pass (was 310, +4).
       **Commit:** (this iteration)
+- [x] **M143 (re-grep found one more hardcoded profile-behavior: SourceStep.applyRecommendation)** — iter-64 meta-rule "re-grep after a fix class with head_limit=0" applied. Grepped `profile == "JANG` and similar across Swift + Python. Most hits were source-of-truth tables, test fixtures, or docstring prose. **One real behavioral hardcode remained:** `SourceStep.swift:256`:
+      ```swift
+      if plan.profile == "JANG_4K" {
+          plan.profile = rec.recommended.profile
+      }
+      ```
+      The comment said "replace if still at the app-level default (JANG_4K)." The INTENT was "only overwrite if the user hasn't manually changed it." But the hardcoded "JANG_4K" ignored `settings.defaultProfile`.
+      **Bug scenario:** User configures `settings.defaultProfile = "JANG_2L"` (e.g., regular MoE work). `applyDefaults` seeds `plan.profile = "JANG_2L"`. User picks a dense LLM source. recommend.py suggests "JANG_4K" for dense. SourceStep's `if plan.profile == "JANG_4K"` check FAILS (profile is JANG_2L). Recommendation not applied. User gets JANG_2L for a dense model where JANG_4K is better. Either they notice and manually change it, or they end up with a suboptimal conversion.
+      **Fix (iter 65):**
+      - Added `@Environment(AppSettings.self) private var settings` to SourceStep.
+      - Changed the check to `let seedDefault = settings.defaultProfile.isEmpty ? "JANG_4K" : settings.defaultProfile; if plan.profile == seedDefault { ... }`. Handles empty-settings fallback (matches applyDefaults behavior).
+      - User who manually picks a profile in ProfileStep still has `plan.profile != seedDefault`, so the recommendation won't overwrite their choice across subsequent source re-picks.
+      **Tests (+1) in WizardStepContinueGateTests.swift:** `test_sourceStep_applyRecommendation_uses_settings_default` — source-inspection pin that asserts (a) no hardcoded `plan.profile == "JANG_4K"` literal remains, (b) `settings.defaultProfile` is referenced.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift:5-16, 254-270`. 163 Swift tests pass (was 162, +1). Python 314 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

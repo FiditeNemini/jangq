@@ -2653,3 +2653,45 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 - **NEW**: re-grep all profile-name hardcoded lists in the codebase to verify iter-64 is complete (iter-48 meta-rule: "re-grep with head_limit=0 after a fix class").
 
 **Next iteration should pick:** profile-name hardcoded-list re-grep (mirror iter-48 meta-rule applied to iter-64's fix class) OR M143 inert-safety-gate audit.
+
+## 2026-04-20 iteration 65 — M143 SourceStep.applyRecommendation hardcoded "JANG_4K"
+
+**Angle:** Iter-48 meta-rule "re-grep with head_limit=0 after a fix class" applied to iter-64's M142 (hardcoded profile-name lists). Grepped Swift + Python for `profile == "JANG` / `profile.contains("JANG` / `profile.startswith("JANG` patterns.
+
+**Deep trace walkthrough:**
+1. **Python side:** 1 behavioral match, `recommend.py:323` — iter-64 just authored it (JANGTQ suffix parsing). Intentional.
+2. **Swift side:** 2 matches.
+   - `PreflightRunner.swift:211` — comment referencing iter-62 M142 fix. Non-code.
+   - **`SourceStep.swift:256` — `if plan.profile == "JANG_4K"`. Real behavioral hardcode.**
+3. **Read the SourceStep code:** The `applyRecommendation` helper's job is to fill in plan defaults from the per-source recommendation WHEN the user hasn't manually changed them. The comment says "replace if still at the app-level default (JANG_4K)." But the actual "app-level default" isn't JANG_4K — it's `settings.defaultProfile`, which `applyDefaults(from:)` seeds on first wizard entry.
+4. **Bug scenario:**
+   - User configures Settings → Defaults → Profile = "JANG_2L" (common for MoE-heavy users).
+   - First wizard entry: `applyDefaults` seeds `plan.profile = "JANG_2L"`.
+   - User picks a dense llama source.
+   - `detectAndRecommend` runs. recommend.py returns `{recommended.profile: "JANG_4K"}` (dense LLM default).
+   - `applyRecommendation` checks `plan.profile == "JANG_4K"` — **false** (it's "JANG_2L").
+   - Recommendation NOT applied. User gets JANG_2L for a dense LLM.
+5. **The UX pathology:** user's Settings-default was for the MoE case they care about most; per-source recommendation exists to override that for exceptions. iter-65 makes the override actually work.
+6. **Fix:** inject `@Environment(AppSettings.self)` into SourceStep. Compute `seedDefault = settings.defaultProfile.isEmpty ? "JANG_4K" : settings.defaultProfile`. Compare against that. Matches what `applyDefaults` does upstream (uses `settings.defaultProfile` with the same empty fallback).
+
+**Meta-lesson — re-grep-after-fix pays off.** Iter-64 fixed two hardcoded-profile-name sites (PreflightRunner.hadamardVsLowBits + recommend.py._recommend_hadamard). Iter-65's targeted re-grep found a third site that iter-64 didn't touch because it was behaviorally different (applyRecommendation's "user hasn't touched" check, not a low-bit check). Without the re-grep, this would have sat as a latent UX bug.
+
+**Items touched:**
+- M143 [x] — SourceStep.applyRecommendation uses settings.defaultProfile, not hardcoded "JANG_4K".
+
+**Commit:** (this iteration)
+
+**Verification:** 163 Swift tests pass (was 162, +1 for M143 source-inspection pin). Python 314 + ralph 73 unchanged.
+
+**Closed-status tally:** 77 (iter 64) + M143 = 78 closed / 100 total = 78.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW M144 candidate**: the applyRecommendation function has SIBLING hardcoded-default checks for `forceBlockSize` (block_size hardcoded is 64) and unconditional overwrites for family/method/hadamard. These "always-overwrite" decisions might conflict with user overrides in ProfileStep. Worth auditing each field for the same class of "user hasn't touched" logic.
+- Extended re-grep: `plan\.(family|method|hadamard|overrides\.forceDtype|overrides\.forceBlockSize)\s*=` to check what applyRecommendation can overwrite unconditionally.
+
+**Next iteration should pick:** M144 audit of applyRecommendation's field-by-field overwrite logic (natural extension of iter-65's find) OR M143 generalization (audit ALL "hardcoded default assumption" checks in Swift).

@@ -173,6 +173,35 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M143 (iter 65): SourceStep.applyRecommendation must respect
+    // settings.defaultProfile, not a hardcoded "JANG_4K".
+    //
+    // Pre-iter-65: `if plan.profile == "JANG_4K"` gated the overwrite.
+    // Users with Settings → defaultProfile = JANG_2L never got the
+    // per-source recommendation applied because their plan.profile
+    // started at JANG_2L after applyDefaults.
+
+    func test_sourceStep_applyRecommendation_uses_settings_default() throws {
+        let src = try stepSource("SourceStep.swift")
+        // The literal hardcoded comparison must be gone.
+        XCTAssertFalse(
+            src.contains(#"plan.profile == "JANG_4K""#),
+            """
+            SourceStep.applyRecommendation must NOT compare plan.profile
+            against a hardcoded "JANG_4K" literal. Users with a different
+            settings.defaultProfile never got the per-source recommendation
+            applied. Use the settings.defaultProfile (with "JANG_4K"
+            fallback) as the seed-default comparison. See M143 iter 65.
+            """
+        )
+        // The replacement pattern must be present — compares against the
+        // settings.defaultProfile (or the empty fallback).
+        XCTAssertTrue(
+            src.contains("settings.defaultProfile"),
+            "SourceStep must reference settings.defaultProfile for the 'user hasn't touched' heuristic."
+        )
+    }
+
     // MARK: - M138 (iter 60): RunStep late-Cancel on successful conversion
     //
     // Sibling of M137 in RunStep. Pre-iter-60 code used:
