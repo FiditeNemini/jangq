@@ -5269,3 +5269,47 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: codify "URL query construction → URLComponents always" as feedback memory.
 
 **Next iteration should pick:** continue JANGQuantizer.swiftpm sweep (remaining 5 files, likely more pattern hits given the M185 results), OR rate-limiting on jang-server.
+
+---
+
+## 2026-04-20 iteration 121 — M186 JANGQuantizer.swiftpm QueueView Cancel/Retry silent swallows
+
+**Angle:** Iter-120 forecast: continue the JANGQuantizer.swiftpm sweep — 5 remaining files likely have more pattern hits.
+
+**Deep trace walkthrough:**
+1. **Grep'd remaining files** (SubmitView, QueueView, JANGQuantizerApp, Models, Theme) for Task spawns, catches, lifecycle hooks. Found 4 sites worth investigation.
+2. **QueueView Cancel button (line 241):** `Task { try? await api.cancelJob(job.jobId) }` — silent swallow.
+3. **QueueView Retry button (line 249):** `Task { try? await api.retryJob(job.jobId) }` — silent swallow.
+4. **QueueView refresh timer (line 97-103):** properly invalidated on .onDisappear ✓.
+5. **QueueView.refresh() ad-hoc Task (line 106-116):** "Keep existing data on refresh failure" — intentional silent-fall-through. Acceptable per iter-104 M108 try? taxonomy.
+6. **SubmitView.submit Task (line 117):** ad-hoc no handle. But submission is brief (<1s); polish item, not a bug.
+7. **Fixed the 2 button silent-swallows:** swap `try?` → `do/catch`, add `@State actionError`, render inline below action buttons. Same shape as iter-120 M185's Settings fix.
+
+**Meta-lesson — third instance of the same pattern means codify it.** Same dev shipped `} catch { swallow }` in:
+  - iter-35 M107: JANGStudio SettingsWindow
+  - iter-120 M185: JANGQuantizer SettingsView
+  - iter-121 M186: JANGQuantizer QueueView (twice — Cancel + Retry)
+  Recurrence pattern: same dev, same blind spot, every fresh button. **Rule for the team: any user-action button calling an async API must use `do/catch` + visible error surface. NEVER `try?` in a Button handler** unless the operation is truly idempotent + best-effort. Codify as a feedback memory next iter — three is the threshold for "it's a recurring habit, not coincidence."
+
+**Meta-lesson — sweep iters confirm scope estimates.** Iter-120 M185 found 2 bugs in first pass; iter-121 found 2 more (predicted "5 remaining files likely have more hits"). The compound-interest pattern from earlier iters (iter-99→100, iter-105→106) holds here too: when a fresh codebase reveals one instance of a pattern, expect more in adjacent files. **Rule: always allocate at least one follow-up iter after finding a pattern in a fresh codebase. The first iter rarely catches everything.**
+
+**Items touched:**
+- M186 [x] — QueueView Cancel + Retry buttons surface errors via `actionError` state. 2 bugs fixed.
+
+**Commit:** (this iteration)
+
+**Verification:** SwiftPM has no XCTest harness; visual review only. 78 ralph_runner tests still pass (M182 sweep clean post-edit).
+
+**Closed-status tally:** 139 (iter 120) + M186 = 140 items touched, all closed. Zero known bugs as of iter-121 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: codify the "no try? in Button handlers" rule as a feedback memory — third instance threshold reached.
+- **NEW**: rate-limiting on jang-server (DoS surface).
+- **NEW**: scan Models.swift / Theme.swift / JANGQuantizerApp.swift for any non-button-related issues (decoding edge cases, color contrast, lifecycle).
+
+**Next iteration should pick:** save the feedback_no_try_question_in_button_handlers.md memory (codifies a recurring rule across sessions), OR rate-limiting on jang-server.

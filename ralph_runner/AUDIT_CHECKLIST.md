@@ -225,6 +225,20 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M186 (JANGQuantizer.swiftpm QueueView — Cancel/Retry buttons silently swallowed errors)** — Iter-121 continued the JANGQuantizer.swiftpm sweep started in iter-120 M185. Found 2 more iter-35 M107-class silent-swallows in QueueView.swift's job-card action buttons:
+      ```swift
+      Button("Cancel") { Task { try? await api.cancelJob(job.jobId) } }
+      Button("Retry") { Task { try? await api.retryJob(job.jobId) } }
+      ```
+      The `try?` consumes any failure (server unreachable, auth expired, network blip, the targeted job no longer in a cancellable state). User clicks Cancel → fails → button looks like nothing happened → user clicks again, gets the same nothing. iter-35 M107 / iter-90 M167 / iter-120 M185 pattern in yet another fresh file (third instance of the same pattern across two apps + two views).
+      **Fix (iter 121):** swapped `try?` → `do/catch`, added `@State actionError: String?` to JobCard. Catch sets `actionError = "Cancel failed: \(error.localizedDescription)"` (uses iter-91 M168's actionable-description chain — APIError.errorDescription already follows that pattern from M185). Renders inline below the action buttons in red so the user sees the diagnostic on the same card without leaving the queue list. Success path nulls actionError so the error message clears on a retry.
+      **Tests:** SwiftPM has no XCTest harness; visual review only. M182 secrets sweep still clean (78 ralph_runner tests pass).
+      **Other audits in this iter (no bugs found):**
+      - QueueView refresh timer: properly invalidated on .onDisappear ✓ (iter-94 M171 pattern correctly applied here).
+      - QueueView.refresh() ad-hoc Task: comment says "Keep existing data on refresh failure" — intentional silent-fall-through, acceptable per iter-104 M108 taxonomy bucket. Mostly benign for a 3-second poll cycle.
+      - SubmitView.submit Task: ad-hoc no handle, but submission is a brief HTTP call (<1s typical). Polish item, not a bug.
+      **Meta-lesson — third instance of a pattern means it needs a feedback memory.** iter-35 M107 (JANGStudio Settings) → iter-120 M185 (JANGQuantizer Settings) → iter-121 M186 (JANGQuantizer Queue). Three distinct files in two apps shipped with `} catch { swallow }` for user-action buttons. **Rule for the team: any user-action button calling an async API must use `do/catch` + visible error surface. NEVER `try?` in a Button handler unless the operation is truly idempotent + best-effort (e.g., dismissing a notification).** Should codify this as a feedback memory note alongside the iter-83 pipe-drain + iter-92 remediation memos. Recurrence pattern: same dev, same blind spot, every fresh button.
+      **Commit:** (this iteration)
 - [x] **M185 (JANGQuantizer.swiftpm — URL query injection in listJobs + silent health-check error in SettingsView)** — Iter-120 audited the previously-unaudited `jang-server/frontend/JANGQuantizer.swiftpm/` Swift Package (jang-server's standalone client UI). Found two bugs in the first pass — different classes, both real, both standard fixes from the iter-83/92/94/101 patterns I've been refining.
       **Bug A — URL query injection in `APIClient.listJobs` (APIClient.swift:49):**
       ```swift
