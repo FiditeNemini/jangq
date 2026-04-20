@@ -258,6 +258,118 @@ def test_a2_still_na_when_no_template_anywhere(tmp_path, monkeypatch):
     assert "no chat template present" in r.get("hint", "")
 
 
+# ────────────────────────────────────────────────────────────────────
+# Iter 16: M78 — a9 accepts structured ↔ string special_tokens equivalence
+# ────────────────────────────────────────────────────────────────────
+
+def test_a9_value_normalizer_plain_string():
+    from ralph_runner.audit import _normalize_special_token_value
+    assert _normalize_special_token_value("<s>") == "<s>"
+    assert _normalize_special_token_value("") == ""
+
+
+def test_a9_value_normalizer_structured_dict():
+    from ralph_runner.audit import _normalize_special_token_value
+    v = {"content": "<s>", "lstrip": False, "normalized": False,
+         "rstrip": False, "single_word": False}
+    assert _normalize_special_token_value(v) == "<s>"
+
+
+def test_a9_value_normalizer_unrecognized_shape():
+    """Shapes HF doesn't emit must return None so callers fall back to
+    strict equality — we must not silently pass on a corrupted token file."""
+    from ralph_runner.audit import _normalize_special_token_value
+    assert _normalize_special_token_value(None) is None
+    assert _normalize_special_token_value(42) is None
+    assert _normalize_special_token_value([1, 2]) is None
+    assert _normalize_special_token_value({"no_content_key": "x"}) is None
+    assert _normalize_special_token_value({"content": 42}) is None  # non-string content
+
+
+def _make_dir_with_tokens(root, name, content):
+    d = root / name
+    d.mkdir()
+    (d / "special_tokens_map.json").write_text(json.dumps(content))
+    return d
+
+
+def test_a9_passes_when_structured_source_saved_as_string(tmp_path):
+    """M78 regression: source has structured {"content": "<s>", ...}, output
+    saved plain "<s>" — these are semantically equivalent but the old `!=`
+    comparison false-failed. Required=True on this row means the old bug
+    would have marked every such convert as FAILED in Ralph's matrix."""
+    from ralph_runner.audit import audit_a9_special_tokens
+    src = _make_dir_with_tokens(tmp_path, "src", {
+        "bos_token": {"content": "<s>", "lstrip": False, "normalized": False,
+                      "rstrip": False, "single_word": False},
+        "eos_token": {"content": "</s>", "lstrip": False, "normalized": False,
+                      "rstrip": False, "single_word": False},
+    })
+    out = _make_dir_with_tokens(tmp_path, "out", {
+        "bos_token": "<s>",
+        "eos_token": "</s>",
+    })
+    r = audit_a9_special_tokens(out, source_dir=src)
+    assert r["status"] == "pass", f"structured→string must match, got {r}"
+    assert sorted(r["preserved_keys"]) == ["bos_token", "eos_token"]
+
+
+def test_a9_passes_when_string_source_saved_as_structured(tmp_path):
+    """Reverse direction: source string, output structured."""
+    from ralph_runner.audit import audit_a9_special_tokens
+    src = _make_dir_with_tokens(tmp_path, "src", {"bos_token": "<s>"})
+    out = _make_dir_with_tokens(tmp_path, "out", {
+        "bos_token": {"content": "<s>", "lstrip": False, "normalized": False,
+                      "rstrip": False, "single_word": False},
+    })
+    r = audit_a9_special_tokens(out, source_dir=src)
+    assert r["status"] == "pass", f"string→structured must match, got {r}"
+
+
+def test_a9_still_fails_on_genuine_content_mismatch(tmp_path):
+    """Negative test: when the content strings actually differ, a9 must
+    still fail. Defends against accidentally making a9 always-pass via the
+    iter-16 normalization."""
+    from ralph_runner.audit import audit_a9_special_tokens
+    src = _make_dir_with_tokens(tmp_path, "src", {
+        "bos_token": {"content": "<s>"},
+    })
+    out = _make_dir_with_tokens(tmp_path, "out", {
+        "bos_token": {"content": "<DIFFERENT>"},
+    })
+    r = audit_a9_special_tokens(out, source_dir=src)
+    assert r["status"] == "fail"
+    assert any(m["source"] == "<s>" and m["output"] == "<DIFFERENT>"
+               for m in r["mismatched"])
+
+
+def test_a9_fails_on_missing_key_unchanged(tmp_path):
+    """Other failure mode — missing key — must still be detected unchanged."""
+    from ralph_runner.audit import audit_a9_special_tokens
+    src = _make_dir_with_tokens(tmp_path, "src", {
+        "bos_token": "<s>",
+        "eos_token": "</s>",
+    })
+    out = _make_dir_with_tokens(tmp_path, "out", {"bos_token": "<s>"})
+    r = audit_a9_special_tokens(out, source_dir=src)
+    assert r["status"] == "fail"
+    assert "eos_token" in r["missing"]
+
+
+def test_a9_unnormalizable_shape_preserved_as_strict_comparison(tmp_path):
+    """If HF ever ships a NEW shape (e.g. content as bytes, extra wrapper
+    layer), we must fall back to strict equality rather than silently pass.
+    This defends against future schema drift letting a real mismatch through."""
+    from ralph_runner.audit import audit_a9_special_tokens
+    # Two values that both fail the normaliser (non-dict-with-content) and
+    # are also unequal under strict ==
+    src = _make_dir_with_tokens(tmp_path, "src", {"weird": {"wrapper": "a"}})
+    out = _make_dir_with_tokens(tmp_path, "out", {"weird": {"wrapper": "b"}})
+    r = audit_a9_special_tokens(out, source_dir=src)
+    assert r["status"] == "fail"
+    assert "unnormalizable" in r
+
+
 def test_a2_accepts_chat_template_jinja_file(tmp_path, monkeypatch):
     """Regression test for the pre-existing .jinja path — iter 15's fix
     must not have broken the middle of three valid forms."""

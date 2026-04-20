@@ -582,3 +582,40 @@ logic between audit.py and Swift PostConvertVerifier (the two arbiters must agre
 **Closed-status tally:** 26 (prior) + M72 + M77 = 28 closed / 71 total = 39% closure rate. Cat K debt now drained: runner.py (iters 8 + 12 + 13) AND audit.py (iter 15) both traced.
 
 **Next iteration should pick:** Cat A remaining publish items (M42 verify cancellation, M43 publish progress streaming, M45 modelcard per-arch coverage) would round out the adopter journey and complement iter 14's DiagnosticsBundle work. Or tackle one of M78-M82 spawned here (M78 a9 value normaliser is the most concrete). Or Cat D memory cross-ref second pass (never revisited since iter 5).
+
+---
+
+## 2026-04-19 iteration 16 — M78 a9 value normalization (Cat K continued)
+
+**Angle:** Close the highest-impact spawned-M from iter 15. M78 was the only
+latent FALSE-FAIL on a REQUIRED audit row: a9 (special tokens preservation,
+required=True) used raw `!=` comparison on values that HF legitimately
+serialises in two equivalent forms. Every convert where source and output
+crossed the form boundary would be incorrectly graded FAILED. Ralph's
+green/fail matrix has been lying.
+
+**Deep trace walkthrough:**
+1. Read `special_tokens_map.json` from a real Qwen3 source: structured dict form with `{"content", "lstrip", "normalized", "rstrip", "single_word"}`.
+2. Read the same file from a converted JANG output: plain-string form `{"bos_token": "<s>"}`. Both forms are accepted by `AutoTokenizer.from_pretrained` — they're semantically identical.
+3. Traced the old `audit.py:377 elif out_tokens[k] != v`. Python dict vs string → always `!=`. All structured-form sources would report as mismatches. **If this had ever fired on a production combo, the combo was wrongly graded FAILED.**
+4. **BUG M78 CONFIRMED.** The severity depends on whether `required=True` — which it IS on a9. So the bug actively propagates into the green/fail matrix.
+5. **Fix architecture:** extract the `content` string from either form before comparing. Keep strict `==` as a FALLBACK for shapes neither normalisation form recognises — don't silently pass on corrupted files or future schema drift.
+6. **Defence-in-depth considerations:**
+   - Unrecognised shape returns None from the normaliser → strict fallback.
+   - Fallback failures get reported in a new `unnormalizable` field so the debug output distinguishes "structurally different" from "normaliser didn't understand".
+   - Positive-AND-negative test coverage: pin that the fix doesn't accidentally make a9 always-pass. Explicit test with two different `content` strings ensures genuine mismatches still fail.
+7. **Verification walk:** what OTHER audit rows might have similar issues?
+   - a8 (parser fields): uses `src_val != out_val` on primitive types (bool, str, dict). No known cross-serialisation equivalences. Defer.
+   - a17 modelcard: validates the presence of keys only, not value equality. No issue.
+   - Others do functional checks (roundtrip, generate, render) — no direct equality comparisons on HF file contents.
+
+**Items touched:**
+- M78 [x] — a9 now accepts the two equivalent forms; 8 new tests pin both directions + negative + fallback + unrecognised-shape behaviour.
+
+**Commit:** (this iteration)
+
+**Verification:** 60 ralph_runner tests (was 52). jang-tools + Swift unchanged.
+
+**Closed-status tally:** 28 (prior) + M78 = 29 closed / 71 total = 41% closure rate.
+
+**Next iteration should pick:** Cat A publish remainder (M42/M43/M45) has been on the forecast list since iter 14 — 3 iters of debt now. M43 (publish progress streaming) would materially improve the adopter experience. Alternatively M81 (fixture git-tracking audit) is a concrete 10-minute check. Cat D memory cross-ref hasn't been revisited since iter 5 — 11 iters of drift possible.

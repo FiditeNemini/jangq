@@ -342,11 +342,47 @@ def audit_a8_parser_preservation(model_dir: Path, source_dir: Path | None = None
 
 # ───────────────────────── A9 — Special tokens preservation ─────────────
 
+def _normalize_special_token_value(value) -> str | None:
+    """Normalize a special_tokens_map.json value to its string content.
+
+    HuggingFace accepts TWO equivalent forms for special token values:
+      1. Plain string:    `{"bos_token": "<s>"}`
+      2. Structured dict: `{"bos_token": {"content": "<s>", "lstrip": false,
+                                          "normalized": false, "rstrip": false,
+                                          "single_word": false}}`
+
+    Both round-trip identically through `AutoTokenizer.from_pretrained`. A
+    source tokenizer using form (2) can legitimately be saved as form (1)
+    (or vice-versa) without losing any semantic information. M78 (iter 16):
+    the previous a9 check used raw `!=` equality which mis-graded these as
+    mismatches on every convert of a Qwen3/Llama3/etc. source that had
+    structured special tokens → a9 fails with `required=True` → combo
+    marked FAILED → Ralph green/fail matrix says the convert is broken
+    when it's actually fine.
+
+    This function extracts the semantic `content` string from either form,
+    or returns None if the shape isn't recognised. Callers compare the
+    normalised values instead of the raw JSON objects.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        content = value.get("content")
+        return content if isinstance(content, str) else None
+    return None
+
+
 def audit_a9_special_tokens(model_dir: Path, source_dir: Path | None = None) -> dict:
     """Assert every key in source special_tokens_map.json appears in output with same value.
 
     If source is provided and has no special_tokens_map.json, the check is n/a — nothing to preserve.
     If source is not provided but output has no file, warn (cannot verify).
+
+    Values are compared via `_normalize_special_token_value` so the two
+    equivalent HF forms (plain string vs structured `{"content": "...", ...}`)
+    match. Prior to iter 16's fix, raw `!=` comparison false-failed any
+    convert where the source used structured form and output saved as string
+    (or vice-versa).
     """
     out_path = model_dir / "special_tokens_map.json"
 
@@ -371,14 +407,30 @@ def audit_a9_special_tokens(model_dir: Path, source_dir: Path | None = None) -> 
 
         missing = []
         mismatched = []
+        unnormalizable = []
         for k, v in src_tokens.items():
             if k not in out_tokens:
                 missing.append(k)
-            elif out_tokens[k] != v:
-                mismatched.append({"key": k, "source": v, "output": out_tokens[k]})
-        if missing or mismatched:
-            return _fail(f"{len(missing)} missing, {len(mismatched)} mismatched",
-                         missing=missing, mismatched=mismatched)
+                continue
+            src_norm = _normalize_special_token_value(v)
+            out_norm = _normalize_special_token_value(out_tokens[k])
+            if src_norm is None or out_norm is None:
+                # An unrecognised shape — be strict and fall back to raw !=
+                # so we don't silently pass on a corrupted file.
+                if v != out_tokens[k]:
+                    unnormalizable.append({"key": k, "source": v, "output": out_tokens[k]})
+                continue
+            if src_norm != out_norm:
+                mismatched.append({"key": k, "source": src_norm, "output": out_norm,
+                                   "source_raw_type": type(v).__name__,
+                                   "output_raw_type": type(out_tokens[k]).__name__})
+        if missing or mismatched or unnormalizable:
+            return _fail(
+                f"{len(missing)} missing, {len(mismatched)} mismatched"
+                + (f", {len(unnormalizable)} unrecognised-shape" if unnormalizable else ""),
+                missing=missing, mismatched=mismatched,
+                **({"unnormalizable": unnormalizable} if unnormalizable else {}),
+            )
         return _ok(preserved_keys=sorted(src_tokens.keys()))
 
     # No source — check output exists and is non-empty
