@@ -83,6 +83,18 @@ struct Profiles: Codable, Equatable, Sendable {
     )
 }
 
+/// M129 (iter 51): typed error parity — see CapabilitiesServiceError.
+enum ProfilesServiceError: Error, LocalizedError {
+    case cliError(code: Int32, stderr: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .cliError(let code, let stderr):
+            return "jang-tools profiles exited \(code): \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+    }
+}
+
 @Observable
 @MainActor
 final class ProfilesService {
@@ -98,6 +110,9 @@ final class ProfilesService {
             self.profiles = decoded
             self.isFromBundle = true
             self.lastError = nil
+        } catch let e as ProfilesServiceError {
+            // M129: use errorDescription so the banner reads cleanly.
+            self.lastError = e.errorDescription ?? "\(e)"
         } catch {
             self.lastError = "\(error)"
         }
@@ -121,9 +136,13 @@ final class ProfilesService {
                         handle.set(process: proc)
                         proc.waitUntilExit()
                         if proc.terminationStatus != 0 {
-                            let e = err.fileHandleForReading.readDataToEndOfFile()
-                            throw NSError(domain: "ProfilesService", code: Int(proc.terminationStatus),
-                                          userInfo: [NSLocalizedDescriptionKey: String(data: e, encoding: .utf8) ?? ""])
+                            let stderr = String(
+                                data: err.fileHandleForReading.readDataToEndOfFile(),
+                                encoding: .utf8
+                            ) ?? ""
+                            cont.resume(throwing: ProfilesServiceError.cliError(
+                                code: proc.terminationStatus, stderr: stderr))
+                            return
                         }
                         let data = out.fileHandleForReading.readDataToEndOfFile()
                         cont.resume(returning: data)

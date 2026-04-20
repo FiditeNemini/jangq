@@ -31,4 +31,23 @@ final class ProfilesServiceTests: XCTestCase {
         XCTAssertEqual(s.profiles, .frozen)
         XCTAssertFalse(s.isFromBundle)
     }
+
+    // MARK: - M129 (iter 51): typed error parity
+    //
+    // Matches CapabilitiesServiceError's pattern. Pre-fix ProfilesService
+    // threw raw NSError that stringified poorly into the UI banner.
+
+    func test_profilesServiceError_cliError_formats_cleanly() {
+        let e = ProfilesServiceError.cliError(code: 1, stderr: "ModuleNotFoundError: jang_tools\n")
+        XCTAssertEqual(
+            e.errorDescription,
+            "jang-tools profiles exited 1: ModuleNotFoundError: jang_tools"
+        )
+    }
+
+    func test_profilesServiceError_cliError_handles_empty_stderr() {
+        let e = ProfilesServiceError.cliError(code: 127, stderr: "")
+        let desc = e.errorDescription ?? ""
+        XCTAssertTrue(desc.hasPrefix("jang-tools profiles exited 127"), "got \(desc)")
+    }
 }

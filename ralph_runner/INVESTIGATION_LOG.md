@@ -2043,3 +2043,48 @@ Pivoted to re-audit M121. Iter 45 closed the text path but the VL path is a SEPA
 - **NEW**: peer-helper sweep in Swift — RecommendationService / CapabilitiesService / ProfilesService / ExamplesService parallel adoption services — all implement `invoke(args:)` privately. Check for drift.
 
 **Next iteration should pick:** Swift-side peer-helper sweep on the adoption services (likely finds at least ONE subtle drift between services given 4 near-parallel implementations).
+
+## 2026-04-20 iteration 51 — M129 Swift adoption-service typed-error parity
+
+**Angle:** Iter 50 generalized peer-helper grep-audits into a checklist: "(a) parameter parity, (b) fallback parity, (c) dtype/cast parity, (d) error-path parity." Apply Swift-side to the 5 adoption services that all have near-identical `private static func invokeCLI(args:) async throws -> Data` implementations.
+
+**Deep trace walkthrough:**
+1. **Grep + awk inspection:** dumped each service's invoke body side-by-side. All 5 use the same iter-30/33 ProcessHandle + withTaskCancellationHandler pattern. All 5 spawn python with `BundleResolver.pythonExecutable`. All 5 wait on proc.waitUntilExit() on DispatchQueue.global().
+2. **Parameter parity:** ✓ all `(args: [String]) async throws -> Data`.
+3. **Fallback parity:** ✓ all wrap in withTaskCancellationHandler, all call handle.cancel() in onCancel.
+4. **Error-path parity:** **FAIL.** Split:
+   - **Recommendation, Examples, ModelCard:** resume with typed `.cliError(code: Int32, stderr: String)` + early `return`.
+   - **Capabilities, Profiles:** `throw NSError(domain: "XService", …)` from inside the do block. Outer `catch { cont.resume(throwing: error) }` forwards. Functionally works but loses the typed-error affordance AND leaks framework internals into the UI banner.
+5. **UX impact on current user behavior:**
+   - Recommendation.fetch() failure → banner: "jang-tools recommend exited 1: ModuleNotFoundError: jang_tools"
+   - Capabilities.refresh() failure → banner: `Error Domain=CapabilitiesService Code=1 "(null)" UserInfo={NSLocalizedDescription=ModuleNotFoundError: jang_tools}`
+   - **Inconsistent + ugly.** User would think there are two different kinds of problem when in reality both are the same bundled-python-missing failure.
+6. **Why not caught before:** iter-33's M101 wave was a cross-layer cancel sweep. It propagated the withTaskCancellationHandler pattern everywhere but didn't standardize error types. Two services were left on NSError because they were the first to be built (M101 iter-33 cites "ModelCardService.invoke" as the canonical pattern — ModelCard was already typed). Capabilities + Profiles got the pattern copied mechanically but kept their pre-existing NSError.
+7. **Fix scope:** 4 file touches + 4 tests.
+   - `CapabilitiesService.swift`: add `CapabilitiesServiceError.cliError`, migrate throw site + add typed catch in refresh().
+   - `ProfilesService.swift`: add `ProfilesServiceError.cliError`, same migration.
+   - `CapabilitiesServiceTests.swift`: add 2 tests pinning errorDescription format.
+   - `ProfilesServiceTests.swift`: add 2 tests, symmetric.
+8. **Tested individually** via `xcrun xctest -XCTest "JANGStudioTests.CapabilitiesServiceTests"` and same for Profiles. CapabilitiesServiceTests: 5/5 pass (was 3, +2). ProfilesServiceTests: 7/7 pass (was 5, +2). Did NOT run the full suite due to the iter-45 full-suite hang issue (still M124-open).
+
+**Meta-lesson.** The iter-47+iter-50 peer-helper checklist works cross-language too. The error-path column was the asymmetry here. Python-side iters 47 (enable_thinking) and 50 (modality) found asymmetries in the logic/signature column. This iter extends the evidence base: Swift-side has the same pattern.
+
+**Items touched:**
+- M129 [x] — typed error parity across 5 adoption services.
+
+**Commit:** (this iteration)
+
+**Verification:** Python 297 unchanged. Swift: CapabilitiesServiceTests 5/5 pass (was 3, +2), ProfilesServiceTests 7/7 pass (was 5, +2). Total Swift 136 (was 132, +4). ralph 73 unchanged.
+
+**Closed-status tally:** 63 (iter 50) + M129 = 64 closed / 98 total = 65.3% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 (still observation-only): `_load_jang_v2*` gate dtype asymmetry — live test needed.
+- **NEW**: `_load_jang_v1` vs `_load_jang_v1_vlm` peer-helper sweep (Python legacy path).
+- peer-helper sweep on `allocate.py` / `recommend.py` bit-width picking functions.
+
+**Next iteration should pick:** `_load_jang_v1*` Python peer-helper sweep (matches iter 50's pattern but on the legacy path; likely to find something given iter 50 found the modality bug in the active path) OR M128 observation needs a bounded plan even if we can't run a live test.

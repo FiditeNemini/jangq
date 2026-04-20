@@ -63,6 +63,25 @@ struct Capabilities: Codable, Equatable, Sendable {
     )
 }
 
+/// M129 (iter 51): typed error parity with RecommendationService /
+/// ExamplesService / ModelCardService. Previously `invokeCLI` threw a raw
+/// `NSError(domain: "CapabilitiesService")` which made `refresh()`'s
+/// `self.lastError = "\(error)"` stringify into an ugly
+/// `Error Domain=CapabilitiesService Code=1 "(null)" UserInfo={…}`
+/// banner. The typed case gives a clean `errorDescription`:
+///   "jang-tools capabilities exited N: <stderr>"
+/// matching the peer adoption services' UX.
+enum CapabilitiesServiceError: Error, LocalizedError {
+    case cliError(code: Int32, stderr: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .cliError(let code, let stderr):
+            return "jang-tools capabilities exited \(code): \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+    }
+}
+
 @Observable
 @MainActor
 final class CapabilitiesService {
@@ -80,6 +99,9 @@ final class CapabilitiesService {
             self.capabilities = decoded
             self.isFromBundle = true
             self.lastError = nil
+        } catch let e as CapabilitiesServiceError {
+            // M129: use errorDescription so the banner reads cleanly.
+            self.lastError = e.errorDescription ?? "\(e)"
         } catch {
             self.lastError = "\(error)"
             // Stick with .frozen
@@ -104,9 +126,13 @@ final class CapabilitiesService {
                         handle.set(process: proc)
                         proc.waitUntilExit()
                         if proc.terminationStatus != 0 {
-                            let e = err.fileHandleForReading.readDataToEndOfFile()
-                            throw NSError(domain: "CapabilitiesService", code: Int(proc.terminationStatus),
-                                          userInfo: [NSLocalizedDescriptionKey: String(data: e, encoding: .utf8) ?? ""])
+                            let stderr = String(
+                                data: err.fileHandleForReading.readDataToEndOfFile(),
+                                encoding: .utf8
+                            ) ?? ""
+                            cont.resume(throwing: CapabilitiesServiceError.cliError(
+                                code: proc.terminationStatus, stderr: stderr))
+                            return
                         }
                         let data = out.fileHandleForReading.readDataToEndOfFile()
                         cont.resume(returning: data)
