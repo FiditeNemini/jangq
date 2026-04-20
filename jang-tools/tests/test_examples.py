@@ -131,6 +131,83 @@ def test_cli_python_snippet_compiles(dense_model_dir):
 
 
 # ────────────────────────────────────────────────────────────────────
+# Iter 29: M93 — MiniMax is text-only regardless of stray preprocessor files
+# ────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def minimax_with_stray_preprocessor(tmp_path):
+    """Simulates a bad state: a MiniMax output dir that somehow has a
+    preprocessor_config.json (copy residue, user error, broken convert).
+    The template must NOT emit VLM code per feedback_readme_standards.md
+    rule 11: 'MiniMax is text-only — never include VLM code'.
+    """
+    d = tmp_path / "minimax"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({
+        "model_type": "minimax_m2",
+        "num_hidden_layers": 80,
+        "_name_or_path": "MiniMaxAI/MiniMax-M2",
+    }))
+    (d / "jang_config.json").write_text(json.dumps({
+        "format": "jang", "family": "jang", "profile": "JANG_4K",
+        "quantization": {"actual_bits_per_weight": 4.0, "block_size": 64},
+    }))
+    (d / "tokenizer_config.json").write_text(json.dumps({
+        "chat_template": "x",
+        "tokenizer_class": "Qwen2Tokenizer",
+    }))
+    # Plant the stray preprocessor file to simulate the failure mode.
+    (d / "preprocessor_config.json").write_text("{}")
+    (d / "video_preprocessor_config.json").write_text("{}")
+    return d
+
+
+def test_minimax_forced_text_only_even_with_stray_preprocessor(minimax_with_stray_preprocessor):
+    """M93 regression: preprocessor files in a MiniMax dir must NOT flip is_vl."""
+    caps = detect_capabilities(minimax_with_stray_preprocessor)
+    assert caps["model_type"] == "minimax_m2"
+    assert caps["is_vl"] is False, \
+        "MiniMax must be text-only regardless of stray preprocessor_config.json"
+    assert caps["is_video_vl"] is False, \
+        "MiniMax must be text-only regardless of stray video_preprocessor_config.json"
+
+
+def test_minimax_python_snippet_uses_text_loader_not_vlm(minimax_with_stray_preprocessor):
+    """End-to-end: rendered Python snippet must use load_jang_model (text
+    loader) NOT load_jangtq_vlm_model (VLM loader) for MiniMax even when
+    preprocessor files are present in the output dir."""
+    snippet = render_snippet(minimax_with_stray_preprocessor, "python")
+    # Text-path markers present
+    assert "load_jang_model" in snippet, \
+        "MiniMax snippet must use text loader (M93)"
+    # VLM-path markers absent — rule 11 compliance
+    assert "load_jangtq_vlm_model" not in snippet, \
+        "MiniMax must NOT emit VLM imports per feedback_readme_standards rule 11"
+    assert "mlx_vlm" not in snippet, \
+        "MiniMax must NOT import mlx_vlm"
+    assert "Image.open" not in snippet, \
+        "MiniMax must NOT reference image loading"
+
+
+def test_minimax_aliases_also_forced_text_only(tmp_path):
+    """The text-only set includes aliases `minimax` and `minimax_m2_5`.
+    Pin these too so a future model_type string variant doesn't escape."""
+    from jang_tools.examples import _TEXT_ONLY_MODEL_TYPES
+    assert "minimax_m2" in _TEXT_ONLY_MODEL_TYPES
+    assert "minimax_m2_5" in _TEXT_ONLY_MODEL_TYPES
+    assert "minimax" in _TEXT_ONLY_MODEL_TYPES
+
+
+def test_genuine_vl_model_still_vl(vl_model_dir):
+    """Negative guard: a real VL model (qwen2_vl with preprocessor) must
+    STILL be detected as VL. Ensures M93's enforcement didn't broadcast
+    to all models."""
+    caps = detect_capabilities(vl_model_dir)
+    assert caps["model_type"] == "qwen2_vl"
+    assert caps["is_vl"] is True, "real VL model must still be detected as VL"
+
+
+# ────────────────────────────────────────────────────────────────────
 # Iter 27: M90 — has_thinking capability flag + `thinking` YAML tag
 # per feedback_readme_standards.md rule 10
 # ────────────────────────────────────────────────────────────────────

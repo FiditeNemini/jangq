@@ -30,6 +30,18 @@ def _env() -> Environment:
     )
 
 
+# M93 (iter 29): model_types that are DEFINITIONALLY text-only. Rule 11 of
+# feedback_readme_standards.md: "MiniMax is text-only — never include VLM code".
+# Enforced here so a stray preprocessor_config.json in a MiniMax output dir
+# (e.g. from copy-paste or a prior VL convert) can't silently flip is_vl=True
+# and cause the template to emit VLM imports/snippets that won't work at runtime.
+_TEXT_ONLY_MODEL_TYPES = frozenset({
+    "minimax_m2",      # MiniMax M2 / M2.5 / M2.7 — text-only MoE
+    "minimax",         # bare alias, mapped to minimax_m2 in capabilities.py
+    "minimax_m2_5",    # explicit alias
+})
+
+
 def detect_capabilities(model_dir: Path) -> dict[str, Any]:
     """Inspect a converted model dir for capability flags needed by templates."""
     cfg = json.loads((model_dir / "config.json").read_text())
@@ -79,8 +91,18 @@ def detect_capabilities(model_dir: Path) -> dict[str, Any]:
         ),
         "license": cfg.get("license"),
         "model_type": model_type,
-        "is_vl": (model_dir / "preprocessor_config.json").exists(),
-        "is_video_vl": (model_dir / "video_preprocessor_config.json").exists(),
+        # M93: force text-only for known-text-only model types regardless of
+        # what files are in the dir. A stray preprocessor_config.json (copy
+        # residue, bad convert, etc.) must NOT flip is_vl=True on MiniMax
+        # and cause the template to emit VLM snippets that break at runtime.
+        "is_vl": (
+            model_type not in _TEXT_ONLY_MODEL_TYPES
+            and (model_dir / "preprocessor_config.json").exists()
+        ),
+        "is_video_vl": (
+            model_type not in _TEXT_ONLY_MODEL_TYPES
+            and (model_dir / "video_preprocessor_config.json").exists()
+        ),
         "has_chat_template": has_chat_template,
         "has_tool_parser": bool(tool_parser),
         "tool_parser": tool_parser or "",

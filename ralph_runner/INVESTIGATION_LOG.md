@@ -1082,3 +1082,36 @@ Memory `feedback_readme_standards.md` specifies 9+ other HARD upload requirement
 - **M94**: the CLI stderr warning is shown EVERY time `jang-tools modelcard` runs — even when called from Swift where the UI banner already covers it. Could add a `--quiet-note` flag for the Swift caller so we don't double-surface. Low priority since Swift doesn't surface stderr to the user except on failure.
 
 **Next iteration should pick:** M88 (sheet init-vs-task field-lifecycle, iter-25 spawn). Or continue Cat D with `feedback_model_checklist.md` (untouched). Or M87 live Mistral 4 validation. Or M93 (MiniMax-vs-VLM check — small + closes rule 11). Or the next natural user-flow audit — VerifyStep's adoption action row wiring (flagged at end of iter 25).
+
+---
+
+## 2026-04-20 iteration 29 — M93 MiniMax text-only enforcement (rule 11)
+
+**Angle:** Close M93 — the last automatable rule from `feedback_readme_standards.md`. Pairs cleanly with iter-27 (M90 reasoning/thinking tag) and iter-28 (M91 skeleton warning) as a three-iter sweep of that memory file's template-enforceable surface.
+
+**Deep trace walkthrough:**
+1. Rule 11: "MiniMax is text-only — never include VLM code". Traced `detect_capabilities` in examples.py: `is_vl` = `(model_dir / "preprocessor_config.json").exists()`. Pure file-existence check, no model_type gating.
+2. **Failure mode:** if a MiniMax output dir contains `preprocessor_config.json` (copy residue from a prior VL convert in the same workspace, user manually dragging files, broken converter from an earlier run), `is_vl` flips to True. Python snippet template then takes the `{% if is_vl or is_video_vl %}` branch, emitting `from jang_tools.load_jangtq_vlm import load_jangtq_vlm_model` + `from mlx_vlm import generate` + `from PIL import Image`. At runtime this breaks because MiniMax has no vision tower — user's adopter sees cryptic import errors on a published card.
+3. **Fix approach (conservative):**
+   - New `_TEXT_ONLY_MODEL_TYPES = frozenset({"minimax_m2", "minimax", "minimax_m2_5"})` listing every alias MiniMax is registered under (cross-ref with `capabilities.py:37-39`).
+   - `is_vl` / `is_video_vl` detection now requires BOTH the file AND model_type NOT in the text-only set. Conservative: MiniMax always text-only; genuine VL models (qwen2_vl, qwen3_vl) unaffected.
+4. **Alias coverage note:** `capabilities.py` maps `minimax_m2 / minimax_m2_5 / minimax` all to the same arch. Missing any alias = missing enforcement for that spelling. Test pins all three.
+5. **Negative test is critical:** `test_genuine_vl_model_still_vl` asserts that qwen2_vl with preprocessor IS still detected as VL. Prevents a future overzealous broadening of `_TEXT_ONLY_MODEL_TYPES` from breaking genuine VL detection.
+
+**Items touched:**
+- M93 [x] — MiniMax now forced text-only regardless of stray preprocessor files. Rule 11 enforced.
+
+**Commit:** (this iteration)
+
+**Verification:** 260 jang-tools (was 256, +4). ralph_runner 68 + Swift 115 unchanged.
+
+**Closed-status tally:** 42 (prior) + M93 = 43 closed / 77 total = 56% closure rate.
+
+**Three-iter sweep of `feedback_readme_standards.md` complete:**
+- iter 27: M90 — `thinking` YAML tag (rule 10)
+- iter 28: M91 — skeleton warning at Swift UI + CLI (rules 1-6, 9, 12)
+- iter 29: M93 — MiniMax text-only enforcement (rule 11)
+
+Rules 7-8 (no duplicate tables, no wrong profile data) still aren't automated — they're curator-audit rules that require reading the specific card text. Could potentially add a lint pass but deferring as M95.
+
+**Next iteration should pick:** M88 (sheet init-vs-task field-lifecycle, iter-25 spawn — small cleanup). Or M87 live Mistral 4 validation (needs real convert). Or continue Cat D with `feedback_model_checklist.md` (untouched). Or the VerifyStep adoption action row wiring audit (flagged iter 25). Or broader UX exploration: what happens if user cancels the publish stream mid-upload (iter-23/24 flow) — does the half-uploaded repo get cleaned up, or is it stranded with partial files?
