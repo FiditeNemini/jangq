@@ -55,6 +55,11 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "gemma3":           ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3_text":      ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3n":          ("gemma4",      "gemma4",      "gemma4",   False, "hybrid"),
+    # Llama 3.x (dense) — base + instruct
+    "llama":            ("llama",       None,          "llama",    False, "kv"),
+    "llama3":           ("llama",       None,          "llama",    False, "kv"),
+    # idefics3 (SmolVLM) — llama text decoder + SigLIP vision encoder
+    "idefics3":         ("idefics3",    None,          "llama",    False, "kv"),
 }
 
 
