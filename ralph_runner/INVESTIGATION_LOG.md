@@ -5313,3 +5313,47 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: scan Models.swift / Theme.swift / JANGQuantizerApp.swift for any non-button-related issues (decoding edge cases, color contrast, lifecycle).
 
 **Next iteration should pick:** save the feedback_no_try_question_in_button_handlers.md memory (codifies a recurring rule across sessions), OR rate-limiting on jang-server.
+
+---
+
+## 2026-04-20 iteration 122 — Codify "no try? in Button handlers" as long-term memory
+
+**Angle:** Iter-121 forecast: "save the feedback memory note — three is the threshold for codifying a recurring habit." Direct execution.
+
+**Deep trace walkthrough:**
+1. **Confirmed the threshold:** three instances of `try?` in user-action Button handlers across the JANG codebase, all by the same dev:
+   - JANGStudio iter-35 M107 — Settings Open Logs
+   - JANGQuantizer.swiftpm iter-120 M185 — SettingsView Check Connection
+   - JANGQuantizer.swiftpm iter-121 M186 — QueueView Cancel + Retry (×2 in same file)
+2. **Designed the memory note** with: anti-pattern + correct pattern code blocks, the narrow exception (truly idempotent + best-effort), three historical instances cited with file refs, audit grep recipe, green-field guidance, links to related memories (`feedback_remediation_pattern.md` + `feedback_view_lifecycle_cancel.md`).
+3. **Wrote to** `/Users/eric/.claude/projects/-Users-eric-jang/memory/feedback_no_try_in_button_handlers.md`.
+4. **Updated MEMORY.md index** with a one-line entry under the Feedback section.
+
+**Meta-lesson — long-term memory is the right venue for cross-session rules.** The audit checklist and investigation log are great for project-state and per-iter findings, but they're tied to the JANG repo specifically. Cross-session rules — patterns that apply to ANY future Swift code, ANY future ralph audit — live in the memory dir so future-me sees them automatically on every session start. **Rule for which iters get a memory note:** when an iter codifies a meta-lesson that's (a) language-or-framework-general (not JANG-specific), (b) recurring (3+ instances), (c) describable as a do/don't rule with code examples, write a memory note.
+
+**Meta-lesson — three is the right threshold for codifying.** Two could be coincidence; three is a habit. Earlier memory notes followed similar threshold:
+  - `feedback_pipe_drain_pattern.md` (iter-83): four pipe-drain bugs (M158/M159/M160 + audit pass).
+  - `feedback_remediation_pattern.md` (iter-92): three remediation iters (M167/M168/M169).
+  - `feedback_view_lifecycle_cancel.md` (iter-94): four lifecycle cancel iters (M162/M163/M170/M171).
+  - `feedback_no_try_in_button_handlers.md` (iter-122, this one): three Button-swallow instances (M107/M185/M186).
+**Rule confirmed:** wait for the third instance; codify when the pattern is undeniably recurring, not just plausible.
+
+**Items touched:** none code-changed. New memory file + index update.
+
+**Commit:** (this iteration) — docs-only.
+
+**Verification:** none required (no code change).
+
+**Closed-status tally:** 140 (iter 121), unchanged (this iter is meta-work, not a bug close). Zero known bugs as of iter-122 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: rate-limiting on jang-server (DoS surface).
+- **NEW**: scan remaining JANGQuantizer.swiftpm files (Models.swift, Theme.swift, JANGQuantizerApp.swift) for non-button-related issues.
+- **NEW**: apply iter-122's memory rule retrospectively — any other 3+-instance pattern from past iters that hasn't been codified?
+
+**Next iteration should pick:** rate-limiting on jang-server (concrete DoS angle), OR final JANGQuantizer.swiftpm sweep for Models/Theme/App, OR retrospective memory-codification audit.
