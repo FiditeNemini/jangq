@@ -262,7 +262,17 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Tests (3 new):** defaultValidateTimeoutSeconds is in [30, 300]s (regression pin), runJangValidate returns false on nonexistent dir (exercises the terminationHandler branch on non-zero exit), timeout bound fires near 0.1s wall-time bound.
       **Evidence:** `PostConvertVerifier.swift:138-185`, `VerifyStep.swift:100-104`. 109 Swift tests pass (was 106).
       **Commit:** (this iteration)
-- [ ] **M43** — `publish.py` `upload_folder` call blocks for the ENTIRE upload with no progress streaming. PublishService.swift blocks on `waitUntilExit()` with no output handling. User sees a spinner for 30+ minutes with no ETA. Need to switch to `ProgressEmitter` + stream JSONL progress from the Python side (similar to convert's 5-phase protocol).
+- [x] **M43 (Python side)** — `publish.py` previously called `upload_folder` in a single blocking invocation — user saw a spinner for 30+ minutes with no confirmation the upload was even running, no file count, no bytes-transferred, no ETA. Swift-side integration waiting on iter 24.
+      **Fix (iter 23, Python half):**
+      - New `_upload_with_progress(model_dir, repo_id, token, emitter, commit_message, upload_file=None)` function iterates every file under the model dir + calls `HfApi.upload_file` per file, emitting phase + tick JSONL events to stderr (same schema as convert's 5-phase protocol so Swift `JSONLProgressParser` consumes it unchanged). `upload_file` is an injection point for tests so they never hit the real HF API.
+      - CLI gains `--progress {none,json}` (default `none`). `json` dispatches to the per-file path; otherwise falls back to the original `upload_folder` bulk call (~faster, no progress).
+      - Phase 1 = scan, phase 2 = upload, phase 3 = finalize. Info event records "enumerated N files totalling X.XX GB". Tick events stream bytes-uploaded / total-bytes with label=relative-path, throttled to 100ms via ProgressEmitter (final 100% tick always lands via is_final auto-detect).
+      - Empty model dir raises `RuntimeError` rather than silently creating a commit with zero files.
+      - Commit message per file includes `(idx/total: filename)` so HF's commit history reflects the upload order.
+      **Tests (4 new):** iterates-every-file (sorted order, commit-message shape), JSONL event stream has exactly 3 phase events + ≥1 tick + info event with v=1 schema version and ts timestamp on every event, empty-dir raises, CLI help mentions `--progress` + `json`.
+      **Evidence:** `publish.py:27-77` new function, `publish.py:79-130` dispatch branch, `tests/test_publish.py` 4 new tests. 245 jang-tools tests pass (was 241).
+      **Commit:** (this iteration)
+      **Deferred to iter 24:** Swift PublishService `publishWithProgress(...) -> AsyncThrowingStream<PublishProgress, Error>` variant + PublishToHuggingFaceSheet UI replacement of the `isPublishing` spinner with a real progress bar + bytes-transferred counter.
 - [x] **M44** — `PublishResult.swift` wasn't decoding the `commit_url` field that `publish.py` emits on success. Python emitted it (`"commit_url": str(info)` line 75), Swift struct had no `CodingKeys` entry so decoder silently dropped it. UI showed only the repo URL which doesn't prove the upload landed.
       **Fix:** Added `commitUrl: String?` to `PublishResult` with `commit_url` JSON mapping. Sheet now renders a second "Commit" row under "Published" with its own Open button when `commitUrl != url`. Decode tests cover both the full-publish and dry-run shapes.
       **Evidence:** `PublishService.swift:4-22`, `PublishToHuggingFaceSheet.swift:80-102`, 2 new decode tests in `AdoptionServicesTests`.

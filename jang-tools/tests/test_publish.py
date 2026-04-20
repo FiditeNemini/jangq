@@ -2,6 +2,7 @@
 
 We never actually hit HF here — use --dry-run to exercise the code path.
 """
+import io
 import json
 import os
 import subprocess
@@ -89,6 +90,119 @@ def test_cli_accepts_token_file(fake_converted, tmp_path):
     assert r.returncode == 0, r.stderr
     data = json.loads(r.stdout)
     assert data["dry_run"] is True
+
+
+# ────────────────────────────────────────────────────────────────────
+# Iter 23: M43 — per-file upload emits JSONL progress
+# ────────────────────────────────────────────────────────────────────
+
+class _FakeUploadFile:
+    """Capture upload_file calls so tests can assert on the interaction
+    shape without hitting the network."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *, path_or_fileobj, path_in_repo, repo_id, token, commit_message):
+        self.calls.append({
+            "path": path_or_fileobj,
+            "repo_path": path_in_repo,
+            "repo": repo_id,
+            "token_redacted": bool(token),
+            "commit_message": commit_message,
+        })
+
+
+def test_upload_with_progress_iterates_every_file(tmp_path):
+    from jang_tools.publish import _upload_with_progress
+    from jang_tools.progress import ProgressEmitter
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text('{"model_type":"qwen3"}')
+    (model_dir / "model-00001-of-00001.safetensors").write_bytes(b"x" * 100)
+    (model_dir / "tokenizer.json").write_text("{}")
+
+    fake_upload = _FakeUploadFile()
+    # Don't emit to real stderr during the test — capture via StringIO.
+    err = io.StringIO()
+    emitter = ProgressEmitter(json_to_stderr=True, quiet_text=True, _stderr=err)
+
+    url = _upload_with_progress(
+        model_dir=model_dir,
+        repo_id="test/model",
+        token="tok",
+        emitter=emitter,
+        commit_message="upload test",
+        upload_file=fake_upload,
+    )
+    assert url == "https://huggingface.co/test/model"
+    # Every file must have been uploaded exactly once.
+    uploaded_paths = sorted(c["repo_path"] for c in fake_upload.calls)
+    assert uploaded_paths == ["config.json", "model-00001-of-00001.safetensors", "tokenizer.json"]
+    # Commit message carries the idx/total progress string per file.
+    assert all("(1/3:" in c["commit_message"] or
+               "(2/3:" in c["commit_message"] or
+               "(3/3:" in c["commit_message"] for c in fake_upload.calls)
+
+
+def test_upload_with_progress_emits_expected_jsonl_shape(tmp_path):
+    """Verify the stderr JSONL stream matches the convert 5-phase protocol
+    enough for Swift's JSONLProgressParser to consume it. Specifically:
+    3 phase events + info + ≥1 tick events, all valid JSON lines."""
+    from jang_tools.publish import _upload_with_progress
+    from jang_tools.progress import ProgressEmitter
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    for i in range(5):
+        (model_dir / f"file-{i}.bin").write_bytes(b"y" * 1000)
+
+    err = io.StringIO()
+    emitter = ProgressEmitter(json_to_stderr=True, quiet_text=True, _stderr=err)
+    _upload_with_progress(
+        model_dir=model_dir, repo_id="t/m", token="tok",
+        emitter=emitter, commit_message="msg",
+        upload_file=_FakeUploadFile(),
+    )
+    lines = [line for line in err.getvalue().splitlines() if line.strip()]
+    events = [json.loads(line) for line in lines]
+    types = [e["type"] for e in events]
+    assert types.count("phase") == 3, f"expected exactly 3 phase events, got {types}"
+    assert "info" in types, "must emit an info event with file count + size"
+    assert types.count("tick") >= 1, "must emit at least one tick (the final 100% one)"
+    # All events must have a `v` schema version and a `ts` timestamp
+    for e in events:
+        assert e.get("v") == 1, f"every event must carry v=1, got {e}"
+        assert isinstance(e.get("ts"), (int, float)), f"every event needs ts, got {e}"
+
+
+def test_upload_with_progress_raises_on_empty_dir(tmp_path):
+    """Empty model dir = nothing to upload; must raise rather than silently
+    create a repo with no files."""
+    from jang_tools.publish import _upload_with_progress
+    from jang_tools.progress import ProgressEmitter
+    model_dir = tmp_path / "empty"
+    model_dir.mkdir()
+    err = io.StringIO()
+    emitter = ProgressEmitter(json_to_stderr=True, quiet_text=True, _stderr=err)
+    with pytest.raises(RuntimeError, match="no files to upload"):
+        _upload_with_progress(
+            model_dir=model_dir, repo_id="t/m", token="tok",
+            emitter=emitter, commit_message="msg",
+            upload_file=_FakeUploadFile(),
+        )
+
+
+def test_publish_cli_has_progress_flag():
+    """The --progress=json flag is the Swift-side contract. Pin it in the
+    help output so a rename would break the Swift PublishService integration
+    noisily (once that lands — M43's Swift portion is iter-24 work)."""
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "publish", "--help"],
+        capture_output=True, text=True, check=True,
+    )
+    assert "--progress" in r.stdout
+    assert "json" in r.stdout
 
 
 def test_dry_run_generates_readme(fake_converted, monkeypatch):

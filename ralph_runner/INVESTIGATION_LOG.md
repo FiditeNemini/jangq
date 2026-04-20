@@ -833,3 +833,53 @@ green/fail matrix has been lying.
 **Meta-observation on Cat D second pass:** iter 21 found a real quality bug (M83 threshold drift). iter 22 found mostly alignment + one ambiguous case (M87). Suggests that after one big drift catch, the marginal yield drops — but the second pass was still cheaper than a real bug to find via user report. Worth doing every 5-7 iters.
 
 **Next iteration should pick:** M43 (publish progress streaming) is now 5 iters deferred — it's the LAST Cat A item and the biggest remaining adopter-UX gap. Architecturally meaty (needs JSONL stream from Python upload_folder + Swift parser) but highly user-visible. Alternatively M48 (default repoName missing org prefix — small polish). Or M87 live Mistral 4 RoPE validation (requires a real convert — can't be done in a unit test).
+
+---
+
+## 2026-04-20 iteration 23 — M43 Python-side progress streaming
+
+**Angle:** After 6 iterations of deferral, finally tackled M43 — the biggest remaining adopter-UX gap. Scoped to the Python side only because the full end-to-end (Python JSONL + Swift stream + UI progress bar) is 2-iter sized work and breaking it in half keeps each commit reviewable. Iter 24 completes with the Swift half.
+
+**Deep trace walkthrough:**
+1. Read `publish.py` as it stood after iter 17. Single call: `api.upload_folder(folder_path=..., repo_id=..., token=..., commit_message=...)`. No streaming, no output. From Swift's perspective (`PublishService.swift:invoke`), the subprocess runs in a DispatchQueue + `waitUntilExit()` — stderr is captured only on FAILURE. On success, the 30-minute silence is literally silence.
+2. **Solution architecture decision: per-file vs intercepted progress.**
+   - Option A: hook into `upload_folder`'s tqdm output and parse it. Fragile; tqdm format changes upstream, progress bars use carriage-return lines which are hard to parse as JSONL.
+   - Option B: use `huggingface_hub`'s `create_commit` with `CommitOperation*` primitives + custom progress callback. Possible but API is complex and different between huggingface_hub versions.
+   - Option C: iterate files manually, call `HfApi.upload_file` per file, emit a JSONL event between files. Slower (no LFS batching, more commits) but dead-simple progress + reusable with the existing `ProgressEmitter` protocol from convert.
+   - **Chose Option C.** Trade-off: for a 40-shard JANG_4K at 5 GB each, per-file serial upload is ~15% slower than bulk (no parallel sha256 hashing) but gives a tick-per-shard which is exactly what the UI needs. For the target user (publishing one model per day), 35min vs 30min is invisible; the progress bar is MASSIVELY visible.
+3. **Implementation tightness:**
+   - `upload_file` accepted as a callable injection so tests never touch HfApi / the network.
+   - File enumeration is sorted, deterministic — gives consistent commit ordering.
+   - Empty dir raises RuntimeError immediately (before any HF call) rather than creating an empty repo.
+   - Schema reuses convert's 5-phase protocol EXACTLY (v=1, type=phase/tick/info/done, ts field) so Swift's existing `JSONLProgressParser` works unchanged in iter 24.
+   - `--progress {none,json}` keeps the fast path (bulk upload_folder) as the default; opt-in `json` for UI integration.
+4. **Commit-message details:**
+   - Each file's commit message carries `(idx/total: relpath)` so HF's commit history reads like `Upload my-model-JANG_4K via jang-tools (7/42: model-00007-of-00042.safetensors)` instead of 42 identical messages. Useful for post-hoc debugging if an upload fails midway.
+5. **Throttling:** `emitter.tick` has 100ms default throttle (overridable via iter-11's `JANG_TICK_THROTTLE_MS`). For 42 files @ 15-45s per 5GB file, ticks are plenty sparse to pass through the throttle unclogged.
+
+**Items touched:**
+- M43 [x] — Python side complete. Swift half (publishWithProgress + UI progress bar) is iter-24 work.
+
+**Tests (4 new):**
+- `test_upload_with_progress_iterates_every_file` — every file uploaded once, sorted order, commit messages carry progress.
+- `test_upload_with_progress_emits_expected_jsonl_shape` — stream contains exactly 3 phase events + ≥1 tick + info, all with v=1 and ts (Swift parser invariants).
+- `test_upload_with_progress_raises_on_empty_dir` — empty input is a hard error, not a silent no-op.
+- `test_publish_cli_has_progress_flag` — pins the `--progress json` flag in the CLI help so a rename would break CI (once Swift depends on it).
+
+**Commit:** (this iteration)
+
+**Verification:** 245 jang-tools (was 241, +4). ralph_runner 68 + Swift 109 unchanged (Swift half next iter).
+
+**Closed-status tally:** 37 (prior) + M43 = 38 closed / 74 total = 51% closure rate. **Last Cat A Python-side item done.** Swift-side integration work remains but is well-specified now.
+
+**Design note for iter 24's Swift work:**
+Swift already has `JSONLProgressParser` + the pattern from `PythonRunner.run() -> AsyncThrowingStream<ProgressEvent, Error>`. Copy that shape:
+```swift
+extension PublishService {
+    static func publishWithProgress(modelPath: URL, repo: String, isPrivate: Bool,
+                                    token: String) -> AsyncThrowingStream<ProgressEvent, Error>
+}
+```
+Sheet wiring: `isPublishing: Bool` → `progress: (done: Int64, total: Int64, label: String)?`. Render `ProgressView(value:, total:)` + bytes-uploaded label. Total upload time unchanged; user perception vastly improved.
+
+**Next iteration should pick:** M43 Swift half (pairs naturally with this iter, architecture pre-specified). OR a different rotation — M48 (default repoName polish), M87 (Mistral 4 live validation — requires real convert, probably not doable in a unit test iter), or next Cat D pass (following iter-21/22's 5-7 iter cadence — we're at iter-22 + 1 = cadence due around iter 27-29).
