@@ -70,7 +70,27 @@ struct ProfileStep: View {
         }
         .formStyle(.grouped)
         .padding()
-        .onChange(of: coord.plan.profile) { _, _ in refresh() }
+        .onChange(of: coord.plan.profile) { oldProfile, newProfile in
+            // M146 (iter 68): when the user switches profiles, the
+            // auto-filled output folder name (`<src>-<oldProfile>`) becomes
+            // stale. Result pre-M146: user converts as JANG_2L but the
+            // folder is named `-JANG_4K` — wrong label on every diagnostic,
+            // HF publish, and `ls` going forward. If the current outputURL
+            // matches the auto-pattern for the OLD profile (i.e., we
+            // generated it, not the user), regenerate for the NEW profile.
+            // If outputURL was user-picked via pickOutput(), it won't match
+            // the auto-pattern and we leave it alone.
+            if let src = coord.plan.sourceURL,
+               let cur = coord.plan.outputURL {
+                let autoOld = src.deletingLastPathComponent()
+                    .appendingPathComponent("\(src.lastPathComponent)-\(oldProfile)")
+                if cur == autoOld {
+                    coord.plan.outputURL = src.deletingLastPathComponent()
+                        .appendingPathComponent("\(src.lastPathComponent)-\(newProfile)")
+                }
+            }
+            refresh()
+        }
         .onChange(of: coord.plan.family) { _, _ in refresh() }
         .onChange(of: coord.plan.outputURL) { _, _ in refresh() }
         .onChange(of: coord.plan.hadamard) { _, _ in refresh() }

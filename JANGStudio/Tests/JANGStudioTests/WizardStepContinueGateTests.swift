@@ -181,6 +181,44 @@ final class WizardStepContinueGateTests: XCTestCase {
     // per-source recommendation applied because their plan.profile
     // started at JANG_2L after applyDefaults.
 
+    // MARK: - M146 (iter 68): ProfileStep auto-outputURL follows profile changes
+    //
+    // Pre-M146 ProfileStep auto-filled `coord.plan.outputURL` once (on
+    // .onAppear when nil). If the user then switched profile in the
+    // Picker, the already-set outputURL kept the OLD profile in its
+    // folder name. Result: convert writes to `src-JANG_4K` but user
+    // converted as JANG_2L. Wrong label on every downstream artifact.
+    // Fix: .onChange(of: profile) regenerates outputURL only when it
+    // matches the auto-pattern for the old profile (user-picked paths
+    // via pickOutput don't match and are preserved).
+
+    func test_profileStep_auto_outputURL_follows_profile_change() throws {
+        let src = try stepSource("ProfileStep.swift")
+        // The onChange(of: coord.plan.profile) block must include a
+        // regeneration branch that compares current outputURL to the
+        // auto-pattern for the OLD profile.
+        XCTAssertTrue(
+            src.contains(".onChange(of: coord.plan.profile)"),
+            "ProfileStep must react to profile changes. See M146 iter 68."
+        )
+        XCTAssertTrue(
+            src.contains("appendingPathComponent(\"\\(src.lastPathComponent)-\\(newProfile)\")"),
+            """
+            ProfileStep's profile-change handler must regenerate outputURL
+            using the NEW profile name when the current URL matches the
+            auto-pattern. See M146 iter 68.
+            """
+        )
+        XCTAssertTrue(
+            src.contains("if cur == autoOld"),
+            """
+            The regeneration MUST be gated on the outputURL matching the
+            auto-pattern for the old profile — otherwise user-picked
+            custom output folders get silently rewritten too.
+            """
+        )
+    }
+
     // MARK: - M144 (iter 66): family + profile must stay coupled
     //
     // Pre-M144 applyRecommendation overwrote `family` unconditionally

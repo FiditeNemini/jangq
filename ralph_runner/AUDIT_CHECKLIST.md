@@ -814,6 +814,23 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Tests (+3) in WizardStepContinueGateTests.swift:** source-inspection pins that each guard is present — `if plan.method == seedMethod`, `if plan.hadamard == settings.defaultHadamardEnabled`, `if plan.overrides.forceDtype == nil`. Matches iter-54/56/58 test style.
       **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift:285-335`. 168 Swift tests pass (was 165, +3). Python 314 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M146 (ProfileStep auto-outputURL goes stale when user changes profile)** — Iter-67 forecast called for an ArchitectureStep/ProfileStep mutation sweep. Grepped `plan\.\w+\s*=` across all Step files. Found a subtle staleness bug in ProfileStep:
+      **Pre-M146 auto-outputURL (ProfileStep.swift:78-80):**
+      ```swift
+      if coord.plan.outputURL == nil, let src = coord.plan.sourceURL {
+          coord.plan.outputURL = src.deletingLastPathComponent()
+              .appendingPathComponent("\(src.lastPathComponent)-\(coord.plan.profile)")
+      }
+      ```
+      **The bug:** fires on .onAppear, sets output folder name to `<src>-<profile>` (e.g., `MyModel-JANG_4K`). If user then switches profile in the Picker to JANG_2L, outputURL STAYS at `MyModel-JANG_4K`. Convert proceeds, writes files into `MyModel-JANG_4K` folder — but the model inside is actually JANG_2L. Every downstream artifact (HF publish, `ls`-listed folder name, diagnostic zip) carries the wrong profile label.
+      **Fix (iter 68):** add a regeneration path inside the existing `.onChange(of: coord.plan.profile)` handler. If the current outputURL matches the auto-pattern for the OLD profile (i.e., we generated it — user didn't pick a custom path via `pickOutput()`), regenerate for the NEW profile. If outputURL doesn't match (user-picked), leave alone.
+      ```swift
+      if cur == autoOld { coord.plan.outputURL = <autoNew> }
+      ```
+      **Why not unconditionally regenerate:** `pickOutput()` lets the user choose any folder. If they picked `/some/custom/dir`, rewriting it on every profile change would be astonishing. The auto-pattern match distinguishes auto-fill from user-pick without needing extra @State flags.
+      **Tests (+1) in WizardStepContinueGateTests.swift:** `test_profileStep_auto_outputURL_follows_profile_change` — source-inspection: (a) `.onChange(of: coord.plan.profile)` exists, (b) regenerates with `newProfile`, (c) gated on `cur == autoOld`.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/ProfileStep.swift:73-91`. 169 Swift tests pass (was 168, +1). Python 314 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

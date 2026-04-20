@@ -2791,3 +2791,52 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 - **NEW**: audit ArchitectureStep.swift and ProfileStep.swift for any other places that mutate `plan.*` fields — make sure changes from ProfileStep aren't silently reverted elsewhere.
 
 **Next iteration should pick:** coupled-fields audit (generalize iter-66) OR ArchitectureStep mutation sweep.
+
+## 2026-04-20 iteration 68 — M146 ProfileStep auto-outputURL staleness on profile change
+
+**Angle:** Iter-67 forecast: grep `plan\.\w+\s*=` across Step files for mutations that could leave stale user-visible state. Iter-68 does the pass.
+
+**Deep trace walkthrough:**
+1. **Mutation sites found:**
+   - SourceStep: iter-65/66/67 handled all applyRecommendation paths.
+   - ProfileStep: `outputURL = src...-{profile}` auto-fill at line 78-80.
+   - RunStep: `coord.plan.run = ...` state transitions — iter-58 M136 fixed onAppear re-entry.
+2. **ProfileStep's auto-outputURL is the remaining suspect.** Reading the logic: the check `if coord.plan.outputURL == nil` fires ONCE in `.onAppear`. After that, outputURL is non-nil regardless of subsequent profile changes.
+3. **Timeline of the bug:**
+   ```
+   T0: .onAppear → outputURL = "/models/MyModel-JANG_4K"
+   T1: user clicks Picker → profile = "JANG_2L"
+   T2: .onChange(of: profile) fires → refresh() (preflight only)
+   T3: user clicks Start Conversion
+   T4: convert --profile JANG_2L writes into "/models/MyModel-JANG_4K"
+   T5: User sees wrong-labeled folder
+   ```
+4. **The folder naming convention carries semantics.** `MyModel-JANG_4K` means "MyModel at JANG_4K profile." Having JANG_2L weights inside a JANG_4K-named folder is a latent data-integrity issue — users might mistakenly publish or distribute the mislabeled folder.
+5. **Fix strategy — auto-pattern match:**
+   - Generate what the auto-fill WOULD be for the OLD profile (`autoOld`).
+   - If current outputURL equals autoOld, we generated it. Regenerate with NEW profile.
+   - If current outputURL differs, user picked something custom via `pickOutput()`. Leave alone.
+   This is a single SwiftUI state check — no extra @State flag needed. Same pattern as iter-65 M143's "seed-default comparison" for profile.
+6. **Test strategy:** source-inspection matches iter-54/56/58 pattern — verify the .onChange body has the three required elements (onChange exists, new-profile regeneration, auto-pattern gate).
+
+**Meta-lesson — SwiftUI state can go stale when derived values don't update.** Any @State/@Observable field whose value is DERIVED from another field needs an .onChange(of: source) handler to stay in sync. Audit class for future iters: find every @State var that's seeded from another field's value — make sure changes to the source propagate. ProfileStep.outputURL was one; TestInferenceViewModel could have similar issues if message/sessionId fields have derived caches; NotificationCenter listeners might cache data that's now stale.
+
+**Items touched:**
+- M146 [x] — ProfileStep auto-outputURL now follows profile changes when user hasn't picked a custom path.
+
+**Commit:** (this iteration)
+
+**Verification:** 169 Swift tests pass (was 168, +1). Python 314 + ralph 73 unchanged.
+
+**Closed-status tally:** 80 (iter 67) + M146 = 81 closed / 100 total = 81.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW grep-audit class**: derived-from-field @State — any other SwiftUI field whose value is seeded/computed from another and doesn't react to upstream change.
+- Symmetric Python-side audit: `output = f"{name}-{profile}"` in `__main__.py:183` is the CLI default when --output is absent. That's rarely invoked from Swift (which always passes --output) but worth a grep.
+
+**Next iteration should pick:** derived-from-field state audit across all Swift views (continues iter-68 meta-lesson) OR a Python side sweep.
