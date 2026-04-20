@@ -3480,3 +3480,56 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: re-visit `runJangValidate` to use `executableOverride` in the `test_runJangValidate_timeoutFiresWithinTolerance` test — pre-fix it relied on real Python startup being >0.1 s, brittle.
 
 **Next iteration should pick:** fix PythonCLIInvoker to match the three-pattern rule, OR an orthogonal audit angle (e.g., continue iter-80's `try?` sweep with a new grep axis like `try? String(data:)` / `try? JSONSerialization.jsonObject`, or audit the UI layer for wizard state-machine silent-transitions).
+
+---
+
+## 2026-04-20 iteration 83 — M160 PythonCLIInvoker: close the pipe-drain-class sweep
+
+**Angle:** Iter-82 forecast: "fix PythonCLIInvoker to match the three-pattern rule." Same latent bug as InferenceRunner pre-fix, one last candidate to finish the sweep.
+
+**Deep trace walkthrough:**
+1. **Re-read `PythonCLIInvoker.invoke` end-to-end.** Structure: `withCheckedThrowingContinuation { cont in DispatchQueue.global().async { … } }`. Inside the dispatch body: `try proc.run(); proc.waitUntilExit(); readDataToEndOfFile()` sequence. Classic single-thread deadlock.
+2. **Estimated real-world exposure.** 7 callers: `RecommendationService`, `ExamplesService`, `ModelCardService`, `CapabilitiesService`, `ProfilesService`, `SourceDetector`, `PublishService.invoke` (publish dry-run). Each emits CLI JSON on stdout, usually 100 B – 10 KB. BUT: any Python exception carries a traceback with MLX imports (deeply nested frames), which can cross 64 KB in pathological cases (e.g., a circular import error chained through 20 modules). Also `examples --list` can return tens of KB on models with rich example galleries.
+3. **Estimated fix cost.** Minimum shape change: spawn two parallel drain blocks via `DispatchQueue.global().async` BEFORE `proc.run()`, synchronize with `DispatchSemaphore`, stash captured Data in an `@unchecked Sendable` `DataBox` class. Semaphore establishes happens-before; `DataBox` placates Swift 6 concurrency analysis (which can't read dispatch-semaphore ordering).
+4. **Why not rewrite to Task.detached?** The body is intentionally dispatch-based because `PythonCLIInvoker` callers span sync + @MainActor + actor-isolated contexts. Converting to async/await everywhere would ripple through the 7 callers and the 4 test suites pinning them. Minimum-blast-radius fix wins.
+5. **TDD sequence:**
+   - Test 1: stdout pumps 275 KB then exit 0 → invoke returns Data with len > 200,000, elapsed < 5 s.
+   - Test 2: stderr pumps 275 KB then exit 11 → errorFactory receives FULL stderr (len > 200,000), elapsed < 5 s.
+   - Pre-fix: tests hang. Post-fix: 9/9 pass in 11.9 s total (the two new tests ~1 s each; the rest unchanged).
+6. **Cross-suite verification.** Ran 6 subprocess-adjacent suites to ensure no regression:
+   - PythonCLIInvokerTests: 9/9 (+2 new)
+   - AdoptionServicesTests: 22/22 (real PythonCLIInvoker callers)
+   - CapabilitiesServiceTests: 5/5
+   - ProfilesServiceTests: 7/7
+   - PostConvertVerifierTests: 14/14 (iter-81 fix still holding)
+   - InferenceRunnerTests: 9/9 (iter-82 fix still holding)
+   - PythonRunnerTests: 4/4
+
+**Meta-lesson — the three-pattern rule is now complete and enforceable.** All 5 Process-launching sites in the Swift app follow one of the three correct drain patterns:
+  - `PythonRunner`: bytes.lines streaming tasks, started before run()
+  - `PublishService._streamPublish`: bytes.lines streaming task + nullDevice stdout
+  - `PostConvertVerifier.runJangValidate`: nullDevice for both streams
+  - `InferenceRunner`: whole-buffer Task.detached drains, started before run()
+  - `PythonCLIInvoker`: whole-buffer DispatchQueue.global drains + semaphore
+  **Any future subprocess helper MUST match one of these five shapes.** Codify this in a new feedback memory (`feedback_pipe_drain_pattern.md`) so the rule survives beyond this Ralph-loop session. Will do that alongside this iter's commit.
+
+**Meta-lesson — the sweep took three iters because iter-81's grep was too narrow.** Iter-81 grep: `proc\.standardOutput\s*=\s*Pipe\(\)` literal. Iter-82's re-grep for the bug class (any post-exit drain on the same thread as waitUntilExit/terminationHandler) caught InferenceRunner + PublishService._streamPublish. Iter-83's closer audit of `waitUntilExit()` callers caught PythonCLIInvoker. Future audits of a bug class: grep BOTH the syntactic pattern AND the semantic signature (call-ordering, thread-affinity, data-flow). One-shot sweeps miss variants; two- or three-iter sweeps find them all.
+
+**Items touched:**
+- M160 [x] — PythonCLIInvoker parallel pipe drains via DispatchQueue.global + DispatchSemaphore + DataBox; 2 new regression tests; three-pattern rule now holds for every Process-launching site in the app.
+
+**Commit:** (this iteration)
+
+**Verification:** 70 subprocess-helper tests green across 7 suites. Python 348 + ralph 73 unchanged.
+
+**Closed-status tally:** 95 (iter 82) + M160 = 96 closed / 100 total = 96.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: save the `feedback_pipe_drain_pattern.md` memory so this three-pattern rule survives across sessions.
+- **NEW**: audit the UI layer — SwiftUI state machine transitions, @Observable mutation races, wizard step-validity silent traps. Haven't deep-traced this surface since iter-56 (WizardStepContinueGateTests).
+
+**Next iteration should pick:** save the pipe-drain memory note, then pivot to UI-layer audit (wizard state machine races / SwiftUI @State mutation from non-MainActor contexts / step gate conditions).

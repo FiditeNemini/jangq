@@ -23,6 +23,17 @@
 
 import Foundation
 
+/// Mutable box for carrying captured pipe output between the drain
+/// blocks and the reader, while satisfying Swift 6 concurrency.
+/// Each `DataBox` instance is written by exactly one drain block and
+/// read only AFTER that block's `DispatchSemaphore.signal()` has been
+/// awaited — the happens-before from the semaphore makes the read safe.
+/// Swift 6 can't infer that ordering statically, so the class is
+/// `@unchecked Sendable` to silence it. (M160, iter 83.)
+private final class DataBox: @unchecked Sendable {
+    var data: Data = Data()
+}
+
 enum PythonCLIInvoker {
     /// Invoke the bundled Python CLI with the given args and return stdout
     /// as Data. On non-zero exit, calls `errorFactory(code, stderr)` to
@@ -73,18 +84,53 @@ enum PythonCLIInvoker {
                         let err = Pipe()
                         proc.standardOutput = out
                         proc.standardError = err
+
+                        // M160 (iter 83): drain both pipes in parallel on
+                        // separate dispatch threads BEFORE `proc.run()`.
+                        // Before this fix, `waitUntilExit()` ran on the
+                        // same thread that then read the pipes — so a
+                        // subprocess that wrote more than the 64 KB macOS
+                        // pipe buffer blocked on write(2), couldn't exit,
+                        // and `waitUntilExit()` deadlocked forever. Seven
+                        // callers run the bug risk: 5 adoption services
+                        // (discover, examples, capabilities, recommend,
+                        // profiles, model-card), SourceDetector, and
+                        // PublishService.invoke. Most emit small output,
+                        // but Python tracebacks and `examples --list` on
+                        // large registries can cross 64 KB.
+                        //
+                        // Matches iter-81 M158 (runJangValidate) and
+                        // iter-82 M159 (InferenceRunner). Drain-pattern #2
+                        // from the three-pattern rule: whole-buffer readers
+                        // on a separate thread, synchronized via semaphore.
+                        let outBox = DataBox()
+                        let errBox = DataBox()
+                        let outDone = DispatchSemaphore(value: 0)
+                        let errDone = DispatchSemaphore(value: 0)
+                        DispatchQueue.global().async {
+                            outBox.data = out.fileHandleForReading.readDataToEndOfFile()
+                            outDone.signal()
+                        }
+                        DispatchQueue.global().async {
+                            errBox.data = err.fileHandleForReading.readDataToEndOfFile()
+                            errDone.signal()
+                        }
+
                         try proc.run()
                         handle.set(process: proc)
                         proc.waitUntilExit()
+                        // Wait for both drains to complete. EOF fires as
+                        // soon as the subprocess's write-end of each pipe
+                        // is closed (which happens at exit), so these
+                        // waits return shortly after waitUntilExit.
+                        outDone.wait()
+                        errDone.wait()
                         if proc.terminationStatus != 0 {
-                            let stderr = String(
-                                data: err.fileHandleForReading.readDataToEndOfFile(),
-                                encoding: .utf8
-                            ) ?? ""
+                            let stderr = String(data: errBox.data, encoding: .utf8) ?? ""
                             cont.resume(throwing: errorFactory(proc.terminationStatus, stderr))
                             return
                         }
-                        cont.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
+                        cont.resume(returning: outBox.data)
                     } catch {
                         cont.resume(throwing: error)
                     }

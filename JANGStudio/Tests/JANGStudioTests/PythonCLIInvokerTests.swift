@@ -153,6 +153,65 @@ final class PythonCLIInvokerTests: XCTestCase {
         }
     }
 
+    // ────────────── Iter 83: M160 — pipe-fill deadlock ──────────────
+    // PythonCLIInvoker's DispatchQueue.global body used
+    //   `try proc.run(); proc.waitUntilExit(); readDataToEndOfFile()`
+    // on a single thread. Classic cross-process deadlock: subprocess
+    // blocks on write(2) past the 64 KB pipe buffer → can't exit →
+    // waitUntilExit never returns. Seven callers (5 adoption services +
+    // SourceDetector + PublishService.invoke) mostly produce small output
+    // but any of them can emit a large Python traceback on error, and
+    // `jang_tools examples --list` / `capabilities --stamp` can cross the
+    // buffer on large models. Same class as iter-81 M158 (runJangValidate)
+    // and iter-82 M159 (InferenceRunner, PublishService._streamPublish).
+
+    func test_invoke_does_not_hang_on_large_stdout_output() async throws {
+        // Subprocess emits ~275 KB to stdout then exits 0.
+        let script = try makeTempScript(#"""
+        dd if=/dev/urandom bs=1024 count=200 2>/dev/null | base64
+        exit 0
+        """#)
+        let start = Date()
+        let data = try await PythonCLIInvoker.invoke(
+            args: [],
+            executableOverride: script
+        ) { _, _ in FakeError(code: 0, stderr: "") }
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertGreaterThan(data.count, 200_000,
+            "stdout drain must capture the full payload (got \(data.count) bytes)")
+        XCTAssertLessThan(elapsed, 5,
+            "invoke took \(elapsed)s — pipe-fill regression (should be sub-second)")
+    }
+
+    func test_invoke_does_not_hang_on_large_stderr_output_on_failure() async throws {
+        // Subprocess emits ~275 KB to stderr then exits non-zero. This is
+        // the real-world shape: a Python traceback on error can easily be
+        // a few KB; nested jang_tools exceptions with MLX stacks can push
+        // past 64 KB. errorFactory must still be invoked with the full
+        // stderr so the UI surfaces the diagnostic text.
+        let script = try makeTempScript(#"""
+        dd if=/dev/urandom bs=1024 count=200 2>/dev/null | base64 >&2
+        exit 11
+        """#)
+        let start = Date()
+        do {
+            _ = try await PythonCLIInvoker.invoke(
+                args: [],
+                executableOverride: script
+            ) { code, stderr in FakeError(code: code, stderr: stderr) }
+            XCTFail("expected throw from non-zero exit")
+        } catch let e as FakeError {
+            XCTAssertEqual(e.code, 11)
+            XCTAssertGreaterThan(e.stderr.count, 200_000,
+                "errorFactory must receive the full captured stderr (got \(e.stderr.count) bytes)")
+        } catch {
+            XCTFail("wrong error type: \(error)")
+        }
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 5,
+            "invoke took \(elapsed)s — stderr pipe-fill regression on failure path")
+    }
+
     // ────────────── Task cancel propagates SIGTERM ──────────────
 
     func test_consumer_task_cancel_terminates_subprocess_within_3_seconds() async throws {
