@@ -1545,3 +1545,50 @@ Or a domain item: M87, M97, M106, Cat D.
 **Cat D yield tally — 4 of 6 passes found real bugs. Every pass is worth the investment.** Memory files remaining for future Cat D passes: `project_minimax_m27.md`, `reference_architecture_details.md`, various newer memories (e.g., `project_glm51_jang1l_working.md`).
 
 **Next iteration should pick:** M115 (cleanup old v1 files in convert.py — small, natural follow-up to M114) OR M116 (Swift-side size verification — closes rule 2) OR rotate to domain: M87 Mistral 4 RoPE, M97 partial HF cleanup, M106 DiagnosticsBundle. Or a final grep-audit pass on ralph_runner Python (untouched by iter-30-37 Swift-focused sweeps).
+
+---
+
+## 2026-04-20 iteration 39 — M115 stale-artifact cleanup on re-convert
+
+**Angle:** Natural follow-up to iter-38's M114. Both close the same memory rule (feedback_model_checklist.md rule 1: "clean output, no old v1 .jang.safetensors, no jang_imatrix"), but M114 was publish-layer while M115 is convert-layer. Together they close the "junk files on re-convert" class.
+
+**Deep trace walkthrough:**
+1. Grep for v1 file patterns — `*.jang.safetensors`, `model.jang.index.json`. Both still supported by reader.py:194-195 for backward-compat loading.
+2. convert.py:990 `output_path.mkdir(parents=True, exist_ok=True)` — creates dir if absent, but exist_ok=True means pre-existing content is NOT touched. Every prior convert's v1 shards linger forever.
+3. Additional class: shard-count mismatch. If a prior convert wrote 42 shards and the new convert writes 38, shards 39-42 never get overwritten → 4 orphan files.
+4. writer.py regenerates `model-{N:05d}-of-{TOTAL:05d}.safetensors` with the NEW total, but if TOTAL shrank, the higher-indexed old files keep their old filename and survive.
+5. **M115 CONFIRMED.** Real-world scenario:
+   - User: JANG_4K JANG_2L JANG_2S. Each produces a different shard count (more bits = fewer-larger shards).
+   - User re-converts the same source with a different profile into the same output dir.
+   - Old profile's orphan shards stay on disk.
+   - Model loader tries to load `model.safetensors.index.json` (new), gets correct shards. Old shards are orphan disk bloat.
+   - Memory warned this was the "155 GB bloat" class.
+6. **Design considerations:**
+   - **Don't nuke the whole dir** — users may place custom files (README.md, fine-tuning notes) they want preserved.
+   - **Don't use rglob** — `assets/` subdir with user content shouldn't be touched if it coincidentally has a file matching a JANG pattern.
+   - **Don't raise on missing dir** — first-time converts into fresh dirs must not error.
+   - **Tolerate permission errors on individual files** — one locked file shouldn't abort the whole convert.
+7. **Implementation:**
+   - Module-level `STALE_JANG_ARTIFACT_PATTERNS` list pins the 6 file-patterns. Exported + testable.
+   - `_remove_stale_jang_artifacts(path)` loops patterns with `glob` (non-recursive) + try/unlink/OSError-tolerant. Returns removed names list for logging.
+   - convert.py call site: runs BEFORE `_safe_copy` of extras — so extras get fresh copies + old stale files are gone.
+8. **Coverage test strategy:** 8 tests pinning each invariant separately. Biggest one is the user-file protection test that plants 13 realistic user files + asserts all 13 survive after cleanup — regression guard against a future "let's just nuke everything" simplification.
+
+**Items touched:**
+- M115 [x] — stale JANG artifacts cleaned on re-convert. User files protected.
+
+**Commit:** (this iteration)
+
+**Verification:** 270 jang-tools tests (was 262, +8). ralph_runner 68 + Swift 122 unchanged.
+
+**Closed-status tally:** 53 (prior) + M115 = 54 closed / 90 total = 60% closure rate. Just back over the 60% threshold.
+
+**feedback_model_checklist.md rule-by-rule status:**
+- Rule 1 (clean output, no junk) → **✓ M114 (publish) + M115 (convert)**
+- Rule 2 (disk ≈ RAM) → M116 open (PostConvertVerifier has no size check)
+- Rule 3 (speed test) → M117 open (PostConvertVerifier has no inference smoke)
+- Rule 4 (coherent output) → audit.py a3 covers for Ralph harness; no in-wizard check
+- Rule 5 (VL test) → audit.py a11/a12 cover ✓
+- Rule 6 (config audit) → PostConvertVerifier rows #1-#4 cover ✓
+
+**Next iteration should pick:** M116 (Swift size-check — closes rule 2, Cat D completion impulse). OR rotate to domain items (M87, M97, M106). OR a final grep-audit on ralph_runner Python (Swift saturation detected iter 37; Python side hasn't been swept).

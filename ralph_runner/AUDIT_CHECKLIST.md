@@ -457,7 +457,23 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Tests (2 new):** `test_upload_excludes_jang_imatrix` plants an imatrix fixture and asserts it's not in the upload_file calls; `test_dry_run_excludes_jang_imatrix_from_size` asserts dry-run size reflects the filter.
       **Evidence:** `publish.py:33-51, 124-142`. 262 jang-tools tests pass (was 260, +2).
       **Commit:** (this iteration)
-- [ ] **M115** — Memory rule 1 also says "no old v1 .jang.safetensors" — meaning leftover files from a previous v1 convert on the SAME output directory. Currently convert.py at line 990 `output_path.mkdir(parents=True, exist_ok=True)` doesn't clean old files. If user converts twice to the same output dir (e.g. overwrite a previous model), v1 files like `*.jang.safetensors` could persist. Deferred — check convert.py's pre-shard cleanup and either document or fix. Lower urgency because typical flow creates a fresh output dir per convert.
+- [x] **M115** — Memory rule 1: "no old v1 .jang.safetensors". Re-converting into an existing output dir left v1 `.jang.safetensors` shards + `model.jang.index.json` alongside the v2 files, AND any v2 shards from a different shard count (e.g. previously 42 shards, now 38 shards → 4 old shards never overwritten). Exact class of bloat memory's "155 GB junk" incident warned about.
+      **Fix (iter 39):** new module-level helper `_remove_stale_jang_artifacts(output_path)` called BEFORE writing new shards. Nukes only KNOWN JANG-output filenames via a pinned `STALE_JANG_ARTIFACT_PATTERNS` list:
+      - `*.jang.safetensors` (v1 shard extension)
+      - `model.jang.index.json` (v1 index)
+      - `model-*-of-*.safetensors` (v2 shards — rewriter regenerates)
+      - `model.safetensors.index.json` (v2 index — regenerated)
+      - `jang_imatrix.safetensors` (re-calibrated per-convert; iter-38 M114 excludes from upload but cleanup on re-convert is still useful)
+      - `jang_config.json` (re-written by writer)
+      User-added files (README.md, custom .py, tokenizer files, preserved-from-source chat_template*.json, generation_config.json) are PROTECTED — not in the pattern list.
+      **Design calls pinned by tests:**
+      - **Non-recursive**: `Path.glob(pattern)` NOT `rglob`. User-placed nested dirs (`assets/`) with files that happen to match patterns are untouched.
+      - **Tolerant of missing output dir**: glob on non-existent path returns empty, no FileNotFoundError. Iter-39 first-time-convert flow unaffected.
+      - **Idempotent**: running cleanup on a fresh or twice-cleaned dir returns `[]`, no exceptions.
+      - **Permission-error tolerant**: `OSError` on individual unlink caught + logged, other files continue.
+      **Tests (8 new):** patterns-list invariant pin, v1 shard removal, v2 shard-count-change orphan removal, imatrix + jang_config removal, user-file protection (13 realistic user files must survive), idempotency, missing-dir tolerance, non-recursive guarantee.
+      **Evidence:** `convert.py:33-77` constant + helper, `convert.py:1055-1063` call site, `tests/test_convert_cleanup.py` 8 new tests. 270 jang-tools tests pass (was 262, +8).
+      **Commit:** (this iteration)
 - [ ] **M116** — Memory rule 2 says "disk size ≈ GPU RAM. No bloat." PostConvertVerifier has NO size vs estimate check. iter-26 would be the natural home (audit row a7 already does this for Ralph's audit harness, but the Swift PostConvertVerifier doesn't). Add a row that warns when disk size differs ≥20% from the pre-flight size estimate.
 - [ ] **M117** — Memory rule 3 says "Speed test — load model, warm up, run 3 prompts at correct temp". PostConvertVerifier doesn't test inference at all (audit.py does via a15 but only as one-shot). Consider a pre-publish inference smoke test in the wizard: 3 prompts, 20 tokens each, surface tok/s and any loops. Would extend VerifyStep. Scope creep; logged for future consideration.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
