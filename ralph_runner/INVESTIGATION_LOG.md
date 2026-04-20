@@ -4103,3 +4103,49 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: audit the Settings panel for similar Task-spawn patterns (observeAndPersist appears correct but check any other async operations there).
 
 **Next iteration should pick:** save the view-lifecycle-cancel memory note (1-2 min investment, saves future-me future iters), then pivot to the dead progressLog cleanup or a fresh audit angle.
+
+---
+
+## 2026-04-20 iteration 95 — M172 PublishSheet dead `progressLog` cleanup
+
+**Angle:** Iter-88 M165's diagnostic-audit flagged the dead `progressLog` @State — appended-to but never displayed. Iter-94 forecast listed it for cleanup. Picked it this iter because it's small-scope + unblocks a future "what is this for?" confusion and because iter-94 finished the big lifecycle-cancel sweep, leaving room for a tidy.
+
+**Deep trace walkthrough:**
+1. **Confirmed the dead-state finding.** `@State private var progressLog: [String] = []` at line 25; appended at line 328 (late-cancel race note), line 344 (phase), line 349 (message event); reset at line 289. NO UI element reads it — no ScrollView, no Text, no List over it. Dead since iter-24 M43.
+2. **Thought about why it's still there.** M43's original design probably included a log pane (similar to RunStep's log display), but the design shipped without it. The array + appends were never removed. Classic "dead state with no detection pressure" — tests didn't catch it because tests don't assert on absence-of-behavior for non-rendered state.
+3. **Removed all 5 sites:**
+   - Declaration at line 25 → deleted, replaced with an M172 rationale comment block.
+   - Reset at line 289 → removed (no state to reset).
+   - Late-cancel race note at line 328-333 → removed, replaced with a comment noting the race is pinned elsewhere.
+   - `apply(event:)`'s phase-name append at line 344 → removed (phase still tracked via `progressPhase` which IS displayed).
+   - `apply(event:)`'s message-event append at line 349 → replaced with `case .message: break` plus a rationale comment.
+4. **Added a regression test pin** — `test_publishSheet_has_no_dead_progressLog_state`. Key design detail: the test must EXCLUDE comment lines because my M172 rationale comments mention the word "progressLog" by name. Solution: split file on newlines, filter out lines starting with `//` after trimming whitespace, join the non-comment lines, then assert the dead-code strings don't appear in the filtered text.
+5. **Verified no regressions** — 30 WizardStepContinueGateTests pass (+1), 31 AdoptionServicesTests pass. No behavior change.
+
+**Meta-lesson — cleanup iters are first-class work.** Code-surface reduction pays a compound return. Every audit of this file from iter-95 forward has one less "what is this for?" trip-up. Beyond the immediate savings, cleanup iters codify that the ralph loop is about MAINTAINING code quality, not just finding bugs. A clean codebase makes future bug audits cheaper because there's less signal-to-noise.
+
+**Meta-lesson — source-inspection tests should filter comments when checking for ABSENCE of code.** Prior source-inspection tests treated the whole file as one string — works when testing for PRESENCE of a literal (e.g., `XCTAssertTrue(src.contains(".onDisappear"))`). But testing for ABSENCE of a literal can false-positive on documentation comments that mention the name. Solution: `src.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")`. Small pattern extension, worth reusing for future absence-checks.
+
+**Meta-lesson — the test pins BOTH the state removal AND the rationale preservation.** If a future reader tries to re-add progressLog, the test fails. They open the test, see M172, grep for M172 in source, find the rationale comments explaining why the state was removed. The test is an anchor that keeps institutional knowledge anchored to the code.
+
+**Items touched:**
+- M172 [x] — removed dead `progressLog` @State + 3 append sites + 1 reset site. Added a regression test pin that filters comment lines so the rationale survives.
+
+**Commit:** (this iteration)
+
+**Verification:** 30 WizardStepContinueGateTests pass (was 29, +1). 31 AdoptionServices unchanged. Python 351 unchanged.
+
+**Closed-status tally:** 111 (iter 94) + M172 = 112 items touched, all closed. Zero known bugs as of iter-95 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: rapid-click debouncing on "Choose Folder…" (UX polish).
+- **NEW**: audit `AppSettings.Snapshot.apply` for stale-UserDefaults-value handling (M66 open observation).
+- **NEW**: audit SourceStep's applyRecommendation for edge cases in `settings.defaultProfile` empty-string handling.
+- **NEW**: audit the preflight disk-space estimation for accuracy on models > 100 GB.
+- **NEW**: verify the full-Swift-test-count after iter-95's churn.
+
+**Next iteration should pick:** M66 stale-UserDefaults audit (concrete open observation from iter-14), rapid-click debounce (small UX polish), OR preflight disk-space estimation verification.

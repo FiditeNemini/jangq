@@ -221,6 +221,30 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M172 (iter 95): dead progressLog state removed from PublishSheet
+
+    func test_publishSheet_has_no_dead_progressLog_state() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard")
+        let src = try String(contentsOf: dir.appendingPathComponent("PublishToHuggingFaceSheet.swift"), encoding: .utf8)
+        // Split into lines and scan only non-comment lines — the M172
+        // rationale comments mention "progressLog" by name, which is fine.
+        // But no non-comment line should declare or append to the dead state.
+        let nonCommentLines = src.split(separator: "\n").filter {
+            !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//")
+        }
+        let joined = nonCommentLines.joined(separator: "\n")
+        XCTAssertFalse(
+            joined.contains("@State private var progressLog"),
+            "progressLog @State must stay removed (M172 iter 95) — no UI reads it; resurrection means dead code or a half-wired log pane"
+        )
+        XCTAssertFalse(
+            joined.contains("progressLog.append"),
+            "progressLog.append calls must stay removed — there's nothing reading the array"
+        )
+    }
+
     // MARK: - M171 (iter 94): .onAppear-Task sweep — SourceStep + dryRun gaps
 
     func test_sourceStep_cancels_detectionTask_onDisappear() throws {

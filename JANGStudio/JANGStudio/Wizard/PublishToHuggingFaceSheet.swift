@@ -22,7 +22,13 @@ struct PublishToHuggingFaceSheet: View {
     @State private var progressPhase: String = ""
     @State private var progressBytes: (done: Int64, total: Int64)? = nil
     @State private var progressLabel: String = ""
-    @State private var progressLog: [String] = []
+    // M172 (iter 95): removed `progressLog` @State. Iter-24 M43's original
+    // design envisioned a scrolling log pane inside the publish sheet
+    // showing every JSONL event; the design landed without the pane but
+    // the @State + append sites persisted as dead code. Iter-88 M165's
+    // audit flagged it ("appends with no reader"); iter-95 removes.
+    // Progress UI is now entirely driven by `progressPhase` /
+    // `progressBytes` / `progressLabel` which ARE displayed.
     // M96 (iter 30): handle to the running publish Task so a user-initiated
     // Cancel can tear down the subprocess via continuation.onTermination.
     @State private var publishTask: Task<Void, Never>? = nil
@@ -286,7 +292,6 @@ struct PublishToHuggingFaceSheet: View {
         progressPhase = ""
         progressBytes = nil
         progressLabel = ""
-        progressLog = []
         wasCancelled = false
         // M43 (iter 24): use the streaming variant so the UI gets live
         // progress during the 30+ min upload instead of a dead spinner.
@@ -322,11 +327,10 @@ struct PublishToHuggingFaceSheet: View {
             // buffer. On failure we KEEP the token — the user needs to retry
             // and retyping it is worse UX than a ~30-second exposure window.
             token = ""
-            if wasCancelled {
-                // Document the race outcome in the progress log so the user
-                // who hit Cancel understands the upload beat them.
-                progressLog.append("[note] Cancel click landed after the final upload event — HF repo is complete.")
-            }
+            // M172 (iter 95): removed the progressLog append for the late-
+            // cancel race note. The log had no UI reader, so the note was
+            // never user-visible. The race is still pinned by the
+            // sawSuccessfulDone / publishResult flow; no behavior change.
         } catch is CancellationError {
             // M137: user-initiated cancel that landed before the stream
             // completed. This is the authoritative "cancelled" branch.
@@ -338,15 +342,23 @@ struct PublishToHuggingFaceSheet: View {
     }
 
     private func apply(event: ProgressEvent) {
+        // M172 (iter 95): progressLog appends removed — the array was
+        // vestigial (no UI reader). Phase / byte-count / per-file label
+        // updates are still reflected via the `progressPhase` /
+        // `progressBytes` / `progressLabel` @State properties which the
+        // UI actually displays.
         switch event.payload {
         case .phase(_, _, let name):
             progressPhase = name
-            progressLog.append("phase: \(name)")
         case .tick(let done, let total, let label):
             progressBytes = (Int64(done), Int64(total))
             if let label { progressLabel = label }
-        case .message(let level, let text):
-            progressLog.append("[\(level)] \(text)")
+        case .message:
+            // Message events previously appended to progressLog. Dropped
+            // in M172 since no UI reads them. If a publish-side log pane
+            // is ever re-added, wire a new @State array and start from
+            // scratch (the old dead code gave no structure worth preserving).
+            break
         case .done:
             // Terminal event — no-op here; stream completion handles the success path.
             break
