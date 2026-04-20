@@ -235,6 +235,26 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M176 (iter 109): sidebar navigation honors canActivate
+
+    func test_sidebar_selection_binding_gates_on_canActivate() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard")
+        let src = try String(contentsOf: dir.appendingPathComponent("WizardCoordinator.swift"), encoding: .utf8)
+        // Pre-M176: `set: { coord.active = $0 ?? .source }` (no gate).
+        // Post-M176: set: closure calls coord.canActivate(step) before assigning.
+        XCTAssertTrue(
+            src.contains("coord.canActivate(step)") && src.contains("set:"),
+            "WizardView sidebar set: binding must check canActivate before assigning — M176 iter 109"
+        )
+        // Also pin the M176 rationale so a "simplification" that strips the guard surfaces the reviewer.
+        XCTAssertTrue(
+            src.contains("M176") && src.contains("canActivate"),
+            "M176 rationale comment must remain — explains why the sidebar ignores locked-step clicks"
+        )
+    }
+
     // MARK: - M172 (iter 95): dead progressLog state removed from PublishSheet
 
     func test_publishSheet_has_no_dead_progressLog_state() throws {

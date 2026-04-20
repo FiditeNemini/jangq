@@ -40,7 +40,25 @@ struct WizardView: View {
         NavigationSplitView {
             List(WizardStep.allCases, selection: Binding(
                 get: { coord.active },
-                set: { coord.active = $0 ?? .source }
+                // M176 (iter 109): gate sidebar navigation on canActivate.
+                // Pre-M176 the set: binding accepted any click — user who
+                // hadn't completed Source could click Architecture and land
+                // in a dead-end (Continue button disabled, no signal why).
+                // iter-81 flagged the mixed signal: visual lock icon +
+                // `.secondary` foreground suggested "locked" but behavior
+                // didn't match. Now we reject unreachable jumps by ignoring
+                // the new value and keeping current `active`. User still
+                // sees the click register (SwiftUI highlights the row
+                // momentarily) but navigation doesn't happen for locked
+                // steps. Forward navigation through the Continue button
+                // path is unaffected.
+                set: { newValue in
+                    guard let step = newValue else { return }
+                    if coord.canActivate(step) {
+                        coord.active = step
+                    }
+                    // else: ignore — sidebar click on a locked step is a no-op.
+                }
             )) { step in
                 HStack {
                     Image(systemName: stepIcon(step))

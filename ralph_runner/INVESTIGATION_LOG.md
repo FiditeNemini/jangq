@@ -4749,3 +4749,46 @@ The three dispositions give a template for triaging open-observation items in th
 - **NEW**: audit the UI for other M62-class silent-inert affordances beyond Settings.
 
 **Next iteration should pick:** Smelt/dflash invariant sweep (applies iter-106 template), OR M80 audit baseline, OR M62-class UI inert-affordance sweep.
+
+---
+
+## 2026-04-20 iteration 109 — M176 WizardView sidebar gate (iter-81 flagged, iter-109 closed)
+
+**Angle:** Iter-108 M62 closed the last Settings-level inert affordances. Iter-109 extends the "don't lie to the user" rule to NAVIGATION affordances — audit every Button across the wizard, then focus on the iter-81-flagged sidebar gap.
+
+**Deep trace walkthrough:**
+1. **Surveyed all 57 Button declarations** across the wizard via grep. Too many to audit individually per-call-site; pivoted to the highest-severity known gap.
+2. **Revisited iter-81's flag:** WizardView sidebar `List(selection: Binding(get:..., set: { coord.active = $0 ?? .source }))` — the `set:` closure accepted any new value without checking `coord.canActivate(step)`. Iter-81 noted: "visual lock icon + `.secondary` foreground suggests 'locked' but clicking works." Never fixed.
+3. **Traced the user flow:** fresh wizard launch → user clicks "Architecture" in sidebar → `coord.active = .architecture` → ArchitectureStep renders with `coord.plan.detected == nil` → Form shows Advanced-Overrides section only → Continue button disabled (iter-56 M134 gate). User stuck until they click "Source" in sidebar to go back. Dead-end flow with no explanation of what went wrong.
+4. **Chose the fix shape:** gate the set: closure on `canActivate(step)`. If reachable, update. If not, ignore (SwiftUI highlights the row momentarily but navigation doesn't happen). Backward navigation to completed steps still works because `canActivate` returns true for those.
+5. **Tests:** source-inspection pin (M176 rationale + `canActivate(step)` literal) in WizardStepContinueGateTests; functional pin in AppSettingsTests (constructs fresh WizardCoordinator, asserts only `.source` reachable).
+6. **Note on test placement:** iter-109's first attempt put the functional test in WizardStepContinueGateTests which is pure source-inspection (no `@testable import JANGStudio`). Moved to AppSettingsTests which HAS the testable import. Lesson: check existing imports before writing a test that uses app types.
+
+**Meta-lesson — "don't lie to the user" extends to navigation affordances.** Three surfaces now:
+  - iter-101/102: preflight `.pass` states (evaluated-positive vs couldn't-evaluate).
+  - iter-108: Settings affordances (implemented vs not-yet-implemented).
+  - iter-109: navigation rows (reachable vs locked).
+  Underlying rule: **whenever a UI element has a visual "disabled" / "unavailable" treatment, its interaction must match. Visual treatment alone is not a gate.** Either `.disabled(true)` the element OR the handler must early-return on the invalid case. Mixed state (looks locked, clicks through) is a UX bug — breaks user's expectation that "gray = inert."
+
+**Meta-lesson — test placement matters for @testable imports.** Source-inspection tests (only read file contents as strings) work in any test target. Functional tests that instantiate app types need `@testable import JANGStudio`. Check the existing test file's import line before picking where to place a new test. If the existing file is pure source-inspection (no `@testable import`), either add the import OR place the functional test in a different file that already has it.
+
+**Items touched:**
+- M176 [x] — sidebar gate fix. 2 new tests (source-inspection + functional).
+
+**Commit:** (this iteration)
+
+**Verification:** 32 WizardStepContinueGateTests pass (was 31, +1). 32 AppSettingsTests pass (was 31, +1).
+
+**Closed-status tally:** 128 (iter 108) + M176 = 129 items touched, all closed. Zero known bugs as of iter-109 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: sweep other SwiftUI List selection bindings for similar gate-less patterns (this was the only one in the wizard; check if Settings has any).
+- **NEW**: Smelt/dflash dual-invariant sweep per iter-106 template.
+- **NEW**: audit the 57 Button declarations for ones that silently no-op or have misleading labels (iter-108 M62-class but in non-Settings views).
+
+**Next iteration should pick:** Smelt/dflash invariant sweep, OR another cheap UI affordance sweep, OR M80 audit baseline.

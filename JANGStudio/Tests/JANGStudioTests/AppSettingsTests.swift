@@ -418,6 +418,24 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(s2.defaultHFOrg, "dealignai", "third mutation must persist")
     }
 
+    // MARK: - Iter 109 M176: WizardCoordinator.canActivate functional pin
+
+    @MainActor
+    func test_wizardCoordinator_canActivate_gates_unreached_steps() {
+        // Functional test for the canActivate logic the sidebar defers to
+        // post-M176. Fresh plan → only .source reachable. iter-81 flagged
+        // that the sidebar wasn't respecting this gate; iter-109 M176 fixed
+        // that AND this test pins the canActivate contract so a future
+        // refactor of the gate logic can't silently let locked steps through.
+        let coord = WizardCoordinator()
+        XCTAssertTrue(coord.canActivate(.source))
+        XCTAssertFalse(coord.canActivate(.architecture),
+            "Architecture must be unreachable until step-1-complete")
+        XCTAssertFalse(coord.canActivate(.profile))
+        XCTAssertFalse(coord.canActivate(.run))
+        XCTAssertFalse(coord.canActivate(.verify))
+    }
+
     // MARK: - Iter 108 M62: remaining inert settings labeled "not yet implemented"
 
     func test_inert_settings_have_not_yet_implemented_labels() throws {
