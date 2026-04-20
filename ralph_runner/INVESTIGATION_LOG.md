@@ -4288,3 +4288,52 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: preflight disk-space accuracy on >100 GB models (concrete measurable).
 
 **Next iteration should pick:** close M65 + M63 together as observation-only documentation iter, OR preflight accuracy measurement.
+
+---
+
+## 2026-04-20 iteration 99 — M173 preflight estimator source-dtype-aware fix
+
+**Angle:** Iter-98 forecast option 2: preflight disk-space accuracy check. Concrete + measurable.
+
+**Deep trace walkthrough:**
+1. **Read `PreflightRunner.estimateOutputBytes`** — formula: `srcBytes × (avgBits / 16.0) × 1.05`.
+2. **Derived the formula from first principles to check correctness:**
+   - weights_count = srcBytes / bytes_per_weight
+   - output_bytes ≈ weights_count × avgBits / 8 × 1.05
+   - Substituting: output_bytes = srcBytes × avgBits / (8 × bytes_per_weight) × 1.05
+   - The formula has `/ 16.0` hardcoded. That equals `8 × 2` where `2` is BF16's bytes-per-weight.
+   - **So the formula assumes bytes_per_weight = 2, i.e., BF16 or FP16 source.**
+3. **Checked when this breaks:**
+   - FP8 source: bytes_per_weight = 1 → formula divides by 2× too much → output predicted as 50% of truth.
+   - FP32 source: bytes_per_weight = 4 → formula predicts 200% of truth (over-estimate — harmless for a disk gate).
+4. **Confirmed real-world trigger.** DeepSeek V3.0 and V3.2 ship FP8. Some newer experimental models too. A user converting DeepSeek V3 (say 685B params, ~340 GB FP8 source) at JANG_4K would see pre-M173 prediction `340 × 4/16 × 1.05 ≈ 89 GB` but actual output is `340 × 4/8 × 1.05 ≈ 178 GB`. If they had 100 GB free, preflight would say green, convert would crash at ~90 GB with disk-full.
+5. **Confirmed the Python side has the same bug.** `estimate_model.predict:90` uses identical formula. iter-63 M141 specifically aligned Swift + Python estimators — both rotted together when FP8 models emerged.
+6. **Designed the fix:** abstract the divisor via a `sourceBytesPerWeight` helper. SourceDtype → Int mapping. Swift uses `plan.detected?.dtype`; Python peeks at the shard header (mirroring `inspect_source._sniff_dtype`'s pattern). Fallback to 2 (BF16 assumption) for unknown — conservative over-estimate is safer than under-estimate for a disk-space gate.
+7. **TDD:** wrote 4 Swift tests + 2 Python tests covering FP8 correctness + BF16/FP16/unknown regression guards. Red phase confirmed (1 Swift failure). Applied fix, all green. Swift needed a switch-exhaustiveness tweak (SourceDtype has a `.jangV2` case I missed).
+8. **Added a reusable helper** `_make_shard_with_dtype(path, dtype_str, n_bytes)` to the Python tests for writing minimal safetensors files with specified dtypes. Will be useful for future dtype-dependent tests.
+
+**Meta-lesson — hardcoded assumptions in cross-boundary formulas rot TOGETHER.** Swift + Python both had the same BF16 assumption because they were mirror implementations of the same math. Both rotted silently when FP8 models became common. Contract tests should enumerate ALL inputs the formula depends on (all supported source dtypes, not just the common case). New audit axis: whenever a formula crosses Swift⇄Python, enumerate its parameters and write a matching test pair in each language. Iter-63 M141 introduced the cross-boundary contract; iter-99 M173 tightens it with dtype coverage.
+
+**Meta-lesson — "right for the common case" is a bug-genesis pattern.** The original formula was correct when all HF models were BF16/FP16. It's correct in that case post-M173 too. But the hardcoded constant baked in that assumption invisibly. Rule: when an assumption is baked into a constant (like `/16.0`), flag it with an inline comment explaining WHAT the assumption is AND when it would become invalid. Future maintainer re-checks when the landscape shifts. For M173 I added inline comments on BOTH the Swift and Python sides explaining WHY the constant changed.
+
+**Meta-lesson — silently wrong predictions are worse than loud errors.** A preflight that says "plenty of disk" then crashes mid-convert is WORSE than a preflight that refuses the convert outright. User wastes 20+ minutes on a doomed job. Rule: when a gate check has both over-predict and under-predict directions, ALWAYS bias toward over-predict. The user can manually override an over-strict gate ("I know I have the disk"); they can't recover from 20 minutes of wasted compute.
+
+**Items touched:**
+- M173 [x] — Swift + Python estimators now source-dtype-aware. 4 Swift + 2 Python regression tests. Cross-boundary contract intact.
+
+**Commit:** (this iteration)
+
+**Verification:** 24 PreflightRunnerTests pass (was 20, +4). 353 Python tests pass (was 351, +2). Other Swift suites unchanged.
+
+**Closed-status tally:** 115 (iter 98) + M173 = 116 items touched, all closed. Zero known bugs as of iter-99 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: audit other formulas that cross Swift⇄Python for similar assumptions. Candidates: disk-size sanity check (iter-40 M116), profile bit-counting, the M173 overhead constant `1.05` — is that still right for JANGTQ outputs or does JANGTQ have different metadata overhead?
+- **NEW**: M65 SettingsWindow auto-persist observation-only doc.
+- **NEW**: rapid-click debouncing on "Choose Folder…".
+
+**Next iteration should pick:** cross-boundary formula audit (extends iter-99's meta-lesson — find other places Swift ⇄ Python formulas could drift), OR another cheap M-item close.

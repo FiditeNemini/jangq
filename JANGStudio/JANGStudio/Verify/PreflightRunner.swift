@@ -45,7 +45,40 @@ struct PreflightRunner {
         guard let srcBytes = plan.detected?.totalBytes, srcBytes > 0 else { return 0 }
         let avgBits = avgBitsForProfile(plan.profile, profiles: profiles)
         guard avgBits > 0 else { return 0 }
-        return Int64(Double(srcBytes) * (avgBits / 16.0) * 1.05)
+        // M173 (iter 99): the divisor is source-dtype-dependent, not a
+        // hardcoded 16. Pre-M173 every source was assumed 16-bit — correct
+        // for BF16/FP16 (the common case) but WRONG for FP8 sources like
+        // DeepSeek V3/V3.2 where src_bytes = weights × 1 (not × 2). A 100 GB
+        // FP8 source converting to JANG_4K would be predicted as 26 GB (half
+        // the real 52 GB need) → user sees "plenty of disk" → convert fails
+        // mid-way on disk-full. `sourceBytesPerWeight` maps the detected
+        // dtype to bytes-per-weight; the formula becomes
+        //   srcBytes × (avgBits / 8) / bytesPerWeight × 1.05
+        // which is equivalent to `srcBytes × avgBits / (8 × bytesPerWeight)`.
+        // Unknown dtype falls back to 2 (BF16 assumption) — conservative
+        // over-estimate is safer than under-estimate for a disk-space gate.
+        let bytesPerWeight = Self.sourceBytesPerWeight(plan.detected?.dtype ?? .unknown)
+        return Int64(Double(srcBytes) * avgBits / (8.0 * Double(bytesPerWeight)) * 1.05)
+    }
+
+    /// M173 (iter 99): bytes-per-weight for each supported source dtype.
+    /// Keeps the Swift preflight estimator aligned with Python's
+    /// `estimate_model.predict` per iter-63 M141's cross-boundary contract.
+    /// Unknown → 2 (BF16/FP16 default) for safety.
+    static func sourceBytesPerWeight(_ dtype: SourceDtype) -> Int {
+        switch dtype {
+        case .bf16, .fp16: return 2
+        case .fp8: return 1
+        case .jangV2:
+            // Already-quantized source — the preflight estimator is
+            // fundamentally off for this case since jangV2 carries variable
+            // bit-width, not a uniform byte-per-weight mapping. Treat as
+            // BF16-equivalent; this class of source shouldn't normally
+            // reach the convert preflight anyway (requantization is
+            // atypical). Safer to over-estimate than under-estimate.
+            return 2
+        case .unknown: return 2   // conservative over-estimate fallback
+        }
     }
 
     /// Look up the avg bits/weight for a profile from either JANG or JANGTQ

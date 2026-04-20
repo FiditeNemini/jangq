@@ -35,6 +35,60 @@ def test_predict_avg_bits_rejects_unknown():
         _predict_avg_bits("JANG_99X")
 
 
+# M173 (iter 99): source dtype matters for the divisor. Pre-M173 the
+# formula hardcoded /16 (BF16 assumption); for FP8 sources this
+# under-predicted output size by 2×, causing disk-full mid-convert.
+
+def _make_shard_with_dtype(path: Path, dtype_str: str, n_bytes: int = 4096) -> None:
+    """Write a minimal valid safetensors file with a specified dtype in the
+    header so _source_bytes_per_weight's detection works."""
+    import struct
+    header = json.dumps({
+        "weight0": {"dtype": dtype_str, "shape": [1, 1], "data_offsets": [0, 2]}
+    }).encode()
+    payload = b"\x00" * max(0, n_bytes - 8 - len(header))
+    with open(path, "wb") as fh:
+        fh.write(struct.pack("<Q", len(header)))
+        fh.write(header)
+        fh.write(payload)
+
+
+def test_predict_fp8_source_uses_8bit_divisor(tmp_path):
+    """FP8 source: src_bytes = weights × 1. Output at 4 bits avg = weights × 0.5.
+    Formula must predict src_bytes × 4/8 × 1.05 = 0.525 × src_bytes, NOT the
+    BF16-assuming 0.26 × src_bytes. Pre-M173 preflight said "plenty of disk"
+    then convert failed mid-way when real need was 2× the prediction."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({
+        "model_type": "deepseek_v3", "hidden_size": 1024,
+        "num_hidden_layers": 24, "vocab_size": 100000,
+    }))
+    _make_shard_with_dtype(d / "model-00001-of-00001.safetensors", "F8_E4M3",
+                           n_bytes=1_000_000_000)
+    r = predict(d, "JANG_4K")
+    # 1 GB FP8 × 4/8 × 1.05 = 0.525 GB. Pre-M173 would have predicted ~0.26 GB.
+    assert 0.45 < r["predicted_output_gb"] < 0.60, (
+        f"FP8 source must use /8 divisor, got {r['predicted_output_gb']} GB — "
+        "pre-M173 regression (BF16 assumption on FP8 source)"
+    )
+
+
+def test_predict_bf16_source_matches_pre_M173_behavior(tmp_path):
+    """Regression: BF16 source (the original formula's target) must still
+    predict ~0.26 GB for 1 GB × JANG_4K."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({
+        "model_type": "qwen3", "hidden_size": 1024,
+        "num_hidden_layers": 24, "vocab_size": 151936,
+    }))
+    _make_shard_with_dtype(d / "model-00001-of-00001.safetensors", "BF16",
+                           n_bytes=1_000_000_000)
+    r = predict(d, "JANG_4K")
+    assert 0.2 < r["predicted_output_gb"] < 0.3
+
+
 def test_predict_shape(fake_model_dir):
     r = predict(fake_model_dir, "JANG_4K")
     assert r["source_bytes"] == 1_000_000_000

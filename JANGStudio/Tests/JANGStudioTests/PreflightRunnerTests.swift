@@ -218,6 +218,63 @@ final class PreflightRunnerTests: XCTestCase {
             "Without a detected source size, the estimator must return 0 so preflight doesn't falsely fail.")
     }
 
+    // MARK: - Iter 99 M173: estimate honors source dtype (FP8 / BF16 / FP32)
+
+    func test_estimateOutputBytes_fp8_source_uses_8bit_divisor() {
+        // For FP8 source, src_bytes = weights × 1 (not × 2). Output at 4 bits
+        // avg = weights × 0.5. So the formula needs src_bytes × (4/8) × 1.05
+        // = 0.525 × src_bytes, NOT the BF16-assuming 0.26 × src_bytes. Pre-
+        // M173 the user got a prediction half the real need → "plenty of
+        // disk" green check → convert fails mid-way on disk-full.
+        let plan = ConversionPlan()
+        plan.profile = "JANG_4K"
+        plan.detected = .init(modelType: "deepseek_v3", isMoE: true, numExperts: 256,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .fp8, totalBytes: 100_000_000_000, shardCount: 1)
+        let est = PreflightRunner.estimateOutputBytes(plan: plan, profiles: .frozen)
+        // 100 GB FP8 × 4/8 × 1.05 = 52.5 GB
+        XCTAssertEqual(est, 52_500_000_000, accuracy: 1_000_000_000,
+            "FP8 source must use /8 divisor — pre-M173 this returned ~26 GB (half the real need)")
+    }
+
+    func test_estimateOutputBytes_bf16_source_matches_pre_M173_behavior() {
+        // Regression: BF16 source (the case the original formula was written
+        // for) must still produce the same answer post-M173.
+        let plan = ConversionPlan()
+        plan.profile = "JANG_4K"
+        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 100_000_000_000, shardCount: 1)
+        let est = PreflightRunner.estimateOutputBytes(plan: plan, profiles: .frozen)
+        XCTAssertEqual(est, 26_250_000_000, accuracy: 500_000_000)
+    }
+
+    func test_estimateOutputBytes_fp16_source_same_as_bf16() {
+        // FP16 is also 2 bytes/weight — same /16 divisor as BF16.
+        let plan = ConversionPlan()
+        plan.profile = "JANG_4K"
+        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .fp16, totalBytes: 100_000_000_000, shardCount: 1)
+        let est = PreflightRunner.estimateOutputBytes(plan: plan, profiles: .frozen)
+        XCTAssertEqual(est, 26_250_000_000, accuracy: 500_000_000)
+    }
+
+    func test_estimateOutputBytes_unknown_dtype_falls_back_to_16bit_assumption() {
+        // Safety default: if source dtype is unknown (older models, detection
+        // drift), assume 16-bit — the common case historically. Conservative:
+        // over-estimate is better than under-estimate for the disk-space gate
+        // (better to refuse a safe convert than to permit a disk-full crash).
+        let plan = ConversionPlan()
+        plan.profile = "JANG_4K"
+        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .unknown, totalBytes: 100_000_000_000, shardCount: 1)
+        let est = PreflightRunner.estimateOutputBytes(plan: plan, profiles: .frozen)
+        XCTAssertEqual(est, 26_250_000_000, accuracy: 500_000_000,
+            "Unknown dtype must fall back to /16 (BF16/FP16 assumption) for safety")
+    }
+
     func test_estimateOutputBytes_returns_zero_for_unknown_profile() {
         // Regression: unknown profile must also produce 0 rather than
         // guessing a bits value — prevents false positives from typos.

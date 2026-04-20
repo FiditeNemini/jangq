@@ -29,6 +29,35 @@ def _source_bytes(model_dir: Path) -> int:
     return sum(p.stat().st_size for p in model_dir.glob("*.safetensors"))
 
 
+def _source_bytes_per_weight(model_dir: Path) -> int:
+    """M173 (iter 99): peek at the first safetensors shard header to
+    determine bytes-per-weight for the source model. BF16/FP16 → 2,
+    FP8 (e4m3/e5m2) → 1, FP32 → 4. Falls back to 2 (BF16 assumption)
+    if detection fails (unknown dtype, missing shards, read error) —
+    conservative over-estimate is safer than under-estimate for the
+    preflight disk-space gate. Mirrors inspect_source._sniff_dtype's
+    peek-pattern but returns bytes, not the dtype name."""
+    import struct as _struct
+    shards = sorted(model_dir.glob("*.safetensors"))
+    if not shards:
+        return 2
+    try:
+        with open(shards[0], "rb") as fh:
+            hdr_len = _struct.unpack("<Q", fh.read(8))[0]
+            hdr = json.loads(fh.read(hdr_len))
+        dtypes = {v.get("dtype") for k, v in hdr.items() if isinstance(v, dict) and "dtype" in v}
+        # Scan in priority order — if mixed, go with the dominant dtype.
+        if any(d in dtypes for d in ("F8_E4M3", "F8_E5M2")):
+            return 1
+        if any(d in dtypes for d in ("BF16", "F16")):
+            return 2
+        if "F32" in dtypes:
+            return 4
+        return 2   # fallback on unknown
+    except Exception:
+        return 2
+
+
 def _predict_avg_bits(profile: str) -> float:
     """Best-effort avg-bits/weight for a profile. Used as the multiplier vs source bf16."""
     if profile in JANG_K_TARGETS:
@@ -86,8 +115,19 @@ def predict(model_dir: Path, profile: str) -> dict[str, Any]:
                 approx_params = per_layer * layers + 2 * hidden * vocab
                 src_bytes = approx_params * 2   # assume bf16 source
     avg_bits = _predict_avg_bits(profile)
-    # Source assumed bf16 (16 bits/weight). Output = source × (avg_bits / 16) × overhead (1.05 for metadata)
-    predicted = int(src_bytes * (avg_bits / 16.0) * 1.05)
+    # M173 (iter 99): source dtype matters for the divisor.
+    # Pre-M173 the formula hardcoded /16 (BF16 assumption) — correct for
+    # the common case but WRONG for FP8 sources (DeepSeek V3/V3.2 etc.)
+    # where src_bytes = weights × 1. Under-predicted output by 2× → user
+    # started convert thinking "plenty of disk", hit disk-full mid-way.
+    # Detect dtype by peeking at the first shard header (same mechanism
+    # inspect_source uses). 2 bytes/weight for BF16/FP16, 1 for FP8,
+    # fallback to 2 (safer over-estimate than under-estimate).
+    bytes_per_weight = _source_bytes_per_weight(model_dir)
+    # output_bytes = weights × (avg_bits / 8) × 1.05
+    # weights = src_bytes / bytes_per_weight
+    # → output_bytes = src_bytes × avg_bits / (8 × bytes_per_weight) × 1.05
+    predicted = int(src_bytes * avg_bits / (8.0 * bytes_per_weight) * 1.05)
     return {
         "source_bytes": src_bytes,
         "source_gb": round(src_bytes / 1_000_000_000, 3),
