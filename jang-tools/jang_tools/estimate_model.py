@@ -48,17 +48,42 @@ def _predict_avg_bits(profile: str) -> float:
 def predict(model_dir: Path, profile: str) -> dict[str, Any]:
     src_bytes = _source_bytes(model_dir)
     if src_bytes == 0:
-        # Best-effort fallback: read config and estimate from num params
+        # Best-effort fallback: read config and estimate from num params.
+        # M133 (iter 55): mirror `recommend._estimate_params_billion`'s
+        # MoE-aware formula. Pre-iter-55 this used a flat
+        # `12 * h² * layers + 2 * h * vocab` that assumed dense + ignored
+        # num_experts — a 256-expert Qwen3.5-MoE fell through this path
+        # with ~12 GB predicted source when real bf16 source is ~700 GB
+        # (off by ~55x). Wizard then told users "predicted output: 3 GB"
+        # for a conversion that actually writes 180+ GB, followed by a
+        # disk-full failure mid-convert.
         import json as _json
         cfg_path = model_dir / "config.json"
         if cfg_path.exists():
             cfg = _json.loads(cfg_path.read_text())
-            hidden = int(cfg.get("hidden_size", 0) or (cfg.get("text_config", {}) or {}).get("hidden_size", 0))
-            layers = int(cfg.get("num_hidden_layers", 0) or (cfg.get("text_config", {}) or {}).get("num_hidden_layers", 0))
-            vocab = int(cfg.get("vocab_size", 0) or (cfg.get("text_config", {}) or {}).get("vocab_size", 0))
+            text_cfg = cfg.get("text_config", {}) or {}
+            hidden = int(cfg.get("hidden_size", 0) or text_cfg.get("hidden_size", 0) or 0)
+            layers = int(cfg.get("num_hidden_layers", 0) or text_cfg.get("num_hidden_layers", 0) or 0)
+            vocab = int(cfg.get("vocab_size", 0) or text_cfg.get("vocab_size", 0) or 0)
+            intermediate = int(
+                cfg.get("intermediate_size", 0)
+                or text_cfg.get("intermediate_size", 0)
+                or 4 * hidden
+            )
+            num_experts = int(
+                cfg.get("num_experts")
+                or cfg.get("n_routed_experts")
+                or cfg.get("num_local_experts")
+                or 0
+            )
             if hidden and layers:
-                # Very rough: ~12*h^2 per layer + embed + lm_head
-                approx_params = 12 * hidden * hidden * layers + 2 * hidden * vocab
+                # Attention weights per layer: 4 × h² (q/k/v/o projections).
+                attn = 4 * hidden * hidden
+                # MLP per expert: 3 × h × intermediate (gate + up + down).
+                mlp_per = 3 * hidden * intermediate
+                mlp = mlp_per * num_experts if num_experts > 1 else mlp_per
+                per_layer = attn + mlp
+                approx_params = per_layer * layers + 2 * hidden * vocab
                 src_bytes = approx_params * 2   # assume bf16 source
     avg_bits = _predict_avg_bits(profile)
     # Source assumed bf16 (16 bits/weight). Output = source × (avg_bits / 16) × overhead (1.05 for metadata)

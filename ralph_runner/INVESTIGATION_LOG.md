@@ -2211,3 +2211,41 @@ Pivoted to a sharper candidate. Grepped for other hardcoded profile → bits map
 - **NEW**: grep-audit class — methods that take a `profile` string parameter in both Swift and Python. Any missing validation?
 
 **Next iteration should pick:** `estimate_model.py` vs `_estimate_params_billion` peer-helper (same pattern as iter 54, different module — likely finds asymmetry given how often we're finding them) OR Swift Wizard step sweep (new territory).
+
+## 2026-04-20 iteration 55 — M133 estimate_model fallback MoE-awareness (55x underestimation)
+
+**Angle:** Iter 54's forecast: `estimate_model.py` vs `_estimate_params_billion` peer-helper sweep — both compute param counts from config. Classic decision-overlap zone.
+
+**Deep trace walkthrough:**
+1. Read both functions side-by-side. `_estimate_params_billion` has full-fat MoE handling (attn + mlp_per_expert × num_experts + embed). `predict`'s no-safetensors fallback uses `12 * h² * layers + 2 * h * vocab` — a flat dense approximation.
+2. Simulate numerically: 256-expert Qwen3.5-MoE (hidden=3072, layers=48, intermediate=3072):
+   - Correct: `attn = 4 * 3072² = 37.7 M`, `mlp = 3 * 3072 * 3072 * 256 = 7.25 B` per layer, total `7.29 B * 48 + 2 * 3072 * 151936 = 350 B params`. bf16 source ~700 GB.
+   - Fallback: `12 * 3072² * 48 + 2 * 3072 * 151936 ≈ 6.4 B params`. bf16 ~13 GB.
+   - **Ratio: 55x underestimate.**
+3. Downstream impact: if this fallback reaches the Swift Step-1 wizard predicted-size banner, a user about to convert a 700 GB MoE sees "3 GB predicted output", accepts, starts convert, fills their disk mid-shard, hits OSError, no pre-flight warning. Pure bad UX.
+4. **When does the fallback fire?** `_source_bytes(model_dir) == 0` — no `.safetensors` in the dir. Realistic triggers: user pointed at `.bin`-only snapshot, interrupted download leaving only config.json, sharded .pt / .msgpack formats.
+5. **TDD-first**: `test_predict_fallback_accounts_for_moe_experts` captured the 12.7 vs >100 discrepancy. Failed loudly pre-fix.
+6. **Fix: inline formula parity.** Mirror `_estimate_params_billion`'s logic in the fallback. Don't factor to a shared helper — `_estimate_params_billion` returns billions+rounded, `predict` needs raw bytes; different granularities. Keep call-sites independent; use behavioral tests to pin them together.
+7. **Regression guard** (dense llama 7B): the fix must NOT over-correct for dense models. 7B-class fallback should stay in the 5-40 GB range. Pinned.
+
+**Meta-lesson — decision-overlap zones with different return granularities.** Iter 53's observation "same question asked in multiple places with drifted implementations" holds, but this iter adds a nuance: **sometimes the two helpers can't share code because their return types differ.** `_estimate_params_billion` returns billions-rounded; `predict` needs raw bytes. Behavioral tests (both formulas produce similar order-of-magnitude output for the same config) are the correct pin, not code-sharing. Pattern for the checklist: when you can't DRY the implementations, DRY the *tests*.
+
+**Items touched:**
+- M133 [x] — estimate_model fallback now MoE-aware.
+
+**Commit:** (this iteration)
+
+**Verification:** 310 jang-tools tests pass (was 308, +2 for MoE fallback + dense regression). Swift 136 + ralph 73 unchanged.
+
+**Closed-status tally:** 67 (iter 54) + M133 = 68 closed / 100 total = 68.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW**: peer-helper sweep on Swift Wizard steps (source/architecture/profile/method/publish/verify — 6 similar-shape files).
+- **NEW**: re-grep `def _.*_` in jang_tools with head_limit=0 to verify I haven't missed peer-helper families (iter-48 meta-rule).
+
+**Next iteration should pick:** Swift Wizard step peer-helper sweep (new territory — Python side has been thoroughly worked over; Swift steps haven't).
