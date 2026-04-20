@@ -2290,3 +2290,45 @@ Pivoted to a sharper candidate. Grepped for other hardcoded profile → bits map
 - **NEW**: peer-helper sweep on `HFRepoValidator` + similar frontend validators.
 
 **Next iteration should pick:** SourceStep internal audit (biggest single file, haven't deep-traced internals yet — likely finds something given the 347 lines of async detection/recommendation/preflight flow).
+
+## 2026-04-20 iteration 57 — M135 SourceStep stale-detection-task race
+
+**Angle:** Iter 56's forecast: audit SourceStep (347-line largest step file). Traced the async flow in `detectAndRecommend`.
+
+**Deep trace walkthrough:**
+1. **Flow:** pickFolder → `Task { await detectAndRecommend(url) }`. Task handle discarded.
+2. **detectAndRecommend suspensions:**
+   - `await SourceDetector.inspect(url:)` — spawns python subprocess, ~1-5s depending on shard count.
+   - `await MainActor.run { ... }` — tiny hop.
+   - `await RecommendationService.fetch(modelURL:)` — spawns another python subprocess.
+   - `await MainActor.run { ... }` — another hop.
+   Every await is a potential yield-and-resume later.
+3. **Race scenario:** User picks folder A → Task A starts, suspends on Step A's inspect subprocess (~5s). User changes mind, picks folder B → `pickFolder` resets `coord.plan.detected = nil`, clears recommendation, starts Task B. Both tasks run concurrently. Task B's subprocesses finish first (~1s for a smaller folder), Task B mutates detected=B, recommendation=B, returns. Task A's inspect subprocess finishes 4s later, Task A resumes its `await MainActor.run { coord.plan.detected = detected }`, **overwrites detected with A's value.** User sees A's metadata, but `coord.plan.sourceURL = B` (from pickFolder's last assignment). **Convert reads B's files with A's architecture metadata.**
+4. **Why subprocess-level cancel isn't enough:** iter-34 M105 + iter-33 M101 wired `withTaskCancellationHandler` inside SourceDetector.inspect + RecommendationService.fetch. These propagate Task.cancel() → SIGTERM on the subprocess. BUT the outer Task in SourceStep wasn't tracked, so nothing called `.cancel()` on it. The subprocess-level wraps are a safety net that only fires if someone up the chain cancels. Nobody was cancelling.
+5. **Fix requires three things in sequence:**
+   a. Track the Task: `@State private var detectionTask: Task<Void, Never>?`.
+   b. Cancel on new pick: `detectionTask?.cancel()` BEFORE the new assignment. Order matters — cancel-after-assign would cancel the new task.
+   c. Guard mutations: even with cancel propagating, a race window exists between the subprocess finishing and the Task actually checking its cancellation. `guard !Task.isCancelled else { return }` after each await ensures a cancelled Task can't stomp state even if it somehow made it back to the MainActor hop.
+6. **Source-inspection tests** pin all three invariants. If a future refactor removes the handle, the cancel call, or the guards, the corresponding test fails loudly with a pointer at the expected pattern.
+
+**Meta-lesson — Task handle discipline.** Discarded Task handles are a common SwiftUI concurrency bug pattern. Any `Task { await something() }` where "something" touches mutable view state AND can be re-entered (user clicks again) needs the 3-step pattern: track, cancel-on-reenter, guard-mutations. Future iters should audit every `Task { ... }` in the codebase for this class. Preliminary grep target: all un-stored `Task { ... }` calls in SwiftUI views.
+
+**Items touched:**
+- M135 [x] — SourceStep stale-detection-task race fixed; 3 new source-inspection tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 143 Swift tests pass (was 140, +3 for M135). Verified via targeted `xcrun xctest -XCTest "JANGStudioTests.WizardStepContinueGateTests"` — all 7 tests in the file pass (4 from iter 56 + 3 from iter 57). Python 310 + ralph 73 unchanged.
+
+**Closed-status tally:** 69 (iter 56) + M135 = 70 closed / 100 total = 70.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW M136 candidate**: grep for all un-stored `Task { ... }` in SwiftUI views (same class as M135 — likely at least one more view has this pattern).
+- **NEW**: peer-helper sweep on Python publish.py vs convert.py (both spawn subprocess tools + talk to HF API).
+
+**Next iteration should pick:** M136 Task-handle discipline audit (generalizes iter-57's finding; grep-driven audit class likely to find more instances).

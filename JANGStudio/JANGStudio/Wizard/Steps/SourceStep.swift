@@ -7,6 +7,17 @@ struct SourceStep: View {
     @State private var isRecommending = false
     @State private var errorText: String?
     @State private var recommendation: Recommendation?
+    /// M135 (iter 57): stale-task handle tracking. User picks folder A →
+    /// detection starts (Task A, ~5s) → user changes mind, picks folder B →
+    /// detection starts (Task B, ~1s). Without this handle, Task A continues
+    /// running after Task B finishes and eventually stomps
+    /// `coord.plan.detected` / `self.recommendation` with folder A's result.
+    /// The user sees A's metadata while sourceURL points at B — the
+    /// conversion later uses wrong metadata → misdetected architecture →
+    /// wrong quantization profile applied. Subprocess kill propagates
+    /// through SourceDetector's iter-34 M105 withTaskCancellationHandler
+    /// wrap and RecommendationService's iter-33 M101 wrap.
+    @State private var detectionTask: Task<Void, Never>?
 
     var body: some View {
         Form {
@@ -182,7 +193,11 @@ struct SourceStep: View {
             coord.plan.detected = nil
             recommendation = nil
             errorText = nil
-            Task { await detectAndRecommend(url: url) }
+            // M135 (iter 57): cancel any previous detection task before
+            // starting a new one. Without this, a slow previous detection
+            // can stomp the new URL's state after it finishes.
+            detectionTask?.cancel()
+            detectionTask = Task { await detectAndRecommend(url: url) }
         }
     }
 
@@ -191,14 +206,22 @@ struct SourceStep: View {
         isDetecting = true
         do {
             let detected = try await SourceDetector.inspect(url: url)
+            // M135: guard against stale-task overwrite. If this task was
+            // cancelled while waiting on the subprocess (user picked a
+            // different folder), don't mutate state — the newer task owns it.
+            guard !Task.isCancelled else { return }
             await MainActor.run { coord.plan.detected = detected }
         } catch {
             await MainActor.run {
+                // Also guard the error-path — a cancelled task's subprocess
+                // kill shouldn't surface as a user-facing "Detection failed".
+                guard !Task.isCancelled else { return }
                 errorText = "Detection failed: \(error.localizedDescription)"
                 isDetecting = false
             }
             return
         }
+        guard !Task.isCancelled else { return }
         await MainActor.run { isDetecting = false }
 
         // Step B: recommendation call (also fast, reads same config.json)
@@ -206,12 +229,14 @@ struct SourceStep: View {
         defer { Task { @MainActor in isRecommending = false } }
         do {
             let rec = try await RecommendationService.fetch(modelURL: url)
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.recommendation = rec
                 self.applyRecommendation(rec)
             }
         } catch {
             await MainActor.run {
+                guard !Task.isCancelled else { return }
                 // Recommendation failure is soft — user can still convert manually.
                 errorText = "Recommendation failed (conversion still works): \(error.localizedDescription)"
             }

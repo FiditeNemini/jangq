@@ -636,6 +636,21 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `test_runStep_continue_is_gated` — `if coord.plan.run == .succeeded` pinned.
       **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/ArchitectureStep.swift:43-55`. 140 Swift tests pass (was 136, +4 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M135 (SourceStep internal audit: stale-detection-task race condition)** — Iter 56 forecast: deep-trace SourceStep's 347 lines (largest step file). Focused on the async detection/recommendation flow in `detectAndRecommend(url:)`. **Found a real race condition:**
+      - `pickFolder()` fires `Task { await detectAndRecommend(url: url) }` — discarded Task handle, not tracked.
+      - `detectAndRecommend` does Step A (SourceDetector.inspect, subprocess) then Step B (RecommendationService.fetch, subprocess). Both suspend on awaits.
+      - **Scenario:** User picks folder A → Task A starts (~5s, large shard dir). User changes mind, picks folder B → Task B starts (~1s). Task B finishes first, writes `coord.plan.detected = B's_metadata`. **Task A finishes 4 seconds later and overwrites with A's metadata.** The user's `sourceURL` now points at B but `detected` describes A. Downstream conversion uses wrong architecture detection → wrong profile recommendation → quantization misapplied.
+      **Why it matters:** SourceDetector.inspect already has iter-34 M105's `withTaskCancellationHandler` for subprocess kill; RecommendationService.fetch has iter-33 M101's wrap too. The *subprocess* cancel path is wired. But the outer Task handle was being discarded, so there was no way to trigger the cancel. This iter adds the handle tracking + cancel call + in-function cancellation guards.
+      **Fix (iter 57):**
+      - Added `@State private var detectionTask: Task<Void, Never>?` to track the live detection Task.
+      - `pickFolder()` now calls `detectionTask?.cancel()` before starting a new task — propagates through both inspect + recommend subprocesses via iter-33/34's existing wraps.
+      - `detectAndRecommend` gained 4 `guard !Task.isCancelled else { return }` guards (after Step A success, Step A error, Step A MainActor hop, Step B success, Step B error) so a mid-flight cancel doesn't stomp state.
+      **Tests (+3) in `WizardStepContinueGateTests.swift`:** source-inspection pins matching iter-46 M122 / iter-54 M132 / iter-56 M134 style.
+      - `test_sourceStep_tracks_detection_task_handle` — `@State private var detectionTask: Task<Void, Never>?` must exist.
+      - `test_sourceStep_pickFolder_cancels_previous_task` — pickFolder must call `detectionTask?.cancel()` BEFORE the new `detectionTask = Task { … }` assignment (order-sensitive; cancel-after-assign would cancel the new task).
+      - `test_sourceStep_guards_mutations_with_isCancelled` — at least 3 `guard !Task.isCancelled else { return }` statements in the file (one per mutation site after a suspension point).
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift:4-16, 174-226`. 143 Swift tests pass (was 140, +3 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

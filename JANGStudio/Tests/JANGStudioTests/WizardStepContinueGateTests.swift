@@ -85,4 +85,67 @@ final class WizardStepContinueGateTests: XCTestCase {
             "RunStep Continue → Verify button must remain gated by run status."
         )
     }
+
+    // MARK: - M135 (iter 57): SourceStep stale-task cancellation
+    //
+    // When the user picks folder A, a detection task starts. If they
+    // immediately pick folder B before A's task finishes, A must be
+    // cancelled — otherwise A's result eventually stomps B's detected
+    // state and the user sees A's metadata while sourceURL points at B.
+
+    func test_sourceStep_tracks_detection_task_handle() throws {
+        let src = try stepSource("SourceStep.swift")
+        XCTAssertTrue(
+            src.contains("@State private var detectionTask: Task<Void, Never>?"),
+            """
+            SourceStep must store the detection Task handle so it can be
+            cancelled when the user picks a new folder. Without this,
+            concurrent detections race and the slower one stomps state.
+            """
+        )
+    }
+
+    func test_sourceStep_pickFolder_cancels_previous_task() throws {
+        let src = try stepSource("SourceStep.swift")
+        // The pickFolder body must call `detectionTask?.cancel()` BEFORE
+        // starting the new task. Locate the panel.runModal() block and
+        // check the cancel call is present AND precedes the new Task.
+        guard let pickRange = src.range(of: "if panel.runModal() == .OK, let url = panel.url {") else {
+            XCTFail("could not locate pickFolder's panel.runModal block")
+            return
+        }
+        let body = String(src[pickRange.upperBound...].prefix(800))
+        XCTAssertTrue(
+            body.contains("detectionTask?.cancel()"),
+            """
+            pickFolder must call detectionTask?.cancel() to tear down any
+            previous detection. Body after panel.runModal:
+            \(body)
+            """
+        )
+        // Cancel must come before the new Task assignment.
+        if let cancelIdx = body.range(of: "detectionTask?.cancel()")?.lowerBound,
+           let newTaskIdx = body.range(of: "detectionTask = Task")?.lowerBound {
+            XCTAssertLessThan(cancelIdx, newTaskIdx,
+                "cancel() must precede the new Task assignment")
+        }
+    }
+
+    func test_sourceStep_guards_mutations_with_isCancelled() throws {
+        let src = try stepSource("SourceStep.swift")
+        // detectAndRecommend must have `guard !Task.isCancelled else { return }`
+        // before mutating coord.plan.detected / recommendation / errorText.
+        // Count the guards — expect at least 3 (one per mutation site after
+        // a suspension point).
+        let guardCount = src.components(separatedBy: "guard !Task.isCancelled else { return }").count - 1
+        XCTAssertGreaterThanOrEqual(
+            guardCount, 3,
+            """
+            detectAndRecommend must guard state mutations with
+            `guard !Task.isCancelled else { return }` after every await
+            suspension point. Found \(guardCount) guards; need at least 3
+            (Step A success, Step A error, Step B success/error).
+            """
+        )
+    }
 }
