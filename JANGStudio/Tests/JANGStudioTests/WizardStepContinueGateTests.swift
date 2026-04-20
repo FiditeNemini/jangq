@@ -173,6 +173,40 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M138 (iter 60): RunStep late-Cancel on successful conversion
+    //
+    // Sibling of M137 in RunStep. Pre-iter-60 code used:
+    //     coord.plan.run = cancelRequested ? .cancelled : .succeeded
+    // after the for-await exited normally. But PythonRunner treats a
+    // cancelled subprocess AND a successful one the same way:
+    // continuation.finish() clean, no throw. So a user clicking Cancel
+    // at the same microsecond the conversion completed with exit 0 got
+    // run=.cancelled — and with autoDeletePartialOnCancel=true, the
+    // successful output FOLDER was deleted. Higher data-loss stakes
+    // than M137 (which only mis-labeled an already-uploaded HF repo).
+    //
+    // iter 60 tracks `sawSuccessfulDone` from the final .done(ok: true)
+    // event — that's the authoritative "completed successfully" signal.
+
+    func test_runStep_tracks_successful_done_event() throws {
+        let src = try stepSource("RunStep.swift")
+        // The @State flag must exist.
+        XCTAssertTrue(
+            src.contains("@State private var sawSuccessfulDone"),
+            "RunStep must track sawSuccessfulDone to distinguish cancel vs late-cancel-after-success. See M138 iter 60."
+        )
+        // The flag must be set when the .done event arrives with ok=true.
+        XCTAssertTrue(
+            src.contains("sawSuccessfulDone = true"),
+            "sawSuccessfulDone must be assigned true in the .done(ok:) case."
+        )
+        // The flag must be checked before falling back to cancelRequested.
+        XCTAssertTrue(
+            src.contains("if sawSuccessfulDone"),
+            "The stream-complete branch must check sawSuccessfulDone BEFORE the cancelRequested fallback."
+        )
+    }
+
     // MARK: - M137 (iter 59): Publish sheet race — late-Cancel shouldn't show
     // "cancelled" on an already-completed upload.
     //

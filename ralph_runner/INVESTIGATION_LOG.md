@@ -2430,3 +2430,58 @@ Pivoted to a sharper candidate. Grepped for other hardcoded profile → bits map
 - **NEW**: peer-helper sweep on Python publish.py vs convert.py (from iter 57 forecast; still pending).
 
 **Next iteration should pick:** intent-flag grep-audit (directly applies this iter's meta-lesson to find more instances) OR publish/convert peer-helper sweep.
+
+## 2026-04-20 iteration 60 — M138 RunStep late-Cancel race, same class as M137 with data-loss stakes
+
+**Angle:** Iter 59 landed the M137 meta-lesson "distinguish user INTENT from system OUTCOME." Iter 60 applies it as grep-audit. `grep 'wasX|shouldX|cancelRequested'` across Swift. 7 intent-flag sites. Triage:
+- `TestInferenceViewModel.send` uses `!isGenerating` — self-guard (C), safe.
+- `InferenceRunner.wasCancelled` — computed on error code, not a state flag, safe.
+- `PublishService._wasCancelled` — service-internal ProcessHandle wrapper, safe.
+- `PublishToHuggingFaceSheet.wasCancelled` — iter-59 fixed.
+- **`RunStep.cancelRequested`** — drives `coord.plan.run = cancelRequested ? .cancelled : .succeeded`. Same pattern as pre-iter-59 M137.
+
+**Deep trace walkthrough:**
+1. **PythonRunner.launch (lines 112-123):**
+   ```swift
+   if proc.terminationStatus == 0 {
+       continuation.finish()           // natural success
+   } else if cancelled {
+       continuation.finish()           // cancelled — also clean!
+   } else {
+       continuation.finish(throwing: ProcessError(...))
+   }
+   ```
+   **Critical observation:** cancelled-and-signalled AND naturally-succeeded BOTH result in `continuation.finish()` clean. No throw. RunStep's for-await exits the same way in both cases.
+2. **The race:** user at 99.9% of a 30-min conversion clicks Cancel. Subprocess finishes its final shard write and exits 0 at the same microsecond. Button handler sets `cancelRequested=true`. PythonRunner emits `.done(ok=true)` then `continuation.finish()`. For-await exits. `cancelRequested ? .cancelled : .succeeded` → `.cancelled`.
+3. **Worst case:** if user has `autoDeletePartialOnCancel=true` in Settings, RunStep immediately runs `FileManager.removeItem(at: output)` on the successfully-written output folder. **30 minutes of GPU work lost to a ~1ms late button click.**
+4. **This is a sibling of M137 but worse:** M137 mislabeled an already-uploaded repo (confusion). M138 DELETES actual output (data loss).
+5. **Why the iter-59 M137 fix (catch is CancellationError) doesn't apply here:** PythonRunner doesn't throw on cancel — it deliberately treats cancel as a clean exit. So there's no CancellationError to catch; the cancel and the completion are both "clean finish." Need a different authoritative outcome signal.
+6. **The authoritative signal IS available — via the protocol.** Python emits `.done(ok: true)` as the final event on successful completion. If cancelled mid-flight, the subprocess gets SIGTERM before it can emit that event. So receiving `.done(ok=true)` means "work completed successfully," regardless of what the button flag says.
+7. **Fix:** track a new `@State sawSuccessfulDone: Bool`. Set it when `.done(ok=true)` is received in `apply()`. At the stream-complete branch, if sawSuccessfulDone, report success (with a note if cancelRequested — the race outcome). Otherwise fall back to cancelRequested-based logic.
+8. **Why this is different from adding a simple late-cancel notation:** the auto-delete setting makes the output destruction happen AUTOMATICALLY. The user never consented to deletion in this scenario — they asked for cancel on a conversion that then completed. The fix MUST prevent the delete path entirely when completion succeeded.
+
+**Meta-lesson generalized.** The iter-59/60 pair establishes: **every "cancel vs success" decision point in the app must use an authoritative outcome signal, not an intent flag.** The signal depends on the domain:
+- HTTP streaming (Publish): CancellationError thrown by async-await.
+- Subprocess streaming (RunStep): final `.done(ok=true)` protocol event.
+- Simple await (InferenceRunner.generate): code-based InferenceError.wasCancelled is OK because it's set THROUGH the cancellation path, not from a button.
+Each domain has its own correct signal. Audit all cancel-decision points on a per-domain basis.
+
+**Items touched:**
+- M138 [x] — RunStep stream-complete branch now uses sawSuccessfulDone as authoritative success signal.
+
+**Commit:** (this iteration)
+
+**Verification:** 146 Swift tests pass (was 145, +1 for M138 source-inspection pin). Python 310 + ralph 73 unchanged.
+
+**Closed-status tally:** 72 (iter 59) + M138 = 73 closed / 100 total = 73.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (adjacent domain to M137/M138)
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW M139 candidate**: the meta-rule generalized above suggests a full audit of EVERY async-await suspension point in the app that could race with user interaction. Targets include: ConvertService startup (if exists), ProfileStep preflight, any future auto-refresh views.
+- **NEW**: Python peer-helper sweep on publish.py vs convert.py (still pending from iter 57 forecast).
+
+**Next iteration should pick:** publish/convert Python peer-helper sweep (switches out of Swift territory for one iter; then back for M139 generalization).

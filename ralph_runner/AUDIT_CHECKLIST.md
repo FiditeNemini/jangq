@@ -676,6 +676,29 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Tests (+1) in `WizardStepContinueGateTests.swift`:** `test_publishSheet_treats_natural_completion_as_success` — source-inspection pin verifying `catch is CancellationError` is present AND the old `if wasCancelled { errorMessage = ... }` pattern (inside the do-block natural path) is gone.
       **Evidence:** `JANGStudio/JANGStudio/Wizard/PublishToHuggingFaceSheet.swift:263-302`. 145 Swift tests pass (was 144, +1 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M138 (RunStep late-Cancel race — data-loss variant of M137)** — Applied iter-59's meta-lesson "distinguish INTENT from OUTCOME" to the other obvious intent-flag site: `cancelRequested` in RunStep. Grepped `wasX|isX|shouldX|cancelRequested` across the Swift app and triaged — found the same class of race.
+      **Pre-iter-60 code (RunStep.swift:135):**
+      ```swift
+      // Stream finished without throwing — distinguish cancel vs natural success.
+      coord.plan.run = cancelRequested ? .cancelled : .succeeded
+      if cancelRequested {
+          if settings.autoDeletePartialOnCancel, let out = coord.plan.outputURL {
+              try FileManager.default.removeItem(at: out)   // ← DELETES successful output
+          }
+      }
+      ```
+      **The PythonRunner asymmetry that enables the race:** `PythonRunner.launch` treats a cancelled-and-signalled subprocess AND a naturally-completed subprocess identically — both call `continuation.finish()` clean, no throw. So RunStep's for-await exits normally in BOTH cases. `cancelRequested` is the ONLY way RunStep distinguishes them — and it's a button-intent flag with the same timing race as M137.
+      **Data-loss scenario:** user watching a 30-min conversion at 99.9% decides it's slow, clicks Cancel. Subprocess finishes its final shard write, exits 0 at the same microsecond. Button handler sets `cancelRequested=true`. PythonRunner emits final `.done(ok=true)` event, then `continuation.finish()`. For-await exits normally. `cancelRequested ? .cancelled : .succeeded` → `.cancelled`. If `autoDeletePartialOnCancel=true`, `FileManager.removeItem(at: out)` **deletes the successfully-written output folder**. User has now lost 30 minutes of GPU work to a button click that was ~1ms late. Higher stakes than M137 (which only mis-labeled an already-uploaded HF repo).
+      **Fix (iter 60):**
+      - Added `@State private var sawSuccessfulDone: Bool = false`.
+      - In `apply(_ ev:)`'s `.done(let ok, _, _)` case, assign `sawSuccessfulDone = true` when ok is true.
+      - Reset `sawSuccessfulDone = false` at `start()`.
+      - Stream-complete branch: if `sawSuccessfulDone`, always `.succeeded` (append late-cancel note if `cancelRequested`); else fall back to the old `cancelRequested ? .cancelled : .succeeded` logic (genuine cancel with no completion signal).
+      The `sawSuccessfulDone` flag comes from the Python side's `.done(ok=true)` event — the authoritative "conversion completed successfully" signal, immune to button timing.
+      **Tests (+1) in `WizardStepContinueGateTests.swift`:** `test_runStep_tracks_successful_done_event` — 3 pins: `@State private var sawSuccessfulDone` present, `sawSuccessfulDone = true` assigned somewhere, `if sawSuccessfulDone` check present.
+      **Why M138 is adjacent-but-separate from M137:** the async shapes differ. M137 was about HFHub streaming where cancel throws CancellationError. M138 is about subprocess streaming where cancel is a CLEAN finish (PythonRunner deliberately swallows cancel to keep the stream contract simple). The M137 catch-pattern fix doesn't apply; M138 needs an in-band success marker via protocol events. Both share the META lesson — never use intent flags as outcome signals.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/RunStep.swift:14-30, 130-167, 205-214`. 146 Swift tests pass (was 145, +1 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

@@ -10,6 +10,23 @@ struct RunStep: View {
     @State private var runner: PythonRunner?
     @State private var startedAt: Date?
     @State private var cancelRequested: Bool = false
+    /// M138 (iter 60): authoritative success marker. Pre-iter-60, RunStep
+    /// used `cancelRequested ? .cancelled : .succeeded` to decide outcome
+    /// after the stream exited. But PythonRunner treats a cancelled AND a
+    /// successful subprocess THE SAME WAY: `continuation.finish()` clean,
+    /// no throw. So a user hitting Cancel at the same microsecond the
+    /// conversion completed with exit 0 would get run=.cancelled even
+    /// though the output is fully written. Worse: if the user had
+    /// "Auto-delete partial output on cancel" enabled, the successful
+    /// output folder was DELETED. Same race class as iter-59 M137
+    /// (Publish), but with data-loss stakes.
+    ///
+    /// Track whether we received a final `.done(ok: true, …)` event —
+    /// THAT is the authoritative "conversion completed successfully"
+    /// signal. A cancel that preempted the final write won't emit
+    /// ok=true, so `sawSuccessfulDone` stays false and we correctly
+    /// report .cancelled.
+    @State private var sawSuccessfulDone: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -122,6 +139,7 @@ struct RunStep: View {
         guard coord.plan.run != .running else { return }
         coord.plan.run = .running
         cancelRequested = false
+        sawSuccessfulDone = false   // M138: reset for the new run.
         logs.removeAll()
         startedAt = Date()
         let args = buildArgs()
@@ -131,19 +149,34 @@ struct RunStep: View {
             for try await ev in r.run() {
                 await MainActor.run { apply(ev) }
             }
-            // Stream finished without throwing — distinguish cancel vs natural success.
+            // Stream finished without throwing. M138 (iter 60): use the
+            // authoritative success signal (final `.done(ok: true, …)`
+            // event) rather than the user's cancel-intent flag. A late
+            // cancel click that landed AFTER the subprocess naturally
+            // completed would otherwise set run=.cancelled and —
+            // catastrophically, when autoDeletePartialOnCancel=true —
+            // delete the successfully-written output folder.
             await MainActor.run {
-                coord.plan.run = cancelRequested ? .cancelled : .succeeded
-                if cancelRequested {
-                    logs.append("[cancelled] SIGTERM acknowledged, process exited")
-                    // M62: honor Settings → General → Behavior →
-                    // "Auto-delete partial output on cancel". Previously inert.
-                    if settings.autoDeletePartialOnCancel, let out = coord.plan.outputURL {
-                        do {
-                            try FileManager.default.removeItem(at: out)
-                            logs.append("[cancelled] deleted partial output at \(out.path) (auto-delete setting on)")
-                        } catch {
-                            logs.append("[cancelled] auto-delete failed: \(error.localizedDescription)")
+                if sawSuccessfulDone {
+                    coord.plan.run = .succeeded
+                    if cancelRequested {
+                        // Document the race outcome so the user who hit
+                        // Cancel understands the subprocess beat them.
+                        logs.append("[note] Cancel click landed after the final write — output is complete.")
+                    }
+                } else {
+                    coord.plan.run = cancelRequested ? .cancelled : .succeeded
+                    if cancelRequested {
+                        logs.append("[cancelled] SIGTERM acknowledged, process exited")
+                        // M62: honor Settings → General → Behavior →
+                        // "Auto-delete partial output on cancel". Previously inert.
+                        if settings.autoDeletePartialOnCancel, let out = coord.plan.outputURL {
+                            do {
+                                try FileManager.default.removeItem(at: out)
+                                logs.append("[cancelled] deleted partial output at \(out.path) (auto-delete setting on)")
+                            } catch {
+                                logs.append("[cancelled] auto-delete failed: \(error.localizedDescription)")
+                            }
                         }
                     }
                 }
@@ -166,7 +199,14 @@ struct RunStep: View {
         case .message(let level, let text):
             logs.append("[\(level)] \(text)")
         case .done(let ok, _, let err):
-            if !ok, let err { logs.append("[done] error=\(err)") }
+            if ok {
+                // M138 (iter 60): authoritative success marker. Python emits
+                // exactly one .done event at end-of-run; ok=true means the
+                // subprocess completed its final write without error.
+                sawSuccessfulDone = true
+            } else if let err {
+                logs.append("[done] error=\(err)")
+            }
         case .versionMismatch(let v): logs.append("[error] protocol version \(v) unsupported")
         case .parseError(let s): logs.append("[parse-err] \(s)")
         }
