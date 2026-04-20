@@ -10,24 +10,49 @@ enum DiagnosticsBundle {
     /// land an HF token in stderr when the huggingface_hub client raises
     /// HfHubHTTPError. iter 6 scrubs it at the publish-error call site but
     /// anything older / another entry point could still leak.
-    nonisolated static let sensitivePatterns: [(String, String)] = [
-        ("HF token (hf_…)", #"hf_[A-Za-z0-9_-]{20,}"#),
-        ("HF token (huggingface_…)", #"huggingface_[A-Za-z0-9_-]{20,}"#),
+    nonisolated static let sensitivePatterns: [(description: String, pattern: String, template: String)] = [
+        ("HF token (hf_…)", #"hf_[A-Za-z0-9_-]{20,}"#, "<redacted>"),
+        ("HF token (huggingface_…)", #"huggingface_[A-Za-z0-9_-]{20,}"#, "<redacted>"),
         // `Authorization: Bearer …` is what HTTPX logs on debug.
-        ("Authorization Bearer", #"(?i)authorization:\s*bearer\s+[A-Za-z0-9_.-]{20,}"#),
+        ("Authorization Bearer", #"(?i)authorization:\s*bearer\s+[A-Za-z0-9_.-]{20,}"#, "<redacted>"),
         // Generic Bearer fallback for other HTTP clients.
-        ("Bearer <token>", #"(?i)\bbearer\s+[A-Za-z0-9_.-]{20,}"#),
+        ("Bearer <token>", #"(?i)\bbearer\s+[A-Za-z0-9_.-]{20,}"#, "<redacted>"),
+        // M196 (iter 133): cross-language parity with jang-server
+        // iter-130 M193 `redact_for_log`. Before M196 the Swift
+        // diagnostics scrubber covered HF tokens + Bearer but missed
+        // three leak shapes the Python side catches:
+        //   1. OpenAI keys (`sk-…`, `sk-proj-…`) — JANGStudio can end
+        //      up with these if a user's test-inference workflow
+        //      contacts an OpenAI-compatible endpoint for verification.
+        //   2. Slack / Discord webhook URLs — users who wire a
+        //      webhook_url into a jang-server run and then attach a
+        //      diag bundle to a bug report leak the webhook secret
+        //      without these.
+        //   3. Query-string secrets (?api_key=, ?token=, ?access_token=,
+        //      ?auth=) — any HTTP client error logged by the
+        //      subprocess can echo the full URL with the secret.
+        //
+        // For the last two shapes, partial replacement preserves the
+        // non-secret prefix for diagnostic context (the webhook host
+        // and the query-param NAME stay so the operator can see WHERE
+        // the secret was, just not WHAT it was). Uses capture-group
+        // templates ($1<redacted>) — NSRegularExpression supports $1
+        // substitution via stringByReplacingMatches's withTemplate.
+        ("OpenAI key (sk-…)", #"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"#, "<redacted>"),
+        ("Slack webhook secret", #"(/services/T[A-Z0-9]+/B[A-Z0-9]+/)([A-Za-z0-9]{8,})"#, "$1<redacted>"),
+        ("Discord webhook secret", #"(/api/webhooks/[0-9]+/)([A-Za-z0-9_-]{16,})"#, "$1<redacted>"),
+        ("URL query secret", #"([?&](?:api_key|token|access_token|auth)=)([^&\s"'<>]+)"#, "$1<redacted>"),
     ]
 
     /// Apply every pattern in `sensitivePatterns` to the input. Public so
     /// tests can pin the exact redaction behaviour.
     nonisolated static func scrubSensitive(_ text: String) -> String {
         var out = text
-        for (_, pattern) in sensitivePatterns {
+        for (_, pattern, template) in sensitivePatterns {
             guard let rx = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
             let range = NSRange(out.startIndex..<out.endIndex, in: out)
             out = rx.stringByReplacingMatches(in: out, options: [], range: range,
-                                              withTemplate: "<redacted>")
+                                              withTemplate: template)
         }
         return out
     }

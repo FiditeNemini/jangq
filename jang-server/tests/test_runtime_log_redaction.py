@@ -45,6 +45,17 @@ def test_redact_for_log_hf_token():
     assert "***REDACTED***" in out
 
 
+def test_redact_for_log_huggingface_legacy_token():
+    """M196 (iter 133): cross-language parity with Swift's
+    DiagnosticsBundle.sensitivePatterns. Pre-M196 `redact_for_log`
+    only matched the `hf_*` shape; the legacy `huggingface_*` format
+    (still emitted by some HF client error paths) would slip through."""
+    server = _load_server()
+    out = server.redact_for_log("old format: huggingface_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890")
+    assert "huggingface_ABCD" not in out
+    assert "***REDACTED***" in out
+
+
 def test_redact_for_log_openai_key():
     server = _load_server()
     out = server.redact_for_log("openai: sk-proj-abcdefghijklmnopqrst12345 end")

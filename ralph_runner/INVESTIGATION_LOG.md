@@ -5827,3 +5827,58 @@ Missing any layer creates a silent gap at that boundary. **Rule: for credential 
 - **NEW (policy audit):** check whether CLEANUP_HOURS (24 default) is honored for completed jobs. If yes, old rows get purged naturally after a day — reduces backfill relevance over time. If no, rows accumulate forever + backfill becomes more important.
 
 **Next iteration should pick:** JANGStudio Swift-side scrubber parity audit (cross-language consistency — natural M193/M194/M195 follow-on, makes the 4-boundary + backfill pattern universal across the stack), OR extend rate-limit to /retry+/admin/purge (quick win long-deferred), OR CLEANUP_HOURS enforcement audit (checks whether the backfill relevance has a natural decay).
+
+---
+
+## 2026-04-20 iteration 133 — M196 JANGStudio DiagnosticsBundle.scrubSensitive parity with jang-server redact_for_log
+
+**Angle:** iter-132 forecast top-priority: the JANG stack has TWO redaction helpers (Python `redact_for_log`, Swift `scrubSensitive`). They drifted. Cross-language audit the pattern sets; fix the gaps; pin parity.
+
+**Deep trace walkthrough:**
+1. **Audited both helpers side-by-side.** Python had 5 patterns (HF, OpenAI, Bearer, Slack/Discord webhooks, URL query). Swift had 4 patterns (HF + legacy huggingface_, Authorization Bearer, generic Bearer). Common ground: HF tokens, Bearer tokens. Divergence: Python covered OpenAI + webhooks + URL-query; Swift covered legacy `huggingface_` (which Python had in M182's source sweep but not in M193's runtime helper).
+2. **Identified the concrete leak paths each gap opens.**
+   - Missing OpenAI in Swift: a JANGStudio "Test Inference" sheet that happens to call an OpenAI-compatible endpoint could log the `sk-*` key into a run.log, then the user attaches the diag bundle to a bug report → leak.
+   - Missing Slack/Discord in Swift: a user wires `webhook_url=https://hooks.slack.com/…` into a jang-server run then collects a diag bundle from JANGStudio → leak.
+   - Missing URL-query secrets in Swift: the HF client retries can log the full request URL including `?token=…` — Swift's scrubber would let it through.
+   - Missing legacy `huggingface_` in Python: older HF client error paths still emit the legacy shape; M193's helper missed it.
+3. **Designed parity additions.**
+   - Python: added 1 pattern (`huggingface_<20+>` → `huggingface_***REDACTED***`).
+   - Swift: added 3 patterns (OpenAI, Slack webhook secret path, Discord webhook secret path, URL query secret). Changed the tuple shape to `(description, pattern, template)` so per-pattern templates like `$1<redacted>` could partially redact (keeping webhook host + query-param name).
+4. **Partial replacement decision.** Python's webhook callable keeps the host (`https://{host}/***REDACTED***`). Whole-match replacement in Swift would lose the host. Solved by matching only the `/services/T0/B0/SECRET` path (not the scheme+host) — scheme+host pass through unchanged. Same for URL query: pattern matches `[?&]name=VALUE` with capture group on the name portion, template `$1<redacted>` keeps `api_key=` in the output.
+5. **Tests.** 5 new Swift tests (OpenAI both formats, Slack host-kept, Discord host-kept, URL query param-name-kept, multi-param-name loop) + 1 new Python test (legacy HF). All pin PARTIAL replacement semantics + cross-language parity with Python's output shapes.
+6. **Verified.** 21/21 Swift DiagnosticsBundleTests pass. 69/69 Python jang-server tests pass.
+
+**Meta-lesson — cross-language parity invariants prevent silent drift.** Python and Swift helpers drifted for ~119 iters without detection. Neither side had a way to assert "we cover the same shapes as the other side." **Rule: when two independent implementations enforce the SAME property, pin parity with a mechanical check.** Options (in order of cost):
+- **Cheapest:** shared checklist in a code-review template + manual periodic audit.
+- **Medium:** a test that reads both source files and parses the pattern lists, asserting the same coverage descriptions appear in both.
+- **Most robust:** single source-of-truth (YAML/JSON) both sides compile from — both helpers read the same `sensitive-patterns.yaml`.
+Parallels iter-118 M183's "cover all file types" lesson: without a mechanical check, humans forget.
+
+**Meta-lesson — partial-replacement preserves incident-response context.** Whole-match replacement is simpler but loses information operators need when triaging. A Slack webhook URL whose host is `hooks.slack.com` tells the operator WHICH service leaked; replacing the whole URL with `<redacted>` just says there WAS a URL. Both are equally safe, but one is actionable. **Rule: design redaction templates to preserve non-secret scaffolding (URL schemes, hostnames, parameter names) that helps operators understand WHERE a secret was without revealing WHAT it was.** Parallels iter-129 M192's "document the why" — diagnostic context is load-bearing for incident response. Security at the expense of operational visibility is a poor trade.
+
+**Meta-lesson — widen a tuple rather than encode new info via convention.** Swift's `sensitivePatterns` was `[(String, String)]`. Adding per-pattern templates needed a third field. Option A: keep the 2-tuple + compute templates from the pattern (magical). Option B: 3-tuple with explicit `template`. Picked B. Only one consumer (`scrubSensitive`) needed updating. **Rule: if a data shape grows a third field and all consumers are in scope, refactor the shape explicitly rather than encoding the new info implicitly.** Parallels iter-127 M190's structural-over-magical-anchor lesson: explicit structure beats implicit convention.
+
+**Meta-lesson — the common denominator for regex template substitution is `$1`.** Python's `re.sub` accepts `\1` or `\g<1>`; Swift's `NSRegularExpression` expects `$1`. Both languages ALSO accept `$1` in template strings (Python via `re.sub` with a function fallback or string.Template; Swift natively). Standardizing on `$1` makes cross-language pattern sharing more viable. **Rule: when designing patterns that might be shared across languages, prefer the `$1` template syntax over the `\1` / `\g<1>` dialects.** Small convention choice, large future-compatibility payoff if the single-source-of-truth pattern list lands later.
+
+**Items touched:**
+- M196 [x] — Python added 1 pattern (legacy `huggingface_*`). Swift added 3 patterns (OpenAI, Slack/Discord webhooks, URL query secrets) + refactored tuple to carry per-pattern template. 6 new tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 21/21 Swift DiagnosticsBundleTests pass (was 16, +5). 69/69 Python jang-server tests pass (was 68, +1).
+
+**Closed-status tally:** 149 (iter 132) + M196 = 150 items touched, all closed. Zero known bugs as of iter-133 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (cross-lang parity follow-on):** pin the parity mechanically. A test that reads both source files + extracts the pattern lists + asserts they contain matching description tokens would prevent a future iter from adding one side without the other. Add to either ralph_runner/ tests (repo-wide invariants) or a new cross-cutting directory.
+- **NEW:** extend rate-limit to /retry + /admin/purge (carried forward 6 iters now — time to just do it).
+- **NEW:** audit JobStore's in-memory log accumulation in JANGStudio Swift — does it flow through scrubSensitive before any user-facing surface (log pane, copy-to-clipboard, diag bundle)?
+- **NEW:** audit PythonRunner (or equivalent) subprocess output handling on Swift side — does it mirror the Python server's M193 `_LogCapture.write` redact-on-ingest pattern?
+- **NEW:** full audit of the 5-dimension credential hygiene matrix (SOURCE/URL/LOG/RESPONSE/DATA-AT-REST) across JANGStudio Swift. Python side is now clean at all 5 dimensions; Swift side has only LOG coverage partially via scrubSensitive. The 5-dim matrix applied to Swift would uncover new sites.
+
+**Next iteration should pick:** mechanical cross-language parity test (codifies iter-133 meta-lesson, prevents drift iter-135+), OR extend rate-limit to /retry+/admin/purge (long-deferred), OR Swift JobStore log-accumulation audit (extends M196 to the in-memory path).

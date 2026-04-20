@@ -59,6 +59,88 @@ final class DiagnosticsBundleTests: XCTestCase {
         XCTAssertEqual(scrubbed, "var hf_short = thing")
     }
 
+    // MARK: - Iter 133 M196: cross-language parity with jang-server redact_for_log
+
+    func test_scrubs_openai_key() {
+        // sk- and sk-proj- formats. Both need to be redacted because a
+        // user whose test-inference workflow contacts an OpenAI
+        // compatible endpoint could end up with the key in the error
+        // log of a failed call.
+        let scrubbedShort = DiagnosticsBundle.scrubSensitive(
+            "POST /v1/chat failed: key=sk-abcdefghijklmnop1234567")
+        XCTAssertFalse(scrubbedShort.contains("sk-abcdefghijklmnop1234567"))
+        XCTAssertTrue(scrubbedShort.contains("<redacted>"))
+
+        let scrubbedProj = DiagnosticsBundle.scrubSensitive(
+            "env key=sk-proj-abcdefghijklmnopqrstuvw")
+        XCTAssertFalse(scrubbedProj.contains("sk-proj-abcdefghijklmnopqrstuvw"))
+        XCTAssertTrue(scrubbedProj.contains("<redacted>"))
+    }
+
+    func test_scrubs_slack_webhook_but_keeps_host() {
+        // Slack webhook URLs carry the write secret in the path. The
+        // scrub must redact the secret but leave `hooks.slack.com` in
+        // place so the operator reading a bug report can tell WHICH
+        // service the webhook pointed at. Template is "$1<redacted>"
+        // which keeps the `/services/T0/B0/` prefix.
+        let input = "Webhook delivered to https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXX"
+        let scrubbed = DiagnosticsBundle.scrubSensitive(input)
+        XCTAssertFalse(scrubbed.contains("XXXXXXXXXXXXXXXX"),
+                       "secret token body must be redacted")
+        XCTAssertTrue(scrubbed.contains("hooks.slack.com"),
+                      "host must remain for diagnostic context")
+        XCTAssertTrue(scrubbed.contains("/services/T00000000/B00000000/"),
+                      "prefix up to the secret must remain")
+        XCTAssertTrue(scrubbed.contains("<redacted>"))
+    }
+
+    func test_scrubs_discord_webhook_but_keeps_host() {
+        let input = "https://discord.com/api/webhooks/1234567890/secret-token-goes-here-abc"
+        let scrubbed = DiagnosticsBundle.scrubSensitive(input)
+        XCTAssertFalse(scrubbed.contains("secret-token-goes-here-abc"),
+                       "Discord webhook secret must be redacted")
+        XCTAssertTrue(scrubbed.contains("discord.com"))
+        XCTAssertTrue(scrubbed.contains("/api/webhooks/1234567890/"),
+                      "path up to the secret must remain")
+    }
+
+    func test_scrubs_url_query_secret_keeps_param_name() {
+        // Partial replacement: the param NAME stays (so operators know
+        // WHICH param held a secret) but the VALUE is redacted. Python's
+        // redact_for_log does the same via m.group(1) + REDACTED. This
+        // pins cross-language parity.
+        let input = "GET https://api.example.com/path?api_key=SECRETVALUE123&other=foo"
+        let scrubbed = DiagnosticsBundle.scrubSensitive(input)
+        XCTAssertFalse(scrubbed.contains("SECRETVALUE123"),
+                       "secret value must be redacted")
+        XCTAssertTrue(scrubbed.contains("api_key=<redacted>"),
+                      "param name must remain visible so the vector is clear")
+        XCTAssertTrue(scrubbed.contains("&other=foo"),
+                      "trailing URL components must be preserved")
+    }
+
+    func test_scrubs_url_query_secret_multiple_param_names() {
+        // Parity with Python: api_key, token, access_token, auth all
+        // covered.
+        for param in ["api_key", "token", "access_token", "auth"] {
+            let input = "GET https://h/?\(param)=LEAKLEAKLEAKLEAK&k=v"
+            let scrubbed = DiagnosticsBundle.scrubSensitive(input)
+            XCTAssertFalse(scrubbed.contains("LEAKLEAKLEAKLEAK"),
+                           "secret for param=\(param) must be redacted")
+            XCTAssertTrue(scrubbed.contains("\(param)=<redacted>"),
+                          "param name \(param) must remain in redacted form")
+        }
+    }
+
+    func test_scrub_preserves_non_secret_urls() {
+        // Must NOT eat legitimate URLs that happen to contain slashes
+        // + query strings but no secret-bearing param names.
+        let input = "GET https://huggingface.co/Qwen/Qwen3-8B/resolve/main/config.json?download=true"
+        let scrubbed = DiagnosticsBundle.scrubSensitive(input)
+        XCTAssertEqual(scrubbed, input,
+                       "non-secret URL must pass through unchanged")
+    }
+
     // MARK: - Iter 88 M165: URL-embedded token edge cases
 
     func test_scrub_token_in_url_query_string() {

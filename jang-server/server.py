@@ -130,6 +130,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # debugging info like model IDs and file paths).
 _SECRET_REDACTIONS = [
     (re.compile(r"\bhf_[A-Za-z0-9_-]{20,}\b"), "hf_***REDACTED***"),
+    # M196 (iter 133): legacy HF format. M182 repo-wide sweep has it;
+    # M193's redact_for_log didn't. Added for cross-language parity
+    # with DiagnosticsBundle.sensitivePatterns Swift side + to close
+    # the gap for any HF client still emitting the legacy shape.
+    (re.compile(r"\bhuggingface_[A-Za-z0-9_-]{20,}\b"), "huggingface_***REDACTED***"),
     (re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"), "sk-***REDACTED***"),
     (re.compile(r"\bBearer\s+[A-Za-z0-9_\-\.]{16,}\b"), "Bearer ***REDACTED***"),
     # Match known webhook hosts + redact path+query.
