@@ -45,6 +45,16 @@ def cmd_modelcard(args) -> None:
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(3)
+    # M91 (iter 28): warn that the card is a skeleton. Goes to stderr so it
+    # doesn't pollute the --json stdout payload or the plain-text card print.
+    # Swift GenerateModelCardSheet shows a user-visible banner instead; this
+    # stderr note helps CLI users + Ralph harness tail-reads.
+    print(
+        "NOTE: generated card is a skeleton (metadata + Python snippet). "
+        "For HF publishing, add per-subject MMLU scores, JANG-vs-MLX comparisons, "
+        "and a Korean section per feedback_readme_standards.md.",
+        file=sys.stderr,
+    )
     if args.json:
         caps = detect_capabilities(model_dir)
         caps["size_gb"] = _size_gb(model_dir)

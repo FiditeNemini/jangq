@@ -77,3 +77,36 @@ def test_cli_writes_file(dense_model_dir, tmp_path):
     )
     assert out.exists()
     assert out.read_text().startswith("---")
+
+
+# ────────────────────────────────────────────────────────────────────
+# Iter 28: M91 — CLI emits skeleton-warning note on stderr
+# ────────────────────────────────────────────────────────────────────
+
+def test_cli_emits_skeleton_warning_to_stderr(dense_model_dir):
+    """M91: the auto-generated card is a skeleton; publishing without MMLU
+    scores, JANG-vs-MLX comparison, and Korean section violates
+    feedback_readme_standards.md. CLI emits a stderr note so humans (and
+    Ralph tail-reads) know before they publish.
+
+    The note must land on STDERR, not stdout — stdout carries the card
+    markdown / JSON payload and must stay machine-parseable.
+    """
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "modelcard",
+         "--model", str(dense_model_dir), "--json"],
+        capture_output=True, text=True, check=True,
+    )
+    # stdout is clean JSON (would fail parse otherwise)
+    json.loads(r.stdout)
+    # stderr contains the skeleton note. Use a distinctive phrase from the
+    # warning message (not just "skeleton" which can appear in tmp paths
+    # named after the test case — pytest tmp_path dirs include the test name).
+    assert "generated card is a skeleton" in r.stderr.lower(), \
+        f"stderr missing skeleton warning: {r.stderr!r}"
+    # Note points at the memory rule so future readers know the WHY
+    assert "feedback_readme_standards" in r.stderr or "MMLU" in r.stderr
+    # But stdout stays MACHINE-PARSEABLE — the distinctive warning phrase
+    # must NOT leak onto stdout.
+    assert "generated card is a skeleton" not in r.stdout.lower(), \
+        "skeleton note must NOT appear on stdout (breaks --json consumers)"

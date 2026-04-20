@@ -20,6 +20,7 @@ struct GenerateModelCardSheet: View {
             } else if let err = errorMessage {
                 errorView(err)
             } else if let card = card {
+                skeletonWarning
                 metadataView(card)
                 Divider()
                 cardPreview(card)
@@ -29,6 +30,43 @@ struct GenerateModelCardSheet: View {
         }
         .frame(minWidth: 700, minHeight: 560)
         .task { await generate() }
+    }
+
+    /// M91 (iter 28): `feedback_readme_standards.md` lists 12 hard
+    /// requirements for HF uploads. The auto-generated card is a skeleton
+    /// — it ONLY covers the automatable rules (YAML tags, license, quant
+    /// config, Python snippet). The non-automatable rules (per-subject
+    /// MMLU scores, JANG-vs-MLX side-by-side, speed comparison, Korean
+    /// section, per-subject comparison table) require live evals + manual
+    /// curation and are not in the skeleton. Users publishing the
+    /// skeleton as-is would violate the project standard, silently.
+    ///
+    /// This banner makes the gap visible at card-preview time so the user
+    /// either fills it in before saving, or knowingly accepts a partial
+    /// upload.
+    private var skeletonWarning: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Skeleton only — not upload-ready")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                Text("Before publishing to HuggingFace, add per-subject MMLU scores, JANG-vs-MLX comparison tables (speed + size + per-subject), and a Korean section per the project's README standards. The generated card covers metadata + Python snippet only.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.orange.opacity(0.4), lineWidth: 1)
+        )
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
     }
 
     private var header: some View {

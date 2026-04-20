@@ -1047,3 +1047,38 @@ Memory `feedback_readme_standards.md` specifies 9+ other HARD upload requirement
 **Cat D yield now 4 of 5 passes found bugs (iter 5, 21, 22, 26, 27 — 4 real bugs + 1 clean).** Cadence is paying off. Good candidates for next-pass: `feedback_model_checklist.md`, `project_minimax_m27.md`, `reference_architecture_details.md`.
 
 **Next iteration should pick:** M91 (model-card skeleton vs rule-10 mismatch — UX gap, small scope). Or M88 (sheet init-vs-task unification from iter 25). Or M87 live Mistral 4 validation. Or another Cat D pass targeting `feedback_model_checklist.md` (untouched, would close the Cat D coverage loop).
+
+---
+
+## 2026-04-20 iteration 28 — M91 skeleton-card warning (visibility UX)
+
+**Angle:** Close M91 — the "template would silently violate memory rules if published" gap surfaced in iter 27. Scoped to VISIBILITY rather than automation because the underlying rules (per-subject MMLU, JANG-vs-MLX tables, Korean section) require live evals that the build-time template can't produce.
+
+**Deep trace walkthrough:**
+1. Re-read `feedback_readme_standards.md` (30 days old). 12 rules total:
+   - Rules 1-6: require EVAL DATA (MMLU scores, comparisons, speed, size). Can't automate without running evals.
+   - Rules 7-9 (no duplicates, no wrong profile data, no empty Korean tables): negative checks that would need a curator anyway.
+   - Rule 10 (YAML `reasoning`+`thinking` tags): automated in iter 27.
+   - Rule 11 (MiniMax text-only): should be automatable via `has_vl` check — spawn follow-up.
+   - Rule 12 (review the FULL README before upload): process/UX rule.
+2. **Scope decision: visibility, not automation.** The memory is about what Eric REVIEWS before a manual HF publish. JANG Studio generates a skeleton for the user to extend. The bug is that the gap between skeleton and upload-ready is INVISIBLE.
+3. **Two-layer visibility fix:**
+   - Swift UI: a new `skeletonWarning` section at the top of `GenerateModelCardSheet` — renders AS SOON AS the card loads, before the Save/Copy buttons. Orange-tinted with the explicit phrase "Skeleton only — not upload-ready" plus a caption listing the missing sections. Impossible to miss.
+   - CLI stderr: `jang-tools modelcard` now prints a NOTE to stderr after generation. Ralph harness tails stderr so the note appears in logs; humans running CLI manually see it.
+4. **Critical design: stderr not stdout.** The CLI's `--json` mode's stdout must stay parseable — a warning on stdout would break every downstream consumer (Swift, Ralph, future CI integrations). Explicit test `test_cli_emits_skeleton_warning_to_stderr` pins this invariant.
+5. **Gotcha caught during test writing:** pytest's `tmp_path` fixture creates per-test directories like `pytest-of-eric/pytest-638/test_cli_emits_skeleton_warnin0/dense`. The path gets embedded in the Python snippet's `load_jang_model("...")` string. A naive substring check `"skeleton" in stdout` false-positives on the embedded path. Switched assertion to the distinctive warning phrase `"generated card is a skeleton"` which is unique to the stderr message.
+
+**Items touched:**
+- M91 [x] — gap made visible at both Swift UI + CLI layers. Tests pin stderr-only, stdout-parseable, memory-ref in message.
+
+**Commit:** (this iteration)
+
+**Verification:** 256 jang-tools (was 255, +1). ralph_runner 68 + Swift 115 unchanged. Swift `skeletonWarning` section is pure markup — no test-level Swift coverage added since the behavior is "always shows when card loads" which is trivially verified by reading the code.
+
+**Closed-status tally:** 41 (prior) + M91 = 42 closed / 77 total = 55% closure rate.
+
+**Spawn candidates identified during scan (not fixed):**
+- **M93**: `feedback_readme_standards.md` rule 11 says "MiniMax is text-only — never include VLM code". Template has an `is_vl` check so MiniMax (detected non-VL) would get the text path correctly. But the rule suggests manual curators still sometimes mix VLM code into MiniMax cards — might be worth adding a POST-generation check that if `model_type == "minimax_m2"` and the card contains VLM-specific markers (like `mlx_vlm`, `Image.open`), flag it.
+- **M94**: the CLI stderr warning is shown EVERY time `jang-tools modelcard` runs — even when called from Swift where the UI banner already covers it. Could add a `--quiet-note` flag for the Swift caller so we don't double-surface. Low priority since Swift doesn't surface stderr to the user except on failure.
+
+**Next iteration should pick:** M88 (sheet init-vs-task field-lifecycle, iter-25 spawn). Or continue Cat D with `feedback_model_checklist.md` (untouched). Or M87 live Mistral 4 validation. Or M93 (MiniMax-vs-VLM check — small + closes rule 11). Or the next natural user-flow audit — VerifyStep's adoption action row wiring (flagged at end of iter 25).
