@@ -8,6 +8,7 @@ struct UsageExamplesSheet: View {
     @State private var snippets: [ExampleLanguage: String] = [:]
     @State private var loadingLangs: Set<ExampleLanguage> = []
     @State private var errorByLang: [ExampleLanguage: String] = [:]
+    @State private var saveErrorMessage: String? = nil   // M107: surface save failures
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,6 +21,14 @@ struct UsageExamplesSheet: View {
             footer
         }
         .frame(minWidth: 720, minHeight: 540)
+        // M107 (iter 35): surface Save-to-file failures instead of swallowing.
+        .alert("Save failed",
+               isPresented: Binding(get: { saveErrorMessage != nil },
+                                    set: { if !$0 { saveErrorMessage = nil } })) {
+            Button("OK") { saveErrorMessage = nil }
+        } message: {
+            Text(saveErrorMessage ?? "")
+        }
         .task {
             // Pre-fetch all four snippets in parallel so tab switches are instant.
             await withTaskGroup(of: Void.self) { group in
@@ -143,7 +152,18 @@ struct UsageExamplesSheet: View {
         panel.nameFieldStringValue = "\(base)-usage.\(selectedLang.fileExtension)"
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url {
-            try? text.data(using: .utf8)?.write(to: url)
+            // M107 (iter 35): silent-swallowed the failure via `try?` →
+            // user's disk-full / permission-denied / bad-path error was
+            // invisible. Now we surface it as an alert.
+            guard let data = text.data(using: .utf8) else {
+                saveErrorMessage = "Internal error: snippet is not valid UTF-8"
+                return
+            }
+            do {
+                try data.write(to: url)
+            } catch {
+                saveErrorMessage = "Couldn't save to \(url.lastPathComponent): \(error.localizedDescription)"
+            }
         }
     }
 }

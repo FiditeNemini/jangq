@@ -12,6 +12,7 @@ struct TestInferenceSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var vm: TestInferenceViewModel
     @State private var showingSettings = false
+    @State private var exportErrorMessage: String? = nil   // M107: surface save failures
 
     init(modelPath: URL,
          isVL: Bool = false,
@@ -39,6 +40,15 @@ struct TestInferenceSheet: View {
         .frame(minWidth: 680, minHeight: 540)
         .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
             settingsPopover
+        }
+        // M107 (iter 35): surface Export Transcript save failures instead of
+        // silently swallowing them.
+        .alert("Export failed",
+               isPresented: Binding(get: { exportErrorMessage != nil },
+                                    set: { if !$0 { exportErrorMessage = nil } })) {
+            Button("OK") { exportErrorMessage = nil }
+        } message: {
+            Text(exportErrorMessage ?? "")
         }
     }
 
@@ -256,7 +266,16 @@ struct TestInferenceSheet: View {
         panel.canCreateDirectories = true
         panel.allowedContentTypes = [.json]
         if panel.runModal() == .OK, let url = panel.url {
-            try? vm.exportTranscript(to: url)
+            // M107 (iter 35): previously silent-swallowed the error via try?.
+            // Disk-full / permission-denied / read-only-volume failures left
+            // the user thinking they saved a file that doesn't exist. Now we
+            // surface the error as an alert. Successful saves stay quiet —
+            // Finder open is the user's feedback that the file landed.
+            do {
+                try vm.exportTranscript(to: url)
+            } catch {
+                exportErrorMessage = "Couldn't save transcript to \(url.lastPathComponent): \(error.localizedDescription)"
+            }
         }
     }
 }

@@ -50,7 +50,19 @@ struct RunStep: View {
                         .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                     Button("Delete partial output", role: .destructive) {
                         if let out = coord.plan.outputURL {
-                            try? FileManager.default.removeItem(at: out)
+                            // M107 (iter 35): surface delete failures via the
+                            // existing log pane so the user doesn't assume the
+                            // delete succeeded when it didn't (permission
+                            // denied, file in use by another process, already
+                            // gone from disk). Pre-iter-35 the `try?` silently
+                            // swallowed every error; user walked away thinking
+                            // the output was cleaned up when it wasn't.
+                            do {
+                                try FileManager.default.removeItem(at: out)
+                                logs.append("[cleanup] deleted \(out.path)")
+                            } catch {
+                                logs.append("[cleanup] delete FAILED: \(error.localizedDescription)")
+                            }
                         }
                     }
                     .disabled(coord.plan.outputURL == nil)

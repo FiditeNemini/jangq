@@ -1334,3 +1334,54 @@ Three different Swift async primitives (AsyncThrowingStream from actor, AsyncThr
 - M106 (DiagnosticsBundle.write main-thread block — spawned this iter)
 - Cat D with `feedback_model_checklist.md` (untouched)
 - A new audit theme: what ELSE could a grep-audit catch? Candidates: bare `try?` that swallows errors (silent failures); `DispatchQueue.main.async` inside async contexts (cross-isolation hops); force-unwraps `!` in production code paths.
+
+---
+
+## 2026-04-20 iteration 35 — M107 grep-audit for silent-failure `try?` on user actions
+
+**Angle:** Applied iter-34's grep-audit meta-lesson to a DIFFERENT bug class. The previous 5-iter theme was subprocess cancellation; this iter tries "bare `try?` swallowing user-triggered errors". If the meta-lesson is real (grep-audit after a confirmed bug finds more instances), it should find something.
+
+**Deep trace walkthrough:**
+1. `grep -c "try\?"` — 30 total hits across 12 files. Too many to audit individually; need filtering.
+2. Filtered out legitimate uses:
+   - **Parse-tolerance in verifiers** (PostConvertVerifier has 8 — each one reads a file that may or may not exist and defaults to empty if parse fails; that's the whole POINT of a verifier).
+   - **Task.sleep ignores** — standard `try? await Task.sleep(...)` pattern; sleep never fails except on cancel and cancel is handled elsewhere.
+   - **Subprocess-context tmpfile cleanup** — `try? FileManager.removeItem(at: workDir)` after we've already zipped its contents; failure to delete the scratch dir doesn't affect correctness.
+3. **Three real bugs surfaced** after filtering — all on USER-TRIGGERED SAVE/DELETE actions with NO visible feedback:
+   - `TestInferenceSheet.exportTranscript:259`: `try? vm.exportTranscript(to: url)`
+   - `UsageExamplesSheet.saveToFile:146`: `try? text.data(using: .utf8)?.write(to: url)`
+   - `RunStep "Delete partial output":53`: `try? FileManager.default.removeItem(at: out)`
+4. Each fails silently on: disk full, permission denied, sandboxed-write rejection, read-only volume, file-in-use. User clicks button, sees panel dismiss, has no idea whether it succeeded.
+5. **Fix approach differs by context:**
+   - Sheets (1, 2): @State errorMessage + .alert modifier. Standard SwiftUI pattern. Explicit `do { try ... } catch { errorMessage = "..." }`.
+   - In-flow delete (3): the Cancelled-state UI already has a log pane. Surface failure/success to logs: `[cleanup] deleted <path>` or `[cleanup] delete FAILED: <reason>`. Same location the user is already reading.
+6. **Design call: don't surface successes with alerts.** Finder (or the natural next step) is enough positive feedback. Alerting "Saved!" on every save would be noise. Only surface failures — those are the silent cases that hurt.
+7. **False-positive exclusions that I documented as deliberate `try?` usage:**
+   - PostConvertVerifier's parse-tolerance: `(try? JSONSerialization.jsonObject(...)) ?? [:]` — correct. File might not exist yet (convert incomplete) or might be malformed (the very thing we're verifying); defaults to empty dict + row fails with "jang_config.json missing".
+   - `try? await Task.sleep(for: .seconds(3))` — standard idiom; sleep only throws on cancellation.
+   - `let stderrTask = Task.detached { ... }; _ = try? await stderrTask.value` — drain tasks; we don't care about their error since the primary failure path is the subprocess exit code.
+
+**Items touched:**
+- M107 [x] — 3 silent-failure user-action sites now surface errors visibly.
+
+**Commit:** (this iteration)
+
+**Verification:** 122 Swift tests pass unchanged (pure-UX iter; no automated UI tests for alert presentation — relies on manual smoke).
+
+**Closed-status tally:** 48 (prior) + M107 = 49 closed / 84 total = 58% closure rate.
+
+**Meta-lesson reinforced across 6 grep-audit iters now:**
+- iter 30 (M96): found PublishService streaming cancel bug
+- iter 31 (M98): grep → PythonRunner  
+- iter 32 (M100): grep → InferenceRunner
+- iter 33 (M101): grep → 6 services + verifier
+- iter 34 (M105): grep for `waitUntilExit()` → SourceDetector
+- iter 35 (M107): grep for `try?` on user actions → 3 silent failures
+
+**The grep-audit loop yields:** every iter found ≥1 real bug. Pattern recognition + textual search is reliably productive when executed after a confirmed failure mode has been described.
+
+**Next iteration should pick:** Continue the grep-audit loop on a new class:
+- Force-unwraps `!` in production code paths (likely some in UI array access like `Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"`)
+- `DispatchQueue.main.async` inside async contexts (cross-isolation hops that defeat Swift's structured concurrency)
+- Unchecked array subscript access (e.g. `arr[0]` without a bounds check)
+Or return to domain-specific bugs: M87 Mistral 4 RoPE, M97 partial HF cleanup, M106 DiagnosticsBundle main-thread block, Cat D with `feedback_model_checklist.md`.
