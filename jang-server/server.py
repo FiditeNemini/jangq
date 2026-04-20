@@ -708,7 +708,7 @@ def create_job(req: JobRequest):
 
 # ── Get job status ──────────────────────────────────────────
 
-@app.get("/jobs/{job_id}")
+@app.get("/jobs/{job_id}", dependencies=[Depends(check_auth)])
 def get_job(job_id: str):
     """Get full job status with per-phase progress."""
     with _lock:
@@ -720,7 +720,7 @@ def get_job(job_id: str):
 
 # ── List jobs ───────────────────────────────────────────────
 
-@app.get("/jobs")
+@app.get("/jobs", dependencies=[Depends(check_auth)])
 def list_jobs(user: str = "", phase: str = "", limit: int = 50):
     """List jobs, newest first. Filter by user or phase."""
     with _lock:
@@ -736,7 +736,7 @@ def list_jobs(user: str = "", phase: str = "", limit: int = 50):
 
 # ── Queue status ────────────────────────────────────────────
 
-@app.get("/queue")
+@app.get("/queue", dependencies=[Depends(check_auth)])
 def get_queue():
     """Get the current queue: what's running, what's waiting, in order."""
     # Active job
@@ -829,7 +829,7 @@ def retry_job(job_id: str):
 
 # ── Job logs ────────────────────────────────────────────────
 
-@app.get("/jobs/{job_id}/logs")
+@app.get("/jobs/{job_id}/logs", dependencies=[Depends(check_auth)])
 def get_job_logs(job_id: str):
     """Get the last 200 log lines from a job."""
     with _lock:
@@ -841,7 +841,7 @@ def get_job_logs(job_id: str):
 
 # ── SSE stream ──────────────────────────────────────────────
 
-@app.get("/jobs/{job_id}/stream")
+@app.get("/jobs/{job_id}/stream", dependencies=[Depends(check_auth)])
 async def stream_job(job_id: str):
     """Server-sent events stream for real-time job updates."""
     with _lock:

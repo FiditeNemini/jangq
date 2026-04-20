@@ -4972,3 +4972,42 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: sweep jang-tools CLI for user-input injection (shell splicing in convert pipeline).
 
 **Next iteration should pick:** continue jang-server security audit with the "adversarial thinking" lens — unbounded resource growth + SQL injection + model_id path traversal are natural follow-ups to M178.
+
+---
+
+## 2026-04-20 iteration 114 — M179 jang-server authorization gap (auth on POSTs only)
+
+**Angle:** Iter-113 forecast continued: jang-server adversarial sweep beyond SSRF. Checked SQL (parameterized — clean), path traversal via model_id (gated by HF API + iter-87 M164 HFRepoValidator — safe), unbounded growth (`_jobs` purged manually, `log_lines` deque-bounded, `_sse_subscribers` minor leak — flagged for future iter), and **auth enforcement** — found 5 unprotected GETs.
+
+**Deep trace walkthrough:**
+1. **Built per-endpoint auth matrix** by grep'ing `@app.METHOD` decorators alongside `Depends(check_auth)`. POSTs all gated. GETs split: profiles + health open (correct, public-by-design), but 5 job-related GETs missing auth.
+2. **Verified the security model.** `check_auth` returns early when `JANG_API_KEYS` is empty (line 571) — server is "open mode" for local dev. When API_KEYS is set (production), auth is enforced. The gap manifests in production: POSTs require key, GETs don't. Anyone with network access enumerates jobs + reads logs + streams events.
+3. **Added auth to 5 endpoints:**
+   - GET /jobs/{job_id}, GET /jobs, GET /queue, GET /jobs/{id}/logs, GET /jobs/{id}/stream.
+4. **Wrote the per-endpoint auth-enforcement test.** Parses every `@app.METHOD("/path")` decorator from server.py, asserts each endpoint in AUTH_REQUIRED set has `Depends(check_auth)`. Future endpoint additions fail the test until they declare auth posture.
+5. **Public-endpoint regression guard.** `/health` and `/profiles` should remain open — second test prevents over-correction.
+
+**Meta-lesson — auth audits need a per-endpoint matrix.** Hand-eyeballing `@app.get` vs `@app.post` to spot missing auth scales poorly. Building a `{endpoint: auth-required?}` matrix mechanically — at audit time AND in a regression test — makes mismatches obvious. **Rule: for any HTTP server, audit by enumerating ALL endpoints into a table with explicit auth posture, then assert the table holds via a parser test.** The test crystallizes the audit's findings into source so future maintainers can't accidentally drop auth from a sensitive endpoint.
+
+**Meta-lesson — opt-in / env-gated auth is invisible during local dev.** `check_auth` short-circuits when `JANG_API_KEYS` is empty — local devs see endpoints "work" regardless of decorator presence. The auth gap was 100% invisible during dev because dev doesn't set API_KEYS. **Rule: when auth is conditionally enforced (env-gated, feature-flagged), audit decorator presence STATICALLY — runtime testing in dev doesn't catch missing decorators because dev behavior differs from production.** This is the security analog of iter-78's "structural matches across the whole codebase" meta-lesson — static structure tells you what runtime testing won't.
+
+**Items touched:**
+- M179 [x] — 5 endpoints auth-gated. 2 new regression tests (per-endpoint auth matrix + public-endpoint guard).
+
+**Commit:** (this iteration)
+
+**Verification:** 16 jang-server tests pass (was 14, +2). Other suites unchanged.
+
+**Closed-status tally:** 132 (iter 113) + M179 = 133 items touched, all closed. Zero known bugs as of iter-114 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: jang-server `_sse_subscribers` ghost-key leak — purge / job-end should also clean up subscribers dict. Slow-drip memory issue, low priority.
+- **NEW**: continue security audit — M57 shell-splicing in run_convert_remote (already on the list as a Ralph runner item, but worth double-checking jang-server too for any subprocess calls that interpolate user input).
+- **NEW**: jang-server CSRF (auth via header — vulnerable to web-page-driven attacks if user has cookies or saved credentials? Not relevant if API-key auth, but check token storage scheme).
+
+**Next iteration should pick:** sweep jang-server for shell-splicing / subprocess injection (extending the security thread), OR fix the _sse_subscribers slow leak, OR pivot back to JANGStudio Swift for a fresh angle.

@@ -225,6 +225,21 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M179 (jang-server authorization gap — job-read GETs unprotected when API_KEYS set)** — Iter-114 continued the security audit. Mapped every `@app.METHOD` decorator and which endpoints carry `Depends(check_auth)`. Found 5 GETs that returned per-user job content WITHOUT auth requirements:
+      - `GET /jobs` — lists ALL jobs across all users.
+      - `GET /jobs/{job_id}` — full job state including model_id, user, error messages.
+      - `GET /jobs/{job_id}/logs` — last 200 log lines (may contain paths, error context).
+      - `GET /jobs/{job_id}/stream` — SSE feed of phase transitions.
+      - `GET /queue` — queue ordering + priorities.
+      **Impact:** if deployed with `JANG_API_KEYS` set (the documented production posture), POST endpoints (create/cancel/retry/estimate/admin-purge) were properly auth-gated, but READ endpoints leaked job content to anyone with network access. Multi-user deployments allowed users to enumerate + spy on each other's jobs. Single-user deployments still leaked logs to scanners on the same network.
+      **Fix (iter 114):** added `dependencies=[Depends(check_auth)]` to all 5 endpoints. `check_auth` is opt-in via env (returns early if API_KEYS empty), so open deployments are unaffected; auth'd deployments now properly gate reads too. `/health` and `/profiles` left open — standard public-endpoint posture.
+      **Tests (+2) in new `jang-server/tests/test_auth_enforcement.py`:**
+      - `test_sensitive_endpoints_require_auth` — parses every `@app.METHOD("/path")` decorator from server.py, asserts each endpoint in the AUTH_REQUIRED set has `Depends(check_auth)`. Future endpoint additions with sensitive content fail this test until the decorator is added.
+      - `test_public_endpoints_remain_open` — regression guard against over-correction (sweeping auth onto health/profiles).
+      **Evidence:** `jang-server/server.py:711-844`. 16 jang-server tests pass (was 14, +2).
+      **Meta-lesson — auth audits need a per-endpoint matrix.** Iter-113 found SSRF in webhook plumbing; iter-114 found authz gaps in routing. Both are HTTP-layer vulnerabilities but require different lenses. Rule: for any HTTP server, build a per-endpoint table of (method, path, auth-required?, public-by-design?) at audit time. Mismatches between intent and decorator presence are mechanical to spot once the table exists. The new auth-enforcement test crystallizes that table into source.
+      **Meta-lesson — opt-in auth is easy to get wrong.** `check_auth` early-returns when API_KEYS is empty, which means devs testing locally without API_KEYS see endpoints "work" regardless of decorator. The auth gap was invisible during local dev — only manifests in production. Rule: when an auth dependency is conditionally enforced (env-var gated), audit decorator presence STATICALLY because runtime behavior in dev != production.
+      **Commit:** (this iteration)
 - [x] **M178 (jang-server webhook_url SSRF — user-controlled URL blindly POSTed)** — Iter-113 audited jang-server for server-specific anti-patterns (unbounded resources, uncaught async, missing auth, etc.). **Found a REAL security vulnerability in the first sweep.**
       **Bug:** `_fire_webhook(job)` at line 1484 POSTs JSON to `job.webhook_url` — a user-controlled string from the job submission request. Pre-M178, the server blindly made an HTTP request to whatever URL the user provided. Classic **Server-Side Request Forgery (SSRF)** vulnerability. Attack vectors:
       - **Loopback:** `webhook_url = "http://127.0.0.1:8080/admin"` → server hits its own localhost services.
