@@ -125,11 +125,103 @@ private struct AdvancedTab: View {
 
     var body: some View {
         Form {
-            Text("Advanced settings — see commit 3")
-                .foregroundStyle(.secondary)
+            Section("Runtime overrides") {
+                HStack {
+                    Text("Python override")
+                    Spacer()
+                    Text(settings.pythonOverridePath.isEmpty
+                         ? "Use bundled"
+                         : settings.pythonOverridePath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button("Choose…") { pickFile { settings.pythonOverridePath = $0 } }
+                    if !settings.pythonOverridePath.isEmpty {
+                        Button("Clear") { settings.pythonOverridePath = "" }
+                    }
+                }
+                Text("Path to a Python 3.11+ interpreter. Overrides $JANGSTUDIO_PYTHON_OVERRIDE at app scope.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("Custom jang-tools path")
+                    Spacer()
+                    Text(settings.customJangToolsPath.isEmpty ? "Use bundled" : settings.customJangToolsPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button("Choose…") { pickDir { settings.customJangToolsPath = $0 } }
+                    if !settings.customJangToolsPath.isEmpty {
+                        Button("Clear") { settings.customJangToolsPath = "" }
+                    }
+                }
+            }
+
+            Section("Logging") {
+                Picker("Verbosity", selection: $settings.logVerbosity) {
+                    ForEach(LogVerbosity.allCases) { v in
+                        Text(v.displayName).tag(v)
+                    }
+                }
+                Stepper(value: $settings.jsonlLogRetentionLines, in: 1000...50000, step: 1000) {
+                    LabeledContent("UI log ring size", value: "\(settings.jsonlLogRetentionLines) lines")
+                }
+
+                HStack {
+                    Text("Log file dir")
+                    Spacer()
+                    Text(settings.logFileOutputDir.isEmpty
+                         ? "~/Library/Logs/JANGStudio"
+                         : settings.logFileOutputDir)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button("Choose…") { pickDir { settings.logFileOutputDir = $0 } }
+                    if !settings.logFileOutputDir.isEmpty {
+                        Button("Clear") { settings.logFileOutputDir = "" }
+                    }
+                }
+            }
+
+            Section("Throttling") {
+                Stepper(value: $settings.tickThrottleMs, in: 50...500, step: 10) {
+                    LabeledContent("Tick throttle", value: "\(settings.tickThrottleMs) ms")
+                }
+                Text("Controls how often Python emits JSONL tick events. Higher = less UI churn on long runs.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Bundle") {
+                Stepper(value: $settings.maxBundleSizeWarningMb, in: 200...1000, step: 50) {
+                    LabeledContent("Max bundle size warning", value: "\(settings.maxBundleSizeWarningMb) MB")
+                }
+                Text("If the embedded Python bundle exceeds this, the build script warns. CI enforces 450 MB.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func pickFile(_ completion: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { completion(url.path) }
+    }
+
+    private func pickDir(_ completion: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        if panel.runModal() == .OK, let url = panel.url { completion(url.path) }
     }
 }
 
