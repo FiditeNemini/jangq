@@ -4887,3 +4887,41 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: continue the Swift Button/Toggle affordance sweep across non-Settings views.
 
 **Next iteration should pick:** continue Swift affordance sweep (step files + adoption sheets) OR audit jang-server for server-specific patterns (unbounded resource growth in long-running jobs, uncaught async failures).
+
+---
+
+## 2026-04-20 iteration 112 — Button affordance verification pass (no new bugs, audit complete)
+
+**Angle:** Iter-111 forecast: "continue Swift Button/Toggle affordance sweep across non-Settings views."
+
+**Deep trace walkthrough:**
+1. **Inventoried remaining 44 Button declarations** across adoption sheets + step files (iter-109/110 closed SettingsWindow's 13).
+2. **Adoption sheets (UsageExamplesSheet, GenerateModelCardSheet):** OK, Close, Retry, Copy, Save-to-file, lang-tab buttons — all wired to meaningful actions. M107 error-surfacing already in place for Save failures. No M62-class inert affordances.
+3. **Step files:**
+   - SourceStep: Choose Folder…, Continue → — both wired (iter-57 cancel wiring + iter-84 URL guards already in place).
+   - ArchitectureStep: Looks right → Profile — wired via `coord.active = .profile` + disabled gate (iter-56 M134).
+   - ProfileStep: Choose…, Start Conversion — wired + disabled-gate via allMandatoryPass.
+   - RunStep: Cancel, Continue → Verify, Retry ×2, Delete partial output, Copy Diagnostics — all wired + iter-93 M170 lifecycle cancel + iter-97 M23 file-not-found distinction + iter-92 M169 remediation.
+   - VerifyStep: 6 adoption-action buttons (Test Inference, Examples, Model Card, Publish HF, Reveal in Finder, Copy Path) + Convert another + Finish + Retry conversion — all wired.
+4. **Conclusion — no M62-class inert affordances remain outside what iter-108/110 already labeled.** The iter-110 forecast for "44-button sweep" yielded zero new bugs. Recording as verification pass per iter-88 M165's "no-new-bug audits are first-class work" meta-lesson.
+
+**Meta-lesson — bug-yield diminishing returns is a signal to pivot audit angle.** iter-101 through iter-110 each found user-visible or structural gaps. iter-111 (jang-server) found 3 silent-swallows by DIVERSIFYING surface. iter-112 (re-sweep Swift Buttons) found zero by re-visiting already-audited surface. **Rule: when a sweep yields zero after a recent thorough pass, pivot to an untouched surface or different angle rather than re-visiting.** The verification pass is still valuable as documentation ("as of iter-112 these 44 buttons are all wired"), just shouldn't consume the next 3 iters.
+
+**Items touched:** none closed (verification iter). Added an audit-coverage log line in this entry noting the 44-button sweep is complete.
+
+**Commit:** (this iteration, docs only — no code change)
+
+**Verification:** no test changes. All prior counts unchanged.
+
+**Closed-status tally:** 131 (iter 111), unchanged. Zero known bugs as of iter-112 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure (still open).
+- **NEW**: audit jang-server for server-specific anti-patterns (unbounded resource growth in long-running jobs, uncaught async failures, SQLite connection handling).
+- **NEW**: look at the unexamined repo subdirs — `examples/`, `docs/` scripts, model scripts.
+
+**Next iteration should pick:** jang-server server-specific anti-pattern sweep (fresh surface, likely high-yield given iter-111 found 3 bare-swallows in first pass), OR M80 audit baseline, OR scripts-in-examples/docs sweep.
