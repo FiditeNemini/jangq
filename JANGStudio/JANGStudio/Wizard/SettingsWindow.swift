@@ -352,10 +352,41 @@ private struct DiagnosticsTab: View {
 
 private struct UpdatesTab: View {
     @Bindable var settings: AppSettings
+
     var body: some View {
         Form {
-            Text("Updates settings — see commit 5")
-                .foregroundStyle(.secondary)
+            Section("Update channel") {
+                Picker("Channel", selection: $settings.updateChannel) {
+                    ForEach(UpdateChannel.allCases) { c in
+                        Text(c.displayName).tag(c)
+                    }
+                }
+                Toggle("Automatically check for updates", isOn: $settings.autoCheckForUpdates)
+                Text("JANG Studio v1.0 ships with manual updates. Automatic updates via Sparkle are planned for v1.1.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Button {
+                    if let url = URL(string: "https://github.com/jjang-ai/jangq/releases") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Label("Check for updates (browser)", systemImage: "arrow.down.circle")
+                }
+            }
+            Section("About") {
+                LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
+                LabeledContent("Build", value: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—")
+                HStack {
+                    Spacer()
+                    Button("View release notes") {
+                        if let url = URL(string: "https://github.com/jjang-ai/jangq/releases/latest") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()
