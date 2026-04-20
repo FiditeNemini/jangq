@@ -517,6 +517,166 @@ def audit_a18_examples_generatable(model_dir: Path) -> dict:
     return _ok(results=results)
 
 
+# ───────────────────────── A11 — VL preprocessor functional ─────────────
+
+_FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+def audit_a11_vl_preprocessor_functional(model_dir: Path) -> dict:
+    """Load the model's AutoProcessor and run it on a test image.
+
+    Pass: processor returns a dict-like with 'pixel_values' (or similar vision key)
+    that has a non-empty tensor.
+    Warn: `preprocessor_config.json` exists but processor load fails gracefully.
+    Skip (`n/a`): not a VL model.
+
+    Regenerate fixture::
+
+        from PIL import Image; import numpy as np
+        arr = np.zeros((64, 64, 3), dtype=np.uint8)
+        for y in range(64):
+            for x in range(64):
+                arr[y, x] = [x * 4 % 256, y * 4 % 256, (x + y) * 2 % 256]
+        Image.fromarray(arr).save('ralph_runner/fixtures/test_image.png')
+    """
+    if not (model_dir / "preprocessor_config.json").exists():
+        return _na("not a VL model (no preprocessor_config.json)")
+
+    img_path = _FIXTURE_DIR / "test_image.png"
+    if not img_path.exists():
+        return _warn(f"test image fixture missing at {img_path}")
+
+    try:
+        from transformers import AutoProcessor
+        from PIL import Image
+    except Exception as e:
+        return _fail(f"transformers / PIL import: {type(e).__name__}: {e}")
+
+    try:
+        processor = AutoProcessor.from_pretrained(str(model_dir), trust_remote_code=True)
+    except Exception as e:
+        return _fail(f"AutoProcessor load: {type(e).__name__}: {e}")
+
+    try:
+        image = Image.open(img_path).convert("RGB")
+    except Exception as e:
+        return _fail(f"open test image: {type(e).__name__}: {e}")
+
+    # Call with a minimal text prompt + image. Many VL processors require both.
+    try:
+        result = processor(images=image, text="Describe.", return_tensors="pt")
+    except Exception:
+        # Fallback — some processors only take images kwarg
+        try:
+            result = processor(images=image, return_tensors="pt")
+        except Exception as e:
+            return _fail(f"processor call: {type(e).__name__}: {e}")
+
+    # Verify we got something that looks like a vision feature
+    # Common keys: 'pixel_values', 'pixel_values_videos', 'image_embeds'
+    vision_keys = [k for k in ("pixel_values", "image_embeds", "pixel_values_videos") if k in result]
+    if not vision_keys:
+        # Processors sometimes return a custom object; fall back to checking any tensor-like field
+        try:
+            keys = list(result.keys())
+        except Exception:
+            keys = []
+        return _fail("no vision features in processor output", got_keys=keys)
+
+    key = vision_keys[0]
+    try:
+        shape = list(result[key].shape)
+    except Exception:
+        return _warn(f"vision output has unknown shape type", key=key)
+
+    if not shape or any(d == 0 for d in shape):
+        return _fail(f"vision output has degenerate shape {shape}", key=key)
+
+    return _ok(vision_key=key, shape=shape, dtype=str(result[key].dtype))
+
+
+# ───────────────────────── A12 — Video preprocessor functional ──────────
+
+def audit_a12_video_preprocessor_functional(model_dir: Path) -> dict:
+    """Load the model's AutoProcessor and run it on a test video frame sequence.
+
+    Pass: processor returns pixel_values_videos or similar video-specific key with
+    a non-empty tensor.
+    Skip (`n/a`): not a video-VL model (no video_preprocessor_config.json).
+
+    Regenerate fixture::
+
+        import numpy as np
+        frames = np.zeros((16, 32, 32, 3), dtype=np.uint8)
+        for t in range(16):
+            for y in range(32):
+                for x in range(32):
+                    frames[t, y, x] = [(x + t * 8) % 256, (y + t * 4) % 256, (x * y + t) % 256]
+        np.save('ralph_runner/fixtures/test_video_frames.npy', frames)
+    """
+    if not (model_dir / "video_preprocessor_config.json").exists():
+        return _na("not a video-VL model (no video_preprocessor_config.json)")
+
+    frames_path = _FIXTURE_DIR / "test_video_frames.npy"
+    if not frames_path.exists():
+        return _warn(f"test video fixture missing at {frames_path}")
+
+    try:
+        from transformers import AutoProcessor
+        import numpy as np
+    except Exception as e:
+        return _fail(f"imports: {type(e).__name__}: {e}")
+
+    try:
+        frames = np.load(frames_path)
+    except Exception as e:
+        return _fail(f"load video frames: {type(e).__name__}: {e}")
+
+    try:
+        processor = AutoProcessor.from_pretrained(str(model_dir), trust_remote_code=True)
+    except Exception as e:
+        return _fail(f"AutoProcessor load: {type(e).__name__}: {e}")
+
+    # Most video processors take a list of numpy arrays or a 4D array.
+    # Try multiple calling conventions.
+    result = None
+    last_err = None
+    attempts = [
+        lambda: processor(videos=[frames], text="Describe.", return_tensors="pt"),
+        lambda: processor(videos=frames, text="Describe.", return_tensors="pt"),
+        lambda: processor(videos=[list(frames)], text="Describe.", return_tensors="pt"),
+        lambda: processor(videos=[frames], return_tensors="pt"),
+    ]
+    for attempt in attempts:
+        try:
+            result = attempt()
+            break
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            continue
+    if result is None:
+        return _fail(f"all processor call attempts failed; last: {last_err}")
+
+    video_keys = [k for k in ("pixel_values_videos", "pixel_values", "video_embeds") if k in result]
+    if not video_keys:
+        try:
+            keys = list(result.keys())
+        except Exception:
+            keys = []
+        return _fail("no video features in processor output", got_keys=keys)
+
+    key = video_keys[0]
+    try:
+        shape = list(result[key].shape)
+    except Exception:
+        return _warn(f"video output has unknown shape type", key=key)
+
+    if not shape or any(d == 0 for d in shape):
+        return _fail(f"video output has degenerate shape {shape}", key=key)
+
+    return _ok(video_key=key, shape=shape, dtype=str(result[key].dtype))
+
+
 # ───────────────────────── Runner ──────────────────────────────────────────
 
 AUDIT_REGISTRY = {
@@ -528,6 +688,8 @@ AUDIT_REGISTRY = {
     "a7": ("Size vs estimate", audit_a7_size_estimate, False),
     "a8": ("Tool/reasoning parser preservation", audit_a8_parser_preservation, False),
     "a9": ("Special tokens preservation", audit_a9_special_tokens, True),   # required
+    "a11": ("VL preprocessor functional", audit_a11_vl_preprocessor_functional, False),
+    "a12": ("Video preprocessor functional", audit_a12_video_preprocessor_functional, False),
     "a15": ("Inference works", audit_a15_inference, True),                  # required
     "a16": ("Chat template functional", audit_a16_chat_template_functional, False),
     "a17": ("Model card generatable", audit_a17_modelcard_generatable, True),  # required
@@ -572,7 +734,7 @@ def run_audits(model_dir: Path, rows: list[str], convert_wall_s: float | None = 
 def main() -> None:
     p = argparse.ArgumentParser(prog="ralph_audit")
     p.add_argument("--model", required=True, help="Path to converted JANG/JANGTQ model dir")
-    p.add_argument("--rows", default="a1,a2,a3,a4,a5,a7,a8,a9,a15,a16,a17,a18",
+    p.add_argument("--rows", default="a1,a2,a3,a4,a5,a7,a8,a9,a11,a12,a15,a16,a17,a18",
                    help="Comma-separated audit rows to run")
     p.add_argument("--convert-wall-s", type=float, default=None)
     p.add_argument("--baseline-wall-s", type=float, default=None)

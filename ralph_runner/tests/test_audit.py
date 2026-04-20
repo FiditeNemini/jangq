@@ -118,3 +118,24 @@ def test_a17_fails_without_jang_config(tmp_path):
     from ralph_runner.audit import audit_a17_modelcard_generatable
     r = audit_a17_modelcard_generatable(tmp_path)
     assert r["status"] == "fail"
+
+
+def test_a11_na_when_not_vl(mock_model_dir):
+    from ralph_runner.audit import audit_a11_vl_preprocessor_functional
+    r = audit_a11_vl_preprocessor_functional(mock_model_dir)
+    assert r["status"] == "n/a"
+
+
+def test_a12_na_when_not_video(mock_model_dir):
+    from ralph_runner.audit import audit_a12_video_preprocessor_functional
+    r = audit_a12_video_preprocessor_functional(mock_model_dir)
+    assert r["status"] == "n/a"
+
+
+def test_registry_has_a11_a12():
+    from ralph_runner.audit import AUDIT_REGISTRY
+    assert "a11" in AUDIT_REGISTRY
+    assert "a12" in AUDIT_REGISTRY
+    # Both are warn-only
+    assert AUDIT_REGISTRY["a11"][2] is False
+    assert AUDIT_REGISTRY["a12"][2] is False
