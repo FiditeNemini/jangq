@@ -48,17 +48,21 @@ enum PublishService {
     private static func _invoke(modelPath: URL, repo: String, isPrivate: Bool, token: String, isDryRun: Bool) async throws -> PublishResult {
         guard !token.isEmpty else { throw PublishServiceError.missingToken }
 
+        // SECURITY: The token is passed via an environment variable (HF_HUB_TOKEN)
+        // rather than argv. A 200 GB publish can take 30+ minutes; a command-line
+        // token is visible to any user running `ps aux` (or macOS Activity Monitor)
+        // for the whole window. Env vars are only visible to the process itself
+        // and to root. Related audit item: M41.
         var args: [String] = [
             "-m", "jang_tools", "publish",
             "--model", modelPath.path,
             "--repo", repo,
-            "--token", token,
             "--json",
         ]
         if isPrivate { args.append("--private") }
         if isDryRun { args.append("--dry-run") }
 
-        let data = try await invoke(args: args)
+        let data = try await invoke(args: args, token: token)
         do {
             return try JSONDecoder().decode(PublishResult.self, from: data)
         } catch {
@@ -66,20 +70,28 @@ enum PublishService {
         }
     }
 
-    private nonisolated static func invoke(args: [String]) async throws -> Data {
+    private nonisolated static func invoke(args: [String], token: String) async throws -> Data {
         try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global().async {
                 do {
                     let proc = Process()
                     proc.executableURL = BundleResolver.pythonExecutable
                     proc.arguments = args
+                    var env = ProcessInfo.processInfo.environment
+                    env["HF_HUB_TOKEN"] = token
+                    env["PYTHONUNBUFFERED"] = "1"
+                    proc.environment = env
                     let out = Pipe(); let err = Pipe()
                     proc.standardOutput = out
                     proc.standardError = err
                     try proc.run()
                     proc.waitUntilExit()
                     if proc.terminationStatus != 0 {
-                        let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                        let stderrData = err.fileHandleForReading.readDataToEndOfFile()
+                        let stderrRaw = String(data: stderrData, encoding: .utf8) ?? ""
+                        // Extra belt-and-suspenders: if the Python side ever leaks
+                        // the token into an error message, scrub it before surfacing.
+                        let stderr = stderrRaw.replacingOccurrences(of: token, with: "<redacted>")
                         cont.resume(throwing: PublishServiceError.cliError(code: proc.terminationStatus, stderr: stderr))
                         return
                     }

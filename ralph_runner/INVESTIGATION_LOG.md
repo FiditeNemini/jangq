@@ -140,3 +140,38 @@ Each entry records ONE deep trace. Created by iterations under the new Ralph pro
 **New questions added:** 5 (M36-M40). Net +4 open items after closing M35.
 
 **Next iteration should pick:** Category A (adopter user journey, never done) — trace every step an adopter takes AFTER they've converted a model: model card generation, usage examples export, HF publish, and critically WHAT THE ADOPTER'S END-USER EXPERIENCES when they try to load the uploaded model. Or Category E (M-spawned) — pick one of M02/M03/M07 (mid-priority data flows). Rotating away from Cat D now that we've done one.
+
+---
+
+## 2026-04-19 iteration 6 — adopter journey: publish to HuggingFace (Category A, never done)
+
+**Angle:** First Category A trace. Put the adopter hat on: they converted a 200 GB model, clicked "Publish to HuggingFace" in the wizard, entered a repo like `dealignai/MyModel-JANG_4K`, pasted their HF token. Trace the token through Swift → Python → HF API. Audit every place the token could leak.
+
+**Deep trace walkthrough:**
+1. Read `PublishService.swift:48-92` (Swift side).
+2. **BUG M41 CONFIRMED (SECURITY):** Line 55 builds argv with `"--token", token` as plain-text positional. `proc.arguments` on macOS Process ends up as the actual argv of the child `python3` process. For the entire duration of `upload_folder` (which for a 200 GB model means ~30 minutes to hours), `ps aux | grep jang_tools` would show the token to ANY local user, Activity Monitor displays it under Open Files, and macOS CrashReporter captures it if the child ever crashes. This is a plain credentials-in-argv vulnerability.
+3. Read `publish.py:22-34` (Python side). Line 29 `token = args.token   # assume literal token string` — accepts literal tokens on argv unconditionally. No rejection path.
+4. **Fix (defense in depth — both sides):**
+   - **Swift side:** PublishService now sets `HF_HUB_TOKEN` in the child's environment (env vars are visible only to the process and root, not to `ps aux`). Argv no longer contains `--token`. Stderr from failure paths is additionally scrubbed: `stderrRaw.replacingOccurrences(of: token, with: "<redacted>")` before the error bubbles up to the UI — covers the case where an HF exception embeds the Authorization header.
+   - **Python side:** `--token <value>` is now ONLY accepted as a FILE PATH. Any non-file argument value triggers a clean exit 2 with hint pointing at HF_HUB_TOKEN. This is a layer-2 defense: even if something down the line starts passing tokens on argv again, the Python side refuses. Help text updated. `except Exception as e` on the upload path scrubs the token from the exception string before printing.
+5. **Tests:** 2 new regression tests in `test_publish.py`:
+   - `test_cli_rejects_literal_token_via_argv` — asserts exit 2 AND that the literal token value does NOT appear in stderr (which would defeat the purpose — would end up in shell history, CI logs, etc.).
+   - `test_cli_accepts_token_file` — asserts the file-path branch still works (dry-run completes successfully).
+   Plus existing `test_cli_rejects_missing_token` and `test_cli_dry_run` tests still pass.
+6. **Verification:** 227/227 jang-tools tests pass, 65/65 Swift tests pass.
+
+**Items touched:**
+- M41 [x] — real security bug fixed (token in argv → env var only, with scrubbing on both sides)
+- M42-M47 [ ] — 6 new publish-adoption-adjacent questions spawned:
+  - M42: no cancellation on Python subprocess during verify
+  - M43: publish progress never streams — user sees spinner for 30+ min with no ETA
+  - M44: commit_url is emitted by Python but not decoded by Swift (most useful field is dropped)
+  - M45: modelcard.py generate_card silently catches Exception and hides per-arch failures
+  - M46: no repo-name validation before dispatching (cryptic HF error on "my model/repo")
+  - M47: private vs public repo handling in modelcard link generation untested
+
+**Commit:** (this iteration)
+
+**New questions added:** 6 (M42-M47). Net +5 open items after closing M41.
+
+**Next iteration should pick:** Continue Category A (more adopter-journey surface area): model card generation for every supported arch (M45), OR the commit_url/progress gap (M43/M44) which together are the "this took 30 minutes and I have no idea what happened" UX failure. Alternatively rotate to Category K (Ralph runner on macstudio — untouched) since we're now 6 iterations deep and have never looked at the test harness that's supposed to be proving the app works.

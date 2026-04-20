@@ -19,18 +19,33 @@ def cmd_publish(args) -> None:
         print(f"ERROR: model dir not found: {model_dir}", file=sys.stderr)
         sys.exit(2)
 
-    # Resolve HF token
+    # Resolve HF token. PRIORITY:
+    #   1. --token FILEPATH  (read token from a file — safe; file mode 600 recommended)
+    #   2. HF_HUB_TOKEN env var  (safe — visible only to the process and root)
+    #   3. HUGGING_FACE_HUB_TOKEN env var  (HF's canonical name)
+    #
+    # Historical note (M41): `--token LITERAL` used to be accepted. It was
+    # removed because Swift's Process call would expose the token in `ps aux`
+    # to any local user for the ENTIRE duration of a multi-hour upload. The
+    # Swift PublishService now always sets HF_HUB_TOKEN in the child env.
     token = None
     if args.token:
         token_path = Path(args.token)
         if token_path.exists():
             token = token_path.read_text().strip()
         else:
-            token = args.token   # assume literal token string
-    else:
+            # Refuse to accept literal tokens on argv — they leak via `ps aux`.
+            print(
+                "ERROR: --token must be a FILE PATH to a token file. "
+                "To pass a literal token, set HF_HUB_TOKEN env var instead "
+                "(argv is visible to `ps aux` for the full upload window).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    if not token:
         token = os.environ.get("HF_HUB_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if not token:
-        print("ERROR: set HF_HUB_TOKEN env var or pass --token", file=sys.stderr)
+        print("ERROR: set HF_HUB_TOKEN env var or pass --token <filepath>", file=sys.stderr)
         sys.exit(2)
 
     # Ensure README.md exists with a generated card
@@ -75,7 +90,12 @@ def cmd_publish(args) -> None:
                 "commit_url": str(info),
             }
         except Exception as e:
-            print(f"ERROR: publish failed: {type(e).__name__}: {e}", file=sys.stderr)
+            # Scrub the token from the exception text before printing — some HF
+            # errors include the Authorization header in the exception message.
+            msg = f"{type(e).__name__}: {e}"
+            if token and token in msg:
+                msg = msg.replace(token, "<redacted>")
+            print(f"ERROR: publish failed: {msg}", file=sys.stderr)
             sys.exit(3)
 
     if args.json:
@@ -92,7 +112,10 @@ def register(subparsers) -> None:
     p.add_argument("--model", required=True, help="Path to converted model dir")
     p.add_argument("--repo", required=True, help="Target HF repo id (e.g., my-org/my-model-JANG_4K)")
     p.add_argument("--private", action="store_true", help="Create as private repo")
-    p.add_argument("--token", help="HF token (env HF_HUB_TOKEN is used if not passed)")
+    p.add_argument("--token",
+                   help="Path to a file containing the HF token. "
+                        "For literal tokens set HF_HUB_TOKEN env var "
+                        "(argv leaks via `ps aux` for the whole upload).")
     p.add_argument("--regenerate-card", action="store_true",
                    help="Overwrite existing README.md with freshly generated card")
     p.add_argument("--dry-run", action="store_true",
