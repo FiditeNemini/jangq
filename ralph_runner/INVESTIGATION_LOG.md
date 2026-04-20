@@ -1289,3 +1289,48 @@ Three different Swift async primitives (AsyncThrowingStream from actor, AsyncThr
 - M104 (add integration tests for the 6 service cancel paths — if regressions surface)
 - Continue Cat D with `feedback_model_checklist.md` (untouched, last Cat D memory)
 - Spawn audit on a NEW class of bug: grep for `proc.waitUntilExit()` directly (without any async wrapping) — if any exist, they'd block the calling thread AND miss cancel.
+
+---
+
+## 2026-04-20 iteration 34 — M105 bare-waitUntilExit sweep finds SourceDetector
+
+**Angle:** Execute the last bullet from iter-33's forecast: grep for bare `proc.waitUntilExit()` outside `withCheckedContinuation` wrappers. If any exist, they block the calling thread AND miss Task-cancel propagation.
+
+**Deep trace walkthrough:**
+1. `grep -n "waitUntilExit" JANGStudio/JANGStudio/` — 11 hits.
+2. Filtered out the 9 that are inside iter-33's now-wrapped `withCheckedContinuation { DispatchQueue.global().async { ... waitUntilExit() ... } }` pattern. Also filtered comment references (ModelCardService line 69, InferenceRunner line 104, PostConvertVerifier line 147).
+3. **Two bare sites remain:**
+   - `SourceStep.swift:286` — `SourceDetector.inspect(url:)`, `async throws`. Uses `proc.waitUntilExit()` INSIDE the async function. Bug.
+   - `DiagnosticsBundle.swift:105` — `@MainActor` static, synchronous. Called from a button tap. Blocks main thread during `ditto -c -k`. Smaller issue (small bundle zips are ≤1s) but still a main-thread block.
+4. **SourceDetector.inspect bug class:** synchronous waitUntilExit in an async function is a pure antipattern. Swift `async` functions don't automatically offload to a background thread; `waitUntilExit` is a blocking kernel call that will hold whatever thread the async function is running on. SourceStep calls `detectAndRecommend` via `Task { await ... }` which inherits the @MainActor isolation from the view → subprocess blocks the main thread. Plus no cancel propagation.
+5. **Realistic user failure:** user picks folder A → Task A starts + subprocess A spawns, blocks main → user sees UI freeze → user switches to folder B before A completes → Task A cancels but subprocess A continues until exit → main thread unblocks → Task B starts + spawns subprocess B → user has two inspect-source processes running on the same Python interpreter bundle, double the memory footprint, each reading ~100 MB of config data and safetensors headers. Resource waste + perceived lag.
+6. **Fix:** applied the exact template from iter-33's sweep. Zero delta from proven pattern. Only tricky bit was hoisting the `data` read outside the continuation so the subsequent JSONDecoder + dtype dispatch + ArchitectureSummary construction stays outside the DispatchQueue closure.
+7. **DiagnosticsBundle.swift:105 deferred (M106):** changing it from synchronous to async would ripple through RunStep's "Copy Diagnostics" button. For a small bundle (<5 MB) the block is ~1s and invisible. Trade-off ruled "lower priority than the SourceDetector fix" and logged.
+
+**Items touched:**
+- M105 [x] — SourceDetector.inspect now uses the Task-cancellable subprocess pattern.
+
+**Commit:** (this iteration)
+
+**Verification:** 122 Swift tests pass unchanged (iter 33 is pure-plumbing; no test depends on the sync vs async shape beyond the return type).
+
+**Closed-status tally:** 47 (prior) + M105 = 48 closed / 83 total = 58% closure rate.
+
+**Cross-layer cancel theme final tally (iters 30-34, 5 iters):**
+- M96 PublishService streaming
+- M98 PythonRunner
+- M100 InferenceRunner
+- M101 6 services + PostConvertVerifier
+- M105 SourceDetector.inspect
+
+**5 audit items closed, 11 invoke sites patched.** Every subprocess-bridging path in the Swift codebase (UI-initiated, per grep-audit) is now cancel-aware. The ProcessHandle + withTaskCancellationHandler pattern is proven across 4 Swift primitive shapes (streams from enums, streams from actors, one-shot async in actors, one-shot async with DispatchQueue).
+
+**Meta-lesson that stuck:** grep-audit after a confirmed bug finds more instances of the same pattern. iter 30 found 1; iter 33 found 7; iter 34 found 1 more. Total 11 invoke sites from a single 4-line pattern-match regex. Worth running whenever a new class of bug is confirmed.
+
+**Next iteration should pick:** Now that the subprocess-cancel theme is closed, the forecast list returns:
+- M87 (Mistral 4 live RoPE validation — needs real convert)
+- M88 (publish sheet init-vs-task field-lifecycle unification, iter 25)
+- M97 (partial HF repo cleanup — follow-up from M96)
+- M106 (DiagnosticsBundle.write main-thread block — spawned this iter)
+- Cat D with `feedback_model_checklist.md` (untouched)
+- A new audit theme: what ELSE could a grep-audit catch? Candidates: bare `try?` that swallows errors (silent failures); `DispatchQueue.main.async` inside async contexts (cross-isolation hops); force-unwraps `!` in production code paths.

@@ -278,17 +278,43 @@ enum SourceDetector {
     }
 
     static func inspect(url: URL) async throws -> ArchitectureSummary {
-        let proc = Process()
-        proc.executableURL = BundleResolver.pythonExecutable
-        proc.arguments = ["-m", "jang_tools", "inspect-source", "--json", url.path]
-        let out = Pipe(); proc.standardOutput = out; proc.standardError = Pipe()
-        try proc.run()
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
-            throw NSError(domain: "SourceDetector", code: Int(proc.terminationStatus),
-                          userInfo: [NSLocalizedDescriptionKey: "inspect-source exited \(proc.terminationStatus)"])
+        // M105 (iter 34): previously used synchronous `proc.waitUntilExit()`
+        // inside this `async` function, blocking whatever thread the async
+        // context was running on (often the main actor via SourceStep's
+        // .task) AND missing Task-cancel propagation. A user picking folder
+        // A then quickly picking folder B would orphan the A-subprocess
+        // AND momentarily freeze the UI. Same fix template as iter 33's
+        // service-sweep: DispatchQueue for the subprocess thread +
+        // withTaskCancellationHandler + ProcessHandle for SIGTERM on cancel.
+        let handle = ProcessHandle()
+        let data: Data = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                DispatchQueue.global().async {
+                    do {
+                        let proc = Process()
+                        proc.executableURL = BundleResolver.pythonExecutable
+                        proc.arguments = ["-m", "jang_tools", "inspect-source", "--json", url.path]
+                        let out = Pipe(); proc.standardOutput = out; proc.standardError = Pipe()
+                        try proc.run()
+                        handle.set(process: proc)
+                        proc.waitUntilExit()
+                        if proc.terminationStatus != 0 {
+                            cont.resume(throwing: NSError(
+                                domain: "SourceDetector",
+                                code: Int(proc.terminationStatus),
+                                userInfo: [NSLocalizedDescriptionKey: "inspect-source exited \(proc.terminationStatus)"]))
+                            return
+                        }
+                        cont.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
+                    } catch {
+                        cont.resume(throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            handle.cancel()
         }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
+
         let info = try JSONDecoder().decode(SourceInfo.self, from: data)
         let dtype: SourceDtype = switch info.dtype {
             case "bfloat16": .bf16
