@@ -1954,3 +1954,41 @@ Pivoted to re-audit M121. Iter 45 closed the text path but the VL path is a SEPA
 - peer-helper parameter-asymmetry grep-audit (iter 47 generalization — `_detect_*` / `_resolve_*` family sweep).
 
 **Next iteration should pick:** re-grep M120 coverage (applies this iter's head_limit meta-lesson; could find more real bugs) OR peer-helper asymmetry sweep.
+
+## 2026-04-20 iteration 49 — M120 re-grep verification (first application of iter-48 meta-rule)
+
+**Angle:** Iter 48's meta-lesson was explicit: "after any pattern-class fix, re-run the pattern grep with `head_limit: 0` to verify zero offenders remain." M120 (iter 43) fixed `json.loads(` user-boundary bugs — but iter 43 used `head_limit=50` via terminal Grep. Could have silently missed sites. Time to verify.
+
+**Deep trace walkthrough:**
+1. **Re-grep with head_limit=0:** `grep -nE "json\.loads\(" jang-tools/jang_tools/` returned **45 sites across 17 files**. That's more than iter 43 saw (iter 43 noted "43 files", which I now read as "sites" — ambiguous).
+2. **Classify each site by trust boundary:**
+   - 2 sites cross the user-input boundary (`inspect_source.py:51` and `recommend.py:332`). Both already fixed in iter 43 with M120 error-path: explicit try/except, file path in error, stderr clean of traceback, Swift `SourceStep.swift:301-306` reads and surfaces stderr. Verified.
+   - 5 safetensors-header sites parse binary JSON headers at the start of `.safetensors` shards. Malformed header = corrupt source file; the safetensors library itself already validates. These correctly surface raw JSONDecodeError because that IS a corrupted-source signal. Leave as-is.
+   - 34 post-convert internal reads (loader.py: 14, others scattered). These read files WE wrote during convert. Per the system prompt's "only validate at system boundaries" rule, internal trust: skip.
+   - 3 sites in `examples.py:detect_capabilities` read `<converted>/config.json`, `jang_config.json`, `tokenizer_config.json`. These read files WE wrote, so low risk, BUT the error message quality is worse than M120's user-boundary fix. Logged as M126 polish.
+3. **M120's coverage is correct.** No hidden bugs from the head_limit truncation.
+4. **Verification is the result.** This iter produces no code change. That's fine — iter 44's Cat D pass also produced 0 code changes but logged a real finding (M121, which then became iters 45+47). Iter 49 is the mirror: finding is *negative* (nothing missing), but documenting the negative is how we know the M120 class is actually done.
+
+**Meta-lesson reinforcement.** The iter-48 rule "re-grep after the fix" is cheap to apply — 3 minutes. And the ROI is asymmetric: most of the time you confirm coverage (like this iter), but the 1-in-5 time you find a missed site, you catch a real bug the user would have hit first. Build the habit.
+
+**Related polish finding (M126, deferred):** `examples.py`'s top-level `except Exception: print(f'ERROR: {type(e).__name__}: {e}')` loses the filename. A corrupted `<converted>/jang_config.json` would produce `ERROR: JSONDecodeError: Expecting value: line 1 column 1 (char 0)` — same vs-traceback improvement iter-43 already won, but without the *which file* context. Not user-boundary so not urgent; logged for a future cleanup iter.
+
+**Items touched:**
+- M-audit (iter 49) [x] — verification pass, negative result confirms M120 completeness.
+- M126 [ ] — documented as deferred polish item with concrete scope.
+
+**Commit:** (this iteration — documentation only)
+
+**Verification:** No source-code changes. 287 Python + 132 Swift + 73 ralph tests unchanged.
+
+**Closed-status tally:** 62 (iter 48) + M-audit iter 49 = 62 closed + 1 audit pass / 97 total = 63.9% closure rate. M126 opened → 97 items, 62 closed.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (iter-30 spawn)
+- M117 in-wizard inference smoke (feedback_model_checklist.md rule 3 — multi-iter feature)
+- M124 full-suite Swift-test hang (environmental, still not diagnosed — needs a dedicated debug iter)
+- M126 examples.py error-message polish (low-priority, ~10 lines)
+- peer-helper parameter-asymmetry grep-audit (iter 47 generalization)
+- broader `open(` without `with` audit — non-JSON call sites.
+
+**Next iteration should pick:** peer-helper asymmetry grep-audit (iter 47 generalization — likely to find at least one missing-parameter bug in the `_detect_*` / `_resolve_*` / `_load_*` / `render_*` family) OR M126 polish if wanting a small concrete close.
