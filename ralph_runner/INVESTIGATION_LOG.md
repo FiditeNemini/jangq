@@ -3839,3 +3839,50 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: hardlink handling. Rare case but if a user hardlinks shards (cp -l), does convert see them correctly?
 
 **Next iteration should pick:** M167 broken-symlink diagnostic (concrete, small, HF-hub-relevant), OR progressLog cleanup (vestigial code tidy), OR rapid-click debounce (UX polish).
+
+---
+
+## 2026-04-20 iteration 90 — M167 broken-symlink diagnostic (follow-up from iter-89)
+
+**Angle:** Iter-89 M166 flagged the broken-symlink case as a UX gap. Small, concrete, HF-hub-relevant. Good candidate to close before moving to different audit surfaces.
+
+**Deep trace walkthrough:**
+1. **Confirmed the failure mode** by writing the test first. A tmpdir with valid config.json + a `safetensors` path that's a dangling symlink: `inspect-source` raises a `FileNotFoundError` on the first `.stat()` call in `_total_bytes`. Bare traceback on stderr. Exit code non-zero. User sees temp paths, pathlib internals, and no hint that this is a cache-recovery situation. Red phase confirmed — classic iter-21 M120 "cryptic traceback" violation.
+2. **Thought about fix scope.** Two options:
+   - **(a) Catch FileNotFoundError at the error site** (inside `_total_bytes` + `_sniff_dtype` try-block). Pro: minimal change. Con: scattered — one try-except per stat/open site; future additions must remember to wrap.
+   - **(b) Pre-validate shards** once near the top of `cmd_inspect_source`. Pro: single guard; any shard enumerated by `glob("*.safetensors")` is guaranteed readable before we proceed. Con: slight upfront cost (one `.exists()` per shard ≈ microseconds).
+   Went with (b). Path.exists() returns False for dangling symlinks, which gives a clean check. Packaged as `_find_broken_shard(model_path) -> Path | None` returning the FIRST broken shard (so the error names a specific file) or None (clean).
+3. **Designed the error message** to include everything the user needs:
+   - Broken shard basename (to locate in their file browser).
+   - Target the symlink points to via `resolve(strict=False)` — crucial: `strict=True` would raise on a dangling link; `strict=False` returns the formal target path. This tells the user WHICH blob went missing.
+   - Exact recovery command: `huggingface-cli download <model-name>`. `src.name` gives the snapshot-hash directory name; for HF cache that's the <hash> which isn't quite the model name, but it's close enough for the user to grep. Could refine to detect the model-name from the upstream `../../../models--*` path, but that's fragile — keeping the message pragmatic.
+   - Full source path for debugging.
+4. **Verified no regressions** by running the full Python test suite: 351 passed (+1 from this iter's test), 7 skipped (pre-existing). The 2 iter-89 symlink tests still pass.
+
+**Meta-lesson — surface remote-dependency errors with the REMEDIATION command, not just the symptom.** The user's mental model is task-oriented ("I want to convert this model"), not file-system-oriented ("why is this symlink broken?"). Error messages that say "shard X is broken — re-download via `huggingface-cli download Y`" match the mental model; "FileNotFoundError: /path/to/thing" doesn't. Pattern for future diagnostic fixes: always include the command or next-action that fixes the problem, not just a description of what went wrong.
+
+**Meta-lesson — `strict=False` on `Path.resolve()` lets you INSPECT dangling symlinks without exception.** I didn't know this before today. Useful anywhere you want to describe a symlink's target for diagnostic purposes (logs, error messages) without causing the describe-action to itself fail.
+
+**Meta-lesson — prefer skip-loud-fail over skip-and-continue when the partial state would fail downstream anyway.** A broken shard means convert would fail 5 seconds in with "safetensors load failed." Pre-checking at inspect-source time is cheap, and the user is still at Step 1 where fixing the cache is lossless. Filtering out broken shards + continuing would mask the real problem and let the user commit to a 30-minute convert before hitting the same error.
+
+**Items touched:**
+- M167 [x] — `_find_broken_shard` helper + actionable diagnostic in `cmd_inspect_source`. 1 new regression test. No breakage of existing 350 Python tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 9 test_inspect_source tests pass (was 8, +1). 351 total Python tests pass. Swift unchanged. Ralph 73 unchanged.
+
+**Closed-status tally:** 106 (iter 89) + M167 = 107 items touched, all closed. Zero known bugs as of iter-90 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: PublishToHuggingFaceSheet dead `progressLog` cleanup.
+- **NEW**: rapid-click debouncing on "Choose Folder…".
+- **NEW**: NSOpenPanel cancel-path hygiene.
+- **NEW**: unicode/emoji in prompt field — does the safetensors header parser survive?
+- **NEW**: apply the "remediation-command in error messages" pattern sweep across other error paths (RunStep failure messages, preflight failures, publish errors — do they all tell the user WHAT TO DO?).
+
+**Next iteration should pick:** remediation-command sweep (meta-lesson from this iter, small-scope audit pass across error surfaces), OR dead progressLog cleanup (vestigial code), OR rapid-click debounce.

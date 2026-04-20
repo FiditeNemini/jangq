@@ -42,6 +42,21 @@ def _total_bytes(model_path: Path) -> int:
     return sum(f.stat().st_size for f in model_path.glob("*.safetensors"))
 
 
+def _find_broken_shard(model_path: Path) -> Path | None:
+    """M167 (iter 90): return the first shard that is a dangling symlink,
+    or None if all shards resolve. huggingface_hub caches symlink
+    `snapshots/<hash>/*.safetensors` to `blobs/<sha>`; a `git gc`-style
+    prune on the cache (or a disk-failure mid-download) can leave the
+    snapshot symlink pointing at a missing blob. Without this guard,
+    `_total_bytes` raises a bare FileNotFoundError on the first
+    `f.stat()` and the user sees a cryptic Python traceback instead of
+    an actionable "shard broken, re-download" message."""
+    for f in model_path.glob("*.safetensors"):
+        if not f.exists():   # .exists() returns False for dangling symlinks
+            return f
+    return None
+
+
 def cmd_inspect_source(args) -> None:
     src = Path(args.model)
     cfg_path = src / "config.json"
@@ -71,6 +86,20 @@ def cmd_inspect_source(args) -> None:
         print(
             f"ERROR: config.json at {cfg_path} has a top-level "
             f"{type(cfg).__name__}, expected a JSON object",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # M167 (iter 90): pre-validate shards so a broken symlink (HF cache
+    # with a git-gc'd blob) surfaces as an actionable diagnostic instead
+    # of the bare FileNotFoundError traceback that _total_bytes would
+    # otherwise produce on its first stat() call.
+    broken = _find_broken_shard(src)
+    if broken is not None:
+        print(
+            f"ERROR: shard {broken.name} is a broken symlink "
+            f"(points to {broken.resolve(strict=False)}, target does not exist). "
+            f"Re-download the model via `huggingface-cli download {src.name}` "
+            f"or clear the HF cache and re-snapshot. Source: {src}",
             file=sys.stderr,
         )
         sys.exit(2)

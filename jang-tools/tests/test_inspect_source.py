@@ -158,6 +158,34 @@ def test_inspect_source_handles_symlinked_shards(tmp_path):
     assert data["model_type"] == "qwen3_5_moe"
 
 
+def test_inspect_source_broken_symlink_emits_clean_error(tmp_path):
+    """M167 (iter 90): HF cache with a git-gc'd blob leaves a dangling
+    symlink in the snapshot dir. Pre-M167, inspect_source raised a bare
+    FileNotFoundError traceback when stat() followed the dangling link —
+    user saw cryptic multi-line Python stack with no hint of what to do.
+    Post-M167, emit a plain-English "this shard is a broken symlink,
+    re-download the model" message and exit non-zero. Matches iter-21 M120
+    "no cryptic tracebacks" contract."""
+    (tmp_path / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5_moe",
+        "num_hidden_layers": 2,
+        "hidden_size": 128,
+    }))
+    # Dangling symlink: target never existed.
+    broken = tmp_path / "model-00001-of-00001.safetensors"
+    broken.symlink_to(tmp_path / "nonexistent_blob")
+
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "inspect-source", "--json", str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    _assert_clean_error(r, expect_phrase="broken symlink")
+    # Also surface the specific shard name so the user can identify what's broken.
+    assert "model-00001-of-00001.safetensors" in r.stderr, (
+        f"stderr must name the broken shard so user can locate it in the cache. Got:\n{r.stderr}"
+    )
+
+
 def test_inspect_source_handles_symlinked_directory(tmp_path):
     """User points at a symlinked directory (e.g. ~/my-model -> ~/.cache/hf/…/snapshot).
     Both the directory AND the shards-in-directory may be symlinks."""
