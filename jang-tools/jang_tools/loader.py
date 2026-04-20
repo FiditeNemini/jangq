@@ -44,34 +44,18 @@ def _find_config_path(model_path: Path) -> Optional[Path]:
     return None
 
 
-def _read_config_or_raise(path: Path, *, purpose: str) -> dict:
-    """M151 (iter 74): entry-point config reader that raises ValueError
-    with file-path + purpose context on failure.
+# M152 (iter 75): migrated from local M151 copies to the shared helpers
+# in _json_utils. Keep these aliases for minimum diff to the call sites
+# (4 sites refer to _read_config_or_raise / _read_config_or_none).
+from ._json_utils import (
+    read_json_object as _read_config_or_raise_base,
+    read_json_object_safe as _read_config_or_safe,
+)
 
-    Mirrors the template crystallized in M148 (jangspec.manifest),
-    M149 (format.reader), and M126 (examples) — same raise-contract,
-    local copy to avoid cross-subpackage imports. Used by
-    ``load_jang_model`` / ``load_jang_vlm_model`` / the detection
-    helpers so corrupt config.json / jang_config.json produces a
-    clean message instead of a cryptic JSONDecodeError traceback.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"could not read {purpose} at {path}: {exc}") from exc
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"{purpose} at {path} is not valid JSON "
-            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
-        ) from exc
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"{purpose} at {path} has a top-level {type(data).__name__}, "
-            f"expected a JSON object"
-        )
-    return data
+
+def _read_config_or_raise(path: Path, *, purpose: str) -> dict:
+    """Raise-contract thin alias → shared _json_utils.read_json_object."""
+    return _read_config_or_raise_base(path, purpose=purpose)
 
 
 def _read_config_or_none(path: Path) -> Optional[dict]:
@@ -80,15 +64,9 @@ def _read_config_or_none(path: Path) -> Optional[dict]:
     which are part of the "can we handle this at all?" probe surface —
     they must tolerate corrupt files and return False upstream, not
     crash the entire wizard's source-detection step.
-
-    Pre-M151 these functions did bare ``json.loads`` and raised on
-    corrupt JSON, which propagated cryptic tracebacks up to Swift's
-    SourceStep detector.
     """
-    try:
-        return _read_config_or_raise(path, purpose="config")
-    except ValueError:
-        return None
+    data, _err = _read_config_or_safe(path, purpose="config")
+    return data
 
 
 def is_jang_model(model_path: str | Path) -> bool:

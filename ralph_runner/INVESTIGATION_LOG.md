@@ -3108,3 +3108,56 @@ Three iters building the same pattern — it's now a template. Future read-side 
 - **NEW**: extract shared `_json_utils` module if more read-side sites need migration (5+ local copies of the template are now in capabilities.py, examples.py, format/reader.py, jangspec/manifest.py, loader.py — worth consolidating).
 
 **Next iteration should pick:** extract `_json_utils` shared module (crystallization across 5 local copies) OR continue Python-side migration (routing_profile.py).
+
+## 2026-04-20 iteration 75 — M152 extract shared `_json_utils` across 5 local copies
+
+**Angle:** Iter-74 forecast: "extract `_json_utils` shared module (crystallization across 5 local copies)." Iter-71 M149 established the "extract at 3+ sites" threshold; iter-75 acts on it.
+
+**Deep trace walkthrough:**
+1. **Inventory of local copies accumulated across iters 70-74:**
+   - iter-70 M148 `jangspec/manifest.py` — inline in `load_manifest`.
+   - iter-71 M149 `format/reader.py` — private `_read_json_object`.
+   - iter-72 M150 `capabilities.py` — private `_safe_load_json_dict` (tuple-variant).
+   - iter-73 M126 `examples.py` — private `_read_json_object` (exact duplicate of reader).
+   - iter-74 M151 `loader.py` — private `_read_config_or_raise` + `_read_config_or_none`.
+2. **Two distinct contracts** across the 5 copies:
+   - Raise: 3 sites (reader, manifest, examples) + 1 half (loader's `_or_raise`).
+   - Tuple: 1 site (capabilities) + 1 half (loader's `_or_none`).
+3. **Design two functions, not one.** A single `read_json_object(path, *, purpose, raise_on_error=True)` with a flag parameter would violate the "no flag-args for different behaviors" rule (return types differ! flag-arg can't have heterogeneous return). Keep them separate.
+4. **Migration strategy — thin aliases at call sites.** Each call site keeps its old private function NAME, but rewrites the body to delegate:
+   ```python
+   from ._json_utils import read_json_object as _read_json_object
+   ```
+   Minimum call-site diff. A future iter can rename call sites if desired; this iter prioritizes safe migration.
+5. **Loader.py had a subtle complication.** Both contracts used. Solution: two aliases at the module top:
+   ```python
+   from ._json_utils import read_json_object as _read_config_or_raise_base
+   from ._json_utils import read_json_object_safe as _read_config_or_safe
+   ```
+   Preserve the wrapper functions (`_read_config_or_raise`, `_read_config_or_none`) as thin forwards so 4 call sites inside loader.py don't need touching.
+6. **Capabilities.py had the neatest migration.** The local `_safe_load_json_dict` had the same signature as the new `read_json_object_safe`. One import alias, zero body changes:
+   ```python
+   from ._json_utils import read_json_object_safe as _safe_load_json_dict
+   ```
+7. **Test coverage:** 11 new tests on `_json_utils` itself. 338 existing tests across 5 migrated modules all continued passing unchanged — the behavior is genuinely identical.
+
+**Meta-lesson — extract threshold. The "3+ local copies" rule worked well here. Watching the count tick up across iters 70-74 made the right moment obvious. Future iters should watch for similar 3+-copy patterns in other layers — Swift services with near-identical invokeCLI bodies already flagged iter-51 M129 as a candidate for a shared `invokePythonCLI` helper. When copies reach 3+, extract.
+
+**Items touched:**
+- M152 [x] — New `jang_tools/_json_utils.py` shared module. 5 call sites migrated. 11 new contract tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 348 jang-tools tests pass (was 337, +11 for `_json_utils` direct pins). All 5 migrated sites' existing tests unchanged. Swift 170 + ralph 73 unchanged.
+
+**Closed-status tally:** 87 (iter 74) + M152 = 88 closed / 100 total = 88.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW M153 candidate**: Swift-side `invokeCLI` helper extract. 5 adoption services (RecommendationService, ExamplesService, ModelCardService, CapabilitiesService, ProfilesService) have near-identical `private static func invokeCLI(args:) async throws -> Data` bodies. Iter-51 M129 aligned their error types but didn't extract. Same threshold trigger as M152.
+- Continue Python-side migration: routing_profile.py, codebook_vq.py have smaller counts but consistent hardening is a win.
+
+**Next iteration should pick:** M153 Swift invokeCLI extract (direct analog to iter-75 M152 on the other side of the boundary) OR a fresh category.

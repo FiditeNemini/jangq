@@ -20,39 +20,9 @@ from .spec import (
     DEFAULT_BLOCK_SIZE,
 )
 from ..quantize import QuantizedTensor
-
-
-def _read_json_object(path: Path, *, purpose: str) -> dict[str, Any]:
-    """M149 (iter 71): shared loader for JSON files with clear diagnostics.
-
-    Applies the template crystallized in M120 (inspect_source), M147
-    (AppSettings.load), M148 (jangspec manifest):
-      * Disk/encoding errors → ValueError with path + purpose.
-      * Malformed JSON → ValueError with path + line/col.
-      * Non-dict root → ValueError naming the wrong type.
-    Every message is actionable enough that a user staring at a bug
-    report can identify WHICH file and WHY.
-
-    ``purpose`` is a short noun phrase ("JANG config", "model config",
-    "shard index") that lands in the error message.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"could not read {purpose} at {path}: {exc}") from exc
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"{purpose} at {path} is not valid JSON "
-            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
-        ) from exc
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"{purpose} at {path} has a top-level {type(data).__name__}, "
-            f"expected a JSON object"
-        )
-    return data
+# M152 (iter 75): shared helper — was a local copy in iter-71 M149 until
+# the 5th call site (loader.py iter-74 M151) crossed the extract threshold.
+from .._json_utils import read_json_object as _read_json_object
 
 
 class JANGModel:

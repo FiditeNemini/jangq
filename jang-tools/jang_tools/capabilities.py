@@ -166,38 +166,10 @@ def build_capabilities(
     }
 
 
-def _safe_load_json_dict(path: Path, *, purpose: str) -> tuple[dict | None, str | None]:
-    """M150 (iter 72): local variant of the M149 template tuned for
-    ``verify_directory``'s (ok, message) return contract. Instead of
-    raising, returns ``(data, None)`` on success or ``(None, error_msg)``
-    on failure. Caller forwards the msg back up as the verify-failure
-    reason.
-
-    Same failure classes as _read_json_object in format/reader.py:
-      * OSError / UnicodeDecodeError
-      * json.JSONDecodeError
-      * non-dict root
-
-    Keeps capabilities.py self-contained (no cross-module import of the
-    format-reader helper, which lives in a different subpackage).
-    """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        return None, f"could not read {purpose} at {path}: {exc}"
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return None, (
-            f"{purpose} at {path} is not valid JSON "
-            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
-        )
-    if not isinstance(data, dict):
-        return None, (
-            f"{purpose} at {path} has a top-level {type(data).__name__}, "
-            f"expected a JSON object"
-        )
-    return data, None
+# M152 (iter 75): migrated from local M150 implementation to the shared
+# tuple-return helper in `_json_utils`. Keeps this module's call sites
+# unchanged via the thin alias.
+from ._json_utils import read_json_object_safe as _safe_load_json_dict
 
 
 def verify_directory(model_dir: Path) -> tuple[bool, str]:

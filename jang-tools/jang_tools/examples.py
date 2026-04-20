@@ -11,6 +11,8 @@ from typing import Any
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
+from ._json_utils import read_json_object as _read_json_object
+
 SUPPORTED_LANGS = ("python", "swift", "server", "hf")
 
 _TEMPLATE_MAP = {
@@ -40,36 +42,6 @@ _TEXT_ONLY_MODEL_TYPES = frozenset({
     "minimax",         # bare alias, mapped to minimax_m2 in capabilities.py
     "minimax_m2_5",    # explicit alias
 })
-
-
-def _read_json_object(path: Path, *, purpose: str) -> dict[str, Any]:
-    """M126 (iter 73): shared read-side loader template.
-
-    Same shape as `format.reader._read_json_object` (iter 71 M149) — local
-    copy to avoid a cross-subpackage import. Every failure becomes a
-    ValueError with the file path + purpose so the outer
-    `cmd_examples`'s `except Exception` handler can emit an actionable
-    `ERROR: <msg>` to stderr instead of a generic
-    `JSONDecodeError: Expecting value: line 1 column 1 (char 0)` with no
-    file-path context.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"could not read {purpose} at {path}: {exc}") from exc
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"{purpose} at {path} is not valid JSON "
-            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
-        ) from exc
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"{purpose} at {path} has a top-level {type(data).__name__}, "
-            f"expected a JSON object"
-        )
-    return data
 
 
 def detect_capabilities(model_dir: Path) -> dict[str, Any]:

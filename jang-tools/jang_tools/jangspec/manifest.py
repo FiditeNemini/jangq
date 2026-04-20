@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List
 
 from . import format as fmt
+from .._json_utils import read_json_object
 
 
 @dataclass
@@ -49,40 +50,14 @@ def write_manifest(path: Path, manifest: Manifest) -> None:
 def load_manifest(path: Path) -> Manifest:
     """Load and validate a jangspec bundle manifest.
 
-    M148 (iter 70): harden error reporting symmetrically with
-    ``write_manifest`` and with the iter-43 M120 pattern on
-    inspect_source/recommend. Pre-iter-70 a corrupted or
-    schema-migrated bundle produced raw ``JSONDecodeError`` /
-    ``TypeError: Manifest.__init__() missing 1 required positional
-    argument`` tracebacks — opaque to the end user. The iter-70
-    version:
-      * Catches OSError / UnicodeDecodeError on the read so disk
-        faults produce actionable stderr.
-      * Catches JSONDecodeError and surfaces the bad file path
-        and decode location.
-      * Catches Manifest(**data) TypeError (missing/extra keys
-        from a schema migration) and hints that the bundle was
-        written by an older or newer tool version.
-    Every error path includes the ``path`` so diagnostics are
-    unambiguous when users have multiple bundles on disk.
+    M148 (iter 70) added diagnostic error paths.
+    M152 (iter 75): migrated from an inline re-implementation to the
+    shared `.._json_utils.read_json_object` after 5 local copies
+    crystallized the template. Behavior identical; errors still include
+    the bundle path, decode location, and schema-migration hints.
     """
     p = Path(path)
-    try:
-        raw = p.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"could not read manifest at {p}: {exc}") from exc
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"manifest at {p} is not valid JSON "
-            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
-        ) from exc
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"manifest at {p} has a top-level {type(data).__name__}, "
-            f"expected a JSON object"
-        )
+    data = read_json_object(p, purpose="manifest")
     bv = data.get("bundle_version")
     if bv != fmt.BUNDLE_VERSION:
         raise ValueError(

@@ -892,6 +892,22 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M152 (crystallize shared `_json_utils` across 5 local copies of the template)** — iter-74 forecast: extract the shared helper. By iter-74's end, FIVE local copies of the same read-side-loader template existed:
+      | Site | Function | Contract |
+      | --- | --- | --- |
+      | format/reader.py | `_read_json_object` | raise |
+      | jangspec/manifest.py | inline in `load_manifest` | raise |
+      | examples.py | `_read_json_object` | raise |
+      | loader.py | `_read_config_or_raise` / `_read_config_or_none` | both |
+      | capabilities.py | `_safe_load_json_dict` | tuple |
+      **Fix (iter 75):** Extract canonical `jang_tools/_json_utils.py` module with two public functions:
+      - `read_json_object(path, *, purpose) -> dict[str, Any]` — raise-contract.
+      - `read_json_object_safe(path, *, purpose) -> tuple[dict | None, str | None]` — tuple-return contract, wraps `read_json_object` + catches ValueError.
+      All 5 call sites migrated to import from the shared module. Thin local aliases preserved at each site to minimize diff at the call sites themselves. Behavior identical — every existing test continued passing unchanged.
+      **Tests (+11) in `tests/test_json_utils.py`:** direct pins on the shared helpers, including a "never raises" contract test on the `_safe` variant (passes a directory path → OSError internally, must return tuple not raise).
+      **Why now and not earlier:** extracting at 2 copies would be premature. At 5 copies with two distinct contracts, the inline duplicate COST exceeded the import-coupling cost. Documented the "extract at 3+" threshold in iter-71 M149's crystallization note; iter-75 hit the trigger.
+      **Evidence:** `jang-tools/jang_tools/_json_utils.py` (new, 85 lines), migrated imports in `capabilities.py`, `examples.py`, `format/reader.py`, `jangspec/manifest.py`, `loader.py`. 348 Python tests pass (was 337, +11). Swift 170 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [x] **M151 (loader.py entry-point + detection helpers: corrupt-config diagnostics)** — iter-73 forecast: loader.py had 14 json.loads sites. Iter-74 scoped tight to the 4 USER-FACING surfaces that map 1:1 to Swift SourceStep detection + JANG Studio load flows:
       - `_is_v2_model` (line 69) — called by `is_jang_model` + SourceStep detector.
       - `_is_vlm_config` (line 81) — called by `load_jang_model` branching.
