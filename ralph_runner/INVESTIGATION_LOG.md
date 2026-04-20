@@ -5728,3 +5728,54 @@ Targeted redaction at specific high-risk sites is visible, auditable, and mainta
 - **NEW (security — JANGStudio):** audit JANGStudio's `PythonRunner` log pipeline for the same class of leak. Swift-side log accumulation in `JobStore` also goes to XPC + disk.
 
 **Next iteration should pick:** error-response info leaks audit (natural M193 follow-on — now that logs are clean, what about response bodies visible to unauthed attackers who hit 401/403/500?), OR the `log` shadow bug in check_rate_limit (quick cleanup), OR extend redaction to JANGStudio's PythonRunner pipeline.
+
+---
+
+## 2026-04-20 iteration 131 — M194 HTTPException response-body redaction + rate-limit `log` shadow cleanup
+
+**Angle:** iter-130 forecast top-priority: HTTPException response bodies. M193 redacted LOG sites (server-internal storage + operator access logs) but response bodies cross the trust boundary IN THE OTHER DIRECTION (to the calling client). Different attacker access path, needs its own audit. Bundled the tiny `log`-shadow cleanup from the same forecast (zero-cost while-you're-here fix).
+
+**Deep trace walkthrough:**
+1. **Enumerated all `raise HTTPException(` call sites.** 21 total. Classified by response-body content:
+   - Static strings (OK): `"Job not found"`, `"webhook_url missing hostname"`, 429 rate-limit, 413 body-size, 401 auth.
+   - Validated input echo-back (OK, controlled input): `f"Invalid profile '{req.profile}'"`, `f"Can only retry failed/cancelled jobs, current: {old_job.phase.value}"`.
+   - **Unsanitized exception echo-back (LEAK VECTOR):** 3 sites — POST /jobs L884, POST /estimate L1155, GET /recommend L1208. All format `{e}` from HF `HfApi().model_info()` failures.
+2. **Traced HF client exception content.** `huggingface_hub.utils.errors.RepositoryNotFoundError` and siblings often include the FAILING URL in their `str(e)` form. If the server's HF_UPLOAD_TOKEN was appended to an API call that raised, the URL includes `?token=...`. Even without query-param tokens, the error can include Authorization-header-derived strings in the response body mirror.
+3. **Auth gates reduce blast radius but don't eliminate it.** iter-114 M179 put auth on all sensitive endpoints, so only authed clients see these 404 responses. But: (a) "authenticated caller" ≠ "owner of the HF_UPLOAD_TOKEN"; a low-priv operator API key shouldn't see token fragments from the server-held HF token; (b) if the server ever adds a new unauthed endpoint that could hit this path, the leak would be externally visible. Response-body redaction is the last line of defense at this trust boundary.
+4. **Applied `redact_for_log` at 3 HTTPException sites.** Same helper as iter-130 M193 (shared vocabulary → shared tests → no invention). Per-site comment explains WHY this specific raise needs wrapping (connecting back to M193 rationale).
+5. **Bundled the iter-130 forecast cleanup:** check_rate_limit used `log = _rate_limit_log.setdefault(...)` which shadowed the module-level `log` logger. No current bug but future traps — renamed to `ip_log`. All references updated. Verified no stray `log.popleft()` / `log[0]` / `log.append(now)` remain.
+6. **Tests (+4):** 2 site pins (POST /jobs, estimate+recommend combined), 1 shadow-rename pin, 1 generic "HF-client HTTPException sweep". The shadow-rename pin has a subtle bug story (see meta-lesson below).
+
+**Meta-lesson — four-boundary credential hygiene: SOURCE / URL / LOG / RESPONSE.** Each boundary has a distinct attacker access path:
+- **SOURCE (M182, iter 117)** — attacker with repo read access. Grep invariant.
+- **URL (M192, iter 129)** — URL-intercept attacker (shell history, browser history, proxy/CDN access log at request time). Scheme restriction.
+- **LOG (M193, iter 130)** — log-read attacker (operator with log file access). Site-targeted redaction at log-formulation time.
+- **RESPONSE (M194, iter 131)** — API caller trust boundary (authenticated clients + failed-auth response bodies). Redaction at HTTPException formulation time.
+Missing any layer creates a silent gap at that boundary. **Rule: for credential hygiene, inventory the FORMATTING boundaries where strings-with-potential-secrets cross a trust line. Each boundary deserves its own layer of redaction + its own invariant test.** Parallels iter-114 M179's multi-endpoint auth discovery (auth gate moved from POST-only to ALL sensitive endpoints after realizing GETs were silently unprotected). Same pattern: exhaust the boundaries, don't stop at the first-found one.
+
+**Meta-lesson — substring `in` is NOT word-boundary match.** My first-pass `assert "log = _rate_limit_log.setdefault" not in body` failed after the rename because Python's `in` operator is substring-match: `"ip_log = _rate_limit_log.setdefault"` LITERALLY CONTAINS `"log = _rate_limit_log.setdefault"` as a substring (positions 3-N of the `ip_log` identifier). Fix: `re.search(r"\blog\s*=\s*_rate_limit_log\.setdefault", body)` with word boundary `\b` so `ip_log` doesn't match the `log` sub-identifier. **Rule: when a test excludes an old identifier but the replacement shares a suffix/prefix with the old, USE REGEX WITH WORD BOUNDARIES, not `in`.** Parallels iter-127 M190's structural-slicing lesson. Same class of bug: "coarse anchor breaks when the space of candidates overlaps." Fix: tighten the anchor.
+
+**Meta-lesson — opportunistic cleanups bundle well with security iters.** The `log`-shadow bug was zero-cost to fix (rename, update 4 references) and prevents a silent AttributeError in some future iter. Batching it into the M194 iter (same file, same trust-boundary-audit theme) rode the "already in context" momentum. **Rule: when a nearby observation costs ~2 lines to fix AND prevents a future trap, fix it. Don't defer to a cleanup-only iter — that loses momentum and risks forgetting.** Inverse of "don't fix unrelated code in a feature PR" — that rule is about SCOPE CREEP; this is OPPORTUNISTIC FIXING of zero-cost observations in the same file/theme.
+
+**Items touched:**
+- M194 [x] — 3 HTTPException response-body sites redacted. `ip_log` rename in check_rate_limit. 4 new regression tests. Closes the 4-boundary credential hygiene sweep.
+
+**Commit:** (this iteration)
+
+**Verification:** 61 jang-server tests pass (was 57, +4).
+
+**Closed-status tally:** 147 (iter 130) + M194 = 148 items touched, all closed. Zero known bugs as of iter-131 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (closes the loop on 4-boundary hygiene):** extend M193's `redact_for_log` pattern to JANGStudio Swift side — `PythonRunner` capture, `JobStore` log accumulation, `DiagnosticsBundle.scrubSensitive`. The Swift side has `scrubSensitive` (iter-102ish) but may not cover the same patterns as Python's `redact_for_log`. Cross-language parity is the next credential-hygiene audit.
+- **NEW:** extend the rate-limit dependency to /retry + /admin/purge (carried from iter-127 — /retry can spawn subprocess work = real DoS vector; NOT /stream since M188 caps that separately).
+- **NEW:** audit jang-tools CLI for response-body-equivalent leaks — stdout/stderr lines that feed `convert_model.py` subprocess → server's `_LogCapture.write` chain. Server redacts on ingest (M193) but jang-tools could redact at emit time as well (defense-in-depth + protects against non-server callers like direct CLI use).
+- **NEW:** Pydantic validation 422 body audit. If user submits `{"webhook_url": "https://h/?api_key=LEAK"}` as wrong-shape JobRequest, does Pydantic echo the value in the 422 error? Usually no (locates by field name + type), but needs verification.
+- **NEW:** audit jang-server's sqlite DB content — if a job's log lines or error were persisted PRE-M193/M194, they have unredacted secrets on disk. One-shot migration needed: scrub all existing `jobs` rows through `redact_for_log` at startup.
+
+**Next iteration should pick:** sqlite DB backfill for pre-M193/M194 persisted secrets (real data-at-rest leak — operational, actionable), OR JANGStudio Swift-side redaction parity (cross-language consistency), OR Pydantic 422 audit (quick verification).

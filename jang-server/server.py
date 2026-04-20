@@ -361,13 +361,18 @@ def check_rate_limit(request: "Request") -> None:
     now = time.time()
     cutoff = now - RATE_LIMIT_WINDOW_S
     with _rate_limit_lock:
-        log = _rate_limit_log.setdefault(ip, deque())
+        # M194 (iter 131): the local is named `ip_log` so it does not
+        # shadow the module-level logger. No current bug (no logger
+        # calls inside this function), but a future maintainer adding
+        # debug logging would otherwise hit AttributeError on a deque
+        # if the shadow re-crept in.
+        ip_log = _rate_limit_log.setdefault(ip, deque())
         # Drop entries older than the window.
-        while log and log[0] < cutoff:
-            log.popleft()
-        if len(log) >= RATE_LIMIT_MAX_REQUESTS:
+        while ip_log and ip_log[0] < cutoff:
+            ip_log.popleft()
+        if len(ip_log) >= RATE_LIMIT_MAX_REQUESTS:
             # Reject — over budget.
-            retry_after = int(log[0] + RATE_LIMIT_WINDOW_S - now) + 1
+            retry_after = int(ip_log[0] + RATE_LIMIT_WINDOW_S - now) + 1
             raise HTTPException(
                 status_code=429,
                 detail=(
@@ -376,7 +381,7 @@ def check_rate_limit(request: "Request") -> None:
                 ),
                 headers={"Retry-After": str(retry_after)},
             )
-        log.append(now)
+        ip_log.append(now)
 
 
 def _notify_sse(job: Job):
@@ -881,7 +886,13 @@ def create_job(req: JobRequest, request: Request):
     try:
         model_info = api.model_info(req.model_id)
     except Exception as e:
-        raise HTTPException(404, f"Model '{req.model_id}' not found on HuggingFace: {e}")
+        # M194 (iter 131): redact. HF client exceptions sometimes
+        # embed the failing URL (with token in query string) in the
+        # message. That response body is visible to the calling client,
+        # which may or may not be the same party that supplied the
+        # token. Treat response bodies the same as log lines — scrub
+        # secrets before the body crosses the trust boundary.
+        raise HTTPException(404, redact_for_log(f"Model '{req.model_id}' not found on HuggingFace: {e}"))
 
     # Check disk space (need ~2.5x model size: source + output + overhead)
     siblings = model_info.siblings or []
@@ -1152,7 +1163,8 @@ def estimate_size(req: EstimateRequest, request: Request):
     try:
         info = api.model_info(req.model_id)
     except Exception as e:
-        raise HTTPException(404, f"Model not found: {e}")
+        # M194 (iter 131): redact HF exception in response body.
+        raise HTTPException(404, redact_for_log(f"Model not found: {e}"))
 
     # Get param count from config if available
     config = {}
@@ -1205,7 +1217,8 @@ def recommend_profile(model_id: str):
     try:
         info = api.model_info(model_id)
     except Exception as e:
-        raise HTTPException(404, f"Model not found: {e}")
+        # M194 (iter 131): redact HF exception in response body.
+        raise HTTPException(404, redact_for_log(f"Model not found: {e}"))
 
     config = {}
     try:
