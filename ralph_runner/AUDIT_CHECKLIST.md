@@ -747,6 +747,19 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `test_estimateOutputBytes_returns_zero_for_unknown_profile`: typo-defensive — no guessed bit-width.
       **Evidence:** `JANGStudio/JANGStudio/Verify/PreflightRunner.swift:5-32, 45-67`, `JANGStudio/JANGStudio/Wizard/Steps/ProfileStep.swift:85-93`. 156 Swift tests pass (was 152, +4). Python 310 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M142 (hadamard-low-bits check: substring match → structured compress-bits lookup, both sides)** — Iter 62's preflight enumeration flagged `hadamardVsLowBits` using `plan.profile.contains("_2")` as brittle. Iter 64 replaces the substring check on BOTH the Swift preflight AND the Python recommend.py side with a structured lookup against the profile tables.
+      **Pre-iter-64 issues:**
+      - Swift `hadamardVsLowBits`: `plan.profile.contains("_2") || plan.profile == "JANG_1L" || plan.profile == "JANGTQ2"`. Hardcoded JANG_1L because "JANG_1L" lacks the "_2" substring. Brittle to any new profile name.
+      - Python `_recommend_hadamard`: exact hardcoded list `{"JANG_1L", "JANG_2S", "JANG_2M", "JANG_2L", "JANGTQ2"}`. Same class.
+      **Fix (iter 64):**
+      - **Swift**: new `PreflightRunner.compressBitsForProfile(_:, profiles:)` helper. Returns `JANG profile.compressBits` if found; for K-quant (compressBits=nil in schema), derives from `avgBits`; for JANGTQ, uses `bits`; unknown profile returns nil. `hadamardVsLowBits` now checks `compressBits ?? 99 <= 2`.
+      - **Python**: `_recommend_hadamard` now looks up `JANG_PROFILES[profile][2]` for the compress tier, falls back to `JANG_K_TARGETS[profile]` for K-quants, parses JANGTQ suffix digit, defaults to 4 on unknown. Single source of truth with the Python-side `allocate.JANG_PROFILES`.
+      **Why fix BOTH sides (not just Swift):** iter-62 meta-lesson about cross-boundary decision-overlap. The hadamard recommendation Python-side and the preflight warn Swift-side enforce the same "2-bit → hadamard off" rule. Both must agree.
+      **Tests (+10):**
+      - Swift (+6) in PreflightRunnerTests: compressBitsForProfile pins for JANG_2L=2, JANG_1L=2, JANG_4M=4, JANG_4K (K-quant)=4, JANGTQ2=2, unknown=nil.
+      - Python (+4) in test_recommend.py: `_recommend_hadamard_uses_JANG_PROFILES_compress_tier` (exhaustive JANG_1L through JANG_6M), `_handles_JANGTQ_variants` (JANGTQ2/3/4), `_k_quant_profiles` (3K/4K/5K/6K), `_unknown_profile_defaults_to_on`.
+      **Evidence:** `JANGStudio/JANGStudio/Verify/PreflightRunner.swift:69-88, 141-161`, `jang-tools/jang_tools/recommend.py:305-334`. 162 Swift tests pass (was 156, +6). 314 Python tests pass (was 310, +4).
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

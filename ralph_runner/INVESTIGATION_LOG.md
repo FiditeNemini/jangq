@@ -2604,3 +2604,52 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 - **NEW M143 candidate**: audit for other inert-safety-gate patterns (functions with "defaulted disable" args). Check Python side's `detect_architecture` / `classify_tensor` / `validate_*` functions.
 
 **Next iteration should pick:** M142 hadamard brittleness (small scope, continues the iter-62 foot-gun enumeration) OR M143 inert-gate audit (generalizes this iter).
+
+## 2026-04-20 iteration 64 — M142 hadamard-low-bit check: substring → structured lookup (both sides)
+
+**Angle:** Iter 63 set up the diskSpace gate using profile-aware lookups. Iter 64 extends the pattern to the last remaining brittle profile-name check: `hadamardVsLowBits`. Both the Swift preflight and Python recommend.py had hardcoded low-bit profile lists; both get fixed this iter.
+
+**Deep trace walkthrough:**
+1. **Swift-side pattern:**
+   ```swift
+   let is2bit = plan.profile.contains("_2") || plan.profile == "JANG_1L" || plan.profile == "JANGTQ2"
+   ```
+   `contains("_2")` is a substring match. Current profile set is safe but fragile:
+   - Future "JANG_20" (20-bit) would trip as 2-bit.
+   - JANG_1L hardcoded specifically because "JANG_1L" lacks "_2".
+   - JANGTQ2 hardcoded because "JANGTQ2" lacks "_2" too.
+2. **Python-side pattern:**
+   ```python
+   is_low_bit = profile in ("JANG_1L", "JANG_2S", "JANG_2M", "JANG_2L", "JANGTQ2")
+   ```
+   Exact membership — also brittle to new profile names.
+3. **Both need the same fix:** look up the authoritative compress-tier bits from the profile table.
+4. **Swift helper design:** `compressBitsForProfile(_ profile: String, profiles: Profiles) -> Int?`
+   - JANG tiered: `profiles.jang.first(where: { $0.name == profile })?.compressBits`
+   - JANG K-quant (compressBits=nil): derive from `avgBits.rounded()`. JANG_4K avgBits=4.0 → 4.
+   - JANGTQ: `profiles.jangtq.first(where: {...})?.bits`
+   - Unknown: `nil` (caller falls back to pass)
+5. **Python helper design:** lives inside `_recommend_hadamard` — no separate helper needed since it's a single call site. Key line: `compress_bits = JANG_PROFILES[profile][2]` for tiered. JANGTQ: parse suffix digit. K-quant: use `JANG_K_TARGETS[profile]`.
+6. **Consistency is the point.** With both sides using the same structured lookup (`profiles.jang[].compressBits` in Swift ≡ `JANG_PROFILES[profile][2]` in Python), the recommendation the wizard shows and the preflight warning that fires are guaranteed to agree. Before this iter they were reading from parallel hardcoded lists that could drift.
+
+**Meta-lesson extension — "single source of truth for profile metadata."** The profile tables exist in two places: `ProfilesService.frozen` (Swift) and `allocate.JANG_PROFILES` (Python). These were already content-synced (iter-10 era). Iter 64 ensures the CONSUMERS of those tables don't bypass them with hardcoded lists. Future audit: any code that needs profile-dependent behavior must go through the structured table, not a name-string check.
+
+**Items touched:**
+- M142 [x] — Swift + Python hadamard-low-bit check now use structured profile-table lookups.
+
+**Commit:** (this iteration)
+
+**Verification:** 162 Swift tests pass (was 156, +6 for compressBits helper + pins). 314 Python tests pass (was 310, +4 for _recommend_hadamard structured lookup). ralph 73 unchanged.
+
+**Closed-status tally:** 76 (iter 63) + M142 = 77 closed / 100 total = 77.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- M143 inert-safety-gate audit generalization (iter-63 surfaced; broader grep pending).
+- **NEW**: re-grep all profile-name hardcoded lists in the codebase to verify iter-64 is complete (iter-48 meta-rule: "re-grep with head_limit=0 after a fix class").
+
+**Next iteration should pick:** profile-name hardcoded-list re-grep (mirror iter-48 meta-rule applied to iter-64's fix class) OR M143 inert-safety-gate audit.

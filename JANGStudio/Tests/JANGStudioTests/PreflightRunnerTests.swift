@@ -231,6 +231,46 @@ final class PreflightRunnerTests: XCTestCase {
             "Unknown profile must return 0 (caller falls back to pass). Don't guess a bit-width.")
     }
 
+    // MARK: - M142 (iter 64): hadamardVsLowBits uses compress bits, not substring
+    //
+    // Pre-iter-64 the check was:
+    //   let is2bit = plan.profile.contains("_2")
+    //              || plan.profile == "JANG_1L"
+    //              || plan.profile == "JANGTQ2"
+    // Brittle: a future "JANG_20" (20-bit) would trip as 2-bit; a future
+    // "JANG_0S" (<1-bit) wouldn't be flagged. Fix: look up compressBits
+    // from ProfilesService — single source of truth with Python-side
+    // allocate.JANG_PROFILES.
+
+    func test_compressBitsForProfile_JANG_2L() {
+        // JANG_2L is (8, 6, 2) → compress=2.
+        XCTAssertEqual(PreflightRunner.compressBitsForProfile("JANG_2L", profiles: .frozen), 2)
+    }
+
+    func test_compressBitsForProfile_JANG_1L() {
+        // JANG_1L is (8, 8, 2) → compress=2 (low-bit flagged).
+        XCTAssertEqual(PreflightRunner.compressBitsForProfile("JANG_1L", profiles: .frozen), 2)
+    }
+
+    func test_compressBitsForProfile_JANG_4M() {
+        XCTAssertEqual(PreflightRunner.compressBitsForProfile("JANG_4M", profiles: .frozen), 4)
+    }
+
+    func test_compressBitsForProfile_K_quant() {
+        // JANG_4K has compressBits=nil in the schema; derive from avgBits=4.0.
+        XCTAssertEqual(PreflightRunner.compressBitsForProfile("JANG_4K", profiles: .frozen), 4)
+    }
+
+    func test_compressBitsForProfile_JANGTQ2() {
+        XCTAssertEqual(PreflightRunner.compressBitsForProfile("JANGTQ2", profiles: .frozen), 2)
+    }
+
+    func test_compressBitsForProfile_unknown_returns_nil() {
+        // Iter-54 M132 fix: typo defense. Unknown profile must return nil
+        // so the caller can distinguish "unknown" from "known and high-bit".
+        XCTAssertNil(PreflightRunner.compressBitsForProfile("JANG_BOGUS_99Y", profiles: .frozen))
+    }
+
     func test_hadamardAt2bitWarns() throws {
         let src = tmp.appendingPathComponent("model"); try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
         try #"{"model_type":"qwen3_5_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)

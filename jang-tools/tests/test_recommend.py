@@ -209,6 +209,57 @@ def test_recommend_hadamard_on_at_4bit(tmp_path):
     assert rec["recommended"]["hadamard"] is True
 
 
+# M142 (iter 64): _recommend_hadamard uses JANG_PROFILES compress-tier
+# lookup instead of a hardcoded profile-name list. Same fix shape as the
+# Swift-side PreflightRunner.hadamardVsLowBits + symmetric to iter-54 M132's
+# JANGTQ converter profile parsing.
+
+def test_recommend_hadamard_uses_JANG_PROFILES_compress_tier():
+    """Every JANG_2* profile has compress=2 → hadamard should be off for ALL
+    of them, not just the hardcoded set in the old list."""
+    from jang_tools.recommend import _recommend_hadamard
+    # Pre-M142 hardcoded list was ("JANG_1L", "JANG_2S", "JANG_2M", "JANG_2L", "JANGTQ2").
+    # Post-M142: all 2-bit compress profiles ping off, including any future
+    # additions to JANG_PROFILES with compress=2.
+    for p in ["JANG_1L", "JANG_2S", "JANG_2M", "JANG_2L"]:
+        use_hadamard, _ = _recommend_hadamard(p)
+        assert use_hadamard is False, f"{p} has compress=2 — hadamard should be off"
+    # 3-bit+ profiles: hadamard on.
+    for p in ["JANG_3S", "JANG_3M", "JANG_3L", "JANG_4S", "JANG_4M", "JANG_4L", "JANG_6M"]:
+        use_hadamard, _ = _recommend_hadamard(p)
+        assert use_hadamard is True, f"{p} has compress>=3 — hadamard should be on"
+
+
+def test_recommend_hadamard_handles_JANGTQ_variants():
+    """JANGTQ2 off; JANGTQ3 / JANGTQ4 on. Post-M142 this path is driven
+    by parsing the suffix digit, not a membership check against a hardcoded
+    list — so JANGTQ_2L / JANGTQ_4M legacy aliases work too."""
+    from jang_tools.recommend import _recommend_hadamard
+    assert _recommend_hadamard("JANGTQ2")[0] is False
+    assert _recommend_hadamard("JANGTQ3")[0] is True
+    assert _recommend_hadamard("JANGTQ4")[0] is True
+
+
+def test_recommend_hadamard_k_quant_profiles():
+    """K-quant profiles (JANG_3K, JANG_4K, JANG_5K, JANG_6K) use their
+    target avg_bits as the compress-tier proxy. JANG_3K should flip ON;
+    anything 2-bit would flip off (no current 2-bit K-quant but defensive)."""
+    from jang_tools.recommend import _recommend_hadamard
+    assert _recommend_hadamard("JANG_3K")[0] is True, "3-bit K-quant → hadamard on"
+    assert _recommend_hadamard("JANG_4K")[0] is True
+    assert _recommend_hadamard("JANG_5K")[0] is True
+    assert _recommend_hadamard("JANG_6K")[0] is True
+
+
+def test_recommend_hadamard_unknown_profile_defaults_to_on():
+    """Unknown profile falls through to the default hadamard=on path
+    (compress_bits=4 fallback). Matches the Swift-side pass behavior."""
+    from jang_tools.recommend import _recommend_hadamard
+    use_hadamard, reason = _recommend_hadamard("JANG_UNKNOWN_99Z")
+    assert use_hadamard is True
+    assert "3-bit" in reason or "higher" in reason
+
+
 def test_recommend_surfaces_plain_english(tmp_path):
     d = _make_model_dir(tmp_path, {"model_type": "qwen3_5_moe", "num_experts": 256,
                                     "hidden_size": 2048, "num_hidden_layers": 28,

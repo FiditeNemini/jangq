@@ -303,9 +303,35 @@ def _recommend_profile(family_class: str, expert_count: int, param_b: float) -> 
 
 
 def _recommend_hadamard(profile: str) -> tuple[bool, str]:
-    """Hadamard helps 3-bit+ and HURTS 2-bit. Default true for 3+, false for 1/2-bit."""
-    is_low_bit = profile in ("JANG_1L", "JANG_2S", "JANG_2M", "JANG_2L", "JANGTQ2")
-    if is_low_bit:
+    """Hadamard helps 3-bit+ and HURTS 2-bit. Default true for 3+, false for 1/2-bit.
+
+    M142 (iter 64): use the authoritative compress-bits from
+    `allocate.JANG_PROFILES` instead of a hardcoded profile-name list.
+    Same data-driven approach as the Swift-side
+    `PreflightRunner.hadamardVsLowBits` to keep the two sides in sync,
+    and robust against future profile name additions
+    (e.g., JANG_1S, JANGTQ1 — today's hardcoded list would miss them
+    and recommend hadamard=True which is wrong at 1-bit).
+    """
+    from .allocate import JANG_PROFILES, JANG_K_TARGETS
+    compress_bits: int
+    if profile in JANG_PROFILES:
+        compress_bits = JANG_PROFILES[profile][2]  # (critical, important, COMPRESS)
+    elif profile in JANG_K_TARGETS:
+        # K-quant profiles are uniform at their target bit-width.
+        compress_bits = int(round(JANG_K_TARGETS[profile]))
+    elif profile.startswith("JANGTQ"):
+        # JANGTQ2 / JANGTQ3 / JANGTQ4 — suffix digit is the uniform bit-width.
+        suffix = profile.removeprefix("JANGTQ").lstrip("_")
+        try:
+            compress_bits = int(suffix[0]) if suffix and suffix[0].isdigit() else 4
+        except (ValueError, IndexError):
+            compress_bits = 4
+    else:
+        # Unknown profile — match the Swift fallback (pass-through: treat
+        # as non-low-bit so hadamard defaults on).
+        compress_bits = 4
+    if compress_bits <= 2:
         return (False, "Hadamard rotation hurts quality at 2-bit and below, so we leave it off.")
     return (True, "Hadamard rotation reduces quantization error at 3-bit and higher — we turn it on by default.")
 

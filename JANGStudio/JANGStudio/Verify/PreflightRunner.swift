@@ -25,7 +25,7 @@ struct PreflightRunner {
         out.append(Self.jangtqArchSupported(plan: plan, whitelist: capabilities.jangtqWhitelist))
         out.append(Self.jangtqSourceDtype(plan: plan))
         out.append(Self.bf16For512Experts(plan: plan, types: capabilities.knownExpert512Types))
-        out.append(Self.hadamardVsLowBits(plan: plan))
+        out.append(Self.hadamardVsLowBits(plan: plan, profiles: profiles))
         out.append(Self.bundledPythonHealthy())
         return out
     }
@@ -54,6 +54,29 @@ struct PreflightRunner {
         if let p = profiles.jang.first(where: { $0.name == profile }) { return p.avgBits }
         if let p = profiles.jangtq.first(where: { $0.name == profile }) { return Double(p.bits) }
         return 0
+    }
+
+    /// M142 (iter 64): the authoritative "is this profile a 2-bit compress
+    /// tier?" answer — used by hadamardVsLowBits. Returns the compress-tier
+    /// bits for JANG profiles (criticalBits/importantBits stay high while
+    /// compressBits drives MLP quality, which is what Hadamard rotation
+    /// affects) and the uniform bits for JANGTQ. Returns nil on unknown
+    /// profile so callers can fall back to pass instead of guessing.
+    ///
+    /// JANG_NK (K-quant) profiles expose criticalBits=nil in the schema;
+    /// for those we derive from avgBits as a robust fallback (JANG_4K has
+    /// avgBits=4.0 → compress-equivalent 4).
+    static func compressBitsForProfile(_ profile: String, profiles: Profiles) -> Int? {
+        if let p = profiles.jang.first(where: { $0.name == profile }) {
+            if let cb = p.compressBits { return cb }
+            // K-quant profiles have nil compressBits — the compress tier is
+            // the uniform avg (no separate tiers).
+            return Int(p.avgBits.rounded())
+        }
+        if let p = profiles.jangtq.first(where: { $0.name == profile }) {
+            return p.bits
+        }
+        return nil
     }
 
     private static func sourceReadable(_ url: URL?) -> PreflightCheck {
@@ -183,11 +206,23 @@ struct PreflightRunner {
         return .init(id: .bf16For512Experts, title: "BF16 forced for 512+ expert model", status: .pass, hint: nil)
     }
 
-    private static func hadamardVsLowBits(plan: ConversionPlan) -> PreflightCheck {
-        let is2bit = plan.profile.contains("_2") || plan.profile == "JANG_1L" || plan.profile == "JANGTQ2"
+    private static func hadamardVsLowBits(plan: ConversionPlan, profiles: Profiles) -> PreflightCheck {
+        // M142 (iter 64): use the profile's authoritative compress-bits
+        // field instead of `plan.profile.contains("_2")` substring match.
+        // The substring match is brittle to:
+        //   - Future "JANG_20" / "JANGTQ_2X" / similar profile names where
+        //     "_2" wouldn't mean 2-bit.
+        //   - Profiles that should be flagged but don't contain "_2"
+        //     (current JANG_1L is specifically hardcoded to work around
+        //     this; a future JANG_0L would need the same treatment).
+        // With compressBitsForProfile, the check is driven by the profile
+        // data structure — same source of truth as ProfilesService.frozen
+        // and as jang-tools' Python-side allocate.py JANG_PROFILES.
+        let compress = Self.compressBitsForProfile(plan.profile, profiles: profiles)
+        let is2bit = (compress ?? 99) <= 2
         if plan.hadamard && is2bit {
             return .init(id: .hadamardVsLowBits, title: "Hadamard rotation sanity", status: .warn,
-                         hint: "Hadamard rotation hurts quality at 2-bit. Turn off for JANG_2*/JANG_1L/JANGTQ2.")
+                         hint: "Hadamard rotation hurts quality at 2-bit and below. Turn off for this profile.")
         }
         return .init(id: .hadamardVsLowBits, title: "Hadamard rotation sanity", status: .pass, hint: nil)
     }
