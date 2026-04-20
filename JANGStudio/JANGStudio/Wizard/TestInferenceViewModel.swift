@@ -60,7 +60,12 @@ final class TestInferenceViewModel {
             pendingImagePath = nil
             pendingVideoPath = nil
         } catch let e as InferenceError {
-            lastError = e.message
+            // Don't surface user-initiated cancellation as an error banner —
+            // the user pressed Cancel deliberately; showing a red "generation
+            // cancelled by user" message would feel like a failure.
+            if !e.wasCancelled {
+                lastError = e.message
+            }
         } catch {
             lastError = "\(error)"
         }
