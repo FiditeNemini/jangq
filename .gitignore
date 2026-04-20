@@ -40,6 +40,8 @@ eval_*
 sweep*
 debug_*
 test_*
+# Allow ralph_runner test suite
+!ralph_runner/tests/test_*.py
 repack_*
 ram_monitor*
 
