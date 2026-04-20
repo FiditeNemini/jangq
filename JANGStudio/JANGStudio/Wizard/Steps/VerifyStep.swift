@@ -7,6 +7,9 @@ struct VerifyStep: View {
     @State private var checks: [VerifyCheck] = []
     @State private var busy = true
     @State private var showingInference = false
+    @State private var showingExamples = false
+    @State private var showingModelCard = false
+    @State private var showingPublish = false
 
     var body: some View {
         Form {
@@ -37,6 +40,29 @@ struct VerifyStep: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(coord.plan.outputURL == nil)
 
+                        Button {
+                            showingExamples = true
+                        } label: {
+                            Label("View Usage Examples", systemImage: "doc.text")
+                        }
+                        .disabled(coord.plan.outputURL == nil)
+
+                        Button {
+                            showingModelCard = true
+                        } label: {
+                            Label("Generate Model Card", systemImage: "doc.richtext")
+                        }
+                        .disabled(coord.plan.outputURL == nil)
+
+                        Button {
+                            showingPublish = true
+                        } label: {
+                            Label("Publish to HF", systemImage: "arrow.up.doc.on.clipboard")
+                        }
+                        .disabled(coord.plan.outputURL == nil)
+                    }
+
+                    HStack {
                         Button {
                             revealOutput()
                         } label: {
@@ -75,6 +101,21 @@ struct VerifyStep: View {
                     profile: coord.plan.profile,
                     sizeGb: Double(coord.plan.detected?.totalBytes ?? 0) / 1_000_000_000.0
                 )
+            }
+        }
+        .sheet(isPresented: $showingExamples) {
+            if let url = coord.plan.outputURL {
+                UsageExamplesSheet(modelPath: url)
+            }
+        }
+        .sheet(isPresented: $showingModelCard) {
+            if let url = coord.plan.outputURL {
+                GenerateModelCardSheet(modelPath: url)
+            }
+        }
+        .sheet(isPresented: $showingPublish) {
+            if let url = coord.plan.outputURL {
+                PublishToHuggingFaceSheet(modelPath: url)
             }
         }
     }
