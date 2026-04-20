@@ -3992,3 +3992,59 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: run full Swift test-suite count update after iter-92.
 
 **Next iteration should pick:** save the remediation-pattern memory note, then tackle the vestigial progressLog OR pivot to an unrelated audit (keyboard shortcut / accessibility / URL-normalization).
+
+---
+
+## 2026-04-20 iteration 93 — M170 RunStep orphan subprocess on window-close / app-quit
+
+**Angle:** Fresh audit question: "what happens when the user quits the app during a 30-minute convert?" Expected a single bug; found one but it illuminated a broader pattern.
+
+**Deep trace walkthrough:**
+1. **Grepped for lifecycle hooks.** `applicationWillTerminate` / `applicationShouldTerminate` / `NSApplicationDelegate` — ZERO matches across the app. No explicit quit handling.
+2. **Traced RunStep.onAppear.** `Task { await start() }` — detached Task with NO HANDLE. Nothing stored for cancel-on-destruction.
+3. **Simulated the user flow mentally:**
+   - User clicks Start → RunStep.onAppear fires → Task spawned → `await start()` → `for try await ev in r.run()` → PythonRunner spawns Python convert subprocess.
+   - 10 minutes in, user clicks red-X to close the window (accidentally, or they changed their mind).
+   - SwiftUI unmounts the window's view hierarchy → RunStep destroyed → @State (runner, logs, phase, etc.) deallocated.
+   - The anonymous Task from step 1 has no handle and no parent-Task relationship → survives view destruction.
+   - The Task is still iterating the runner's AsyncThrowingStream → Python subprocess keeps running.
+   - The Python subprocess's PPID reparents to launchd (PID 1) when JANG Studio exits → orphan.
+   - 20 more minutes pass. User sees Mac pegged at 100% CPU with no app running. Has to kill -9 manually.
+4. **Checked SwiftUI behavior on cmd-Q.** SwiftUI fires `.onDisappear` for every view in the hierarchy as the window tears down, BEFORE the process exits. Good news: I don't need an NSApplicationDelegate — `.onDisappear` alone covers both window-close AND app-quit cases.
+5. **Designed the fix.** Match iter-85 M162's shape for sheet-dismiss:
+   - Store `runTask: Task<Void, Never>?` in @State.
+   - `.onAppear` assigns the spawned Task to `runTask` instead of discarding.
+   - Retry buttons cancel the previous handle then re-spawn into `runTask`.
+   - `.onDisappear { runTask?.cancel() }` fires on every unmount.
+   - Cancel propagates through iter-32 M100's withTaskCancellationHandler → PythonRunner.cancel() → SIGTERM + 3 s SIGKILL.
+6. **Tests:** source-inspection pins matching iter-85 M162 + iter-86 M163 patterns. 27/27 WizardStepContinueGateTests pass. PythonRunner + PostConvertVerifier unchanged.
+7. **Reflected on why iter-85 missed this.** iter-85's audit was framed around SHEETS specifically ("sheet-dismiss orphan"). RunStep isn't a sheet — it's a main-window detail-pane view. Sheet-dismiss hooks don't fire on main-window close. The rule I codified in iter-85 was too narrow; the actual rule is broader.
+
+**Meta-lesson — view-lifecycle cancel hooks apply to EVERY view that owns a Task handle, not just sheets.** Iter-85 M162 framed the sheet-dismiss orphan pattern. iter-86 M163 extended to retry buttons within sheets. iter-93 M170 extends to main-window-content views. The unifying rule: **any SwiftUI view that spawns a detached Task must wire `.onDisappear { taskHandle?.cancel() }`.** Covers sheets, popovers, full-screen covers, AND the main window's content views. Framing matters — broader framing covers more surface.
+
+**Meta-lesson — "app quit" is a view-unmount event in SwiftUI.** When cmd-Q fires, SwiftUI walks the view hierarchy firing `.onDisappear` on every view before the process exits. So one `.onDisappear` hook covers both window-close AND app-quit cases — no NSApplicationDelegate needed. This is simpler than the NSApp-era macOS app lifecycle; worth noting as a SwiftUI-specific simplification.
+
+**Meta-lesson — "main window vs sheet" is a false dichotomy for lifecycle handling.** The correct axis is "does this view have active Task/subprocess state?" Any such view needs cancel-on-disappear, regardless of whether it's presented as a sheet, main window, popover, or something else.
+
+**Generalized audit rule going forward:** grep every `.onAppear` with a `Task {` body. Each one needs a corresponding `.onDisappear` cancel. Tracking this as a new audit axis — will run this sweep in a future iter to find any other unreported orphans.
+
+**Items touched:**
+- M170 [x] — RunStep now stores runTask + cancels on .onDisappear. Both Retry paths updated. 2 new source-inspection tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 27 WizardStepContinueGateTests pass (was 25, +2). PythonRunnerTests 10, PostConvertVerifierTests 14 unchanged. Python 351 unchanged.
+
+**Closed-status tally:** 109 (iter 92) + M170 = 110 items touched, all closed. Zero known bugs as of iter-93 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW** (high priority): grep sweep for `.onAppear { ... Task { ... } }` patterns across the wizard — find any other views that missed the `.onDisappear` cancel hook. SourceStep's `detectionTask`, other .task vs .onAppear usages, etc.
+- **NEW**: PublishToHuggingFaceSheet dead `progressLog` cleanup.
+- **NEW**: rapid-click debouncing.
+- **NEW**: update feedback_sheet_dismiss_cancel.md (if exists) or add a new memory for the generalized rule.
+
+**Next iteration should pick:** `.onAppear Task` sweep across wizard views (extends iter-93's finding to find any other M170-class issues), OR the long-deferred progressLog cleanup.

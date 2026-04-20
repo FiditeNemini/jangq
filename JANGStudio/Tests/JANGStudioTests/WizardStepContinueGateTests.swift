@@ -221,6 +221,35 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M170 (iter 93): RunStep main-window orphan subprocess on quit/close
+
+    func test_runStep_cancels_runTask_onDisappear() throws {
+        let src = try stepSource("RunStep.swift")
+        XCTAssertTrue(
+            src.contains("@State private var runTask: Task<Void, Never>?"),
+            "RunStep must track the active conversion Task so .onDisappear can cancel it on window close / app quit"
+        )
+        XCTAssertTrue(
+            src.contains(".onDisappear") && src.contains("runTask?.cancel()"),
+            """
+            RunStep needs `.onDisappear { runTask?.cancel() }` so closing
+            the main window (red-X, cmd-Q) tears down the convert subprocess.
+            Without it, Python keeps running for 30 more minutes as an
+            orphaned child of launchd with no UI to cancel from — user sees
+            Mac at 100% CPU after "quitting."
+            """
+        )
+    }
+
+    func test_runStep_retry_buttons_use_runTask_handle() throws {
+        let src = try stepSource("RunStep.swift")
+        // Both Retry paths (after cancelled, after failed) must use the
+        // handle so a subsequent window close can cancel the retry too.
+        let retrySpawns = src.components(separatedBy: "runTask = Task { await start() }").count - 1
+        XCTAssertGreaterThanOrEqual(retrySpawns, 2,
+            "Both Retry buttons (after cancelled + after failed) must store the retry Task in runTask; found \(retrySpawns) spawns via runTask")
+    }
+
     // MARK: - M163 (iter 86): Retry-button Task orphan sweep across read-only sheets
 
     func test_generateModelCardSheet_retry_task_cancelled_onDisappear() throws {

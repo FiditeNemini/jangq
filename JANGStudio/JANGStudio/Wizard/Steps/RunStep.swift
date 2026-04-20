@@ -27,6 +27,18 @@ struct RunStep: View {
     /// ok=true, so `sawSuccessfulDone` stays false and we correctly
     /// report .cancelled.
     @State private var sawSuccessfulDone: Bool = false
+    /// M170 (iter 93): handle to the active conversion Task. Pre-M170,
+    /// .onAppear spawned `Task { await start() }` with no handle — when the
+    /// user closed the main window (red-X) or quit the app (cmd-Q) mid-
+    /// convert, SwiftUI unmounted RunStep, the `runner` @State was lost,
+    /// but this Task kept running and the Python convert subprocess
+    /// continued writing to disk for up to 30 more minutes as an orphaned
+    /// child of launchd. Mac stayed at 100% CPU with no UI to cancel from.
+    /// Same class as iter-85 M162's sheet-dismiss orphan but for the main-
+    /// window view. The .onDisappear hook cancels this handle, which
+    /// propagates through iter-32 M100's withTaskCancellationHandler →
+    /// PythonRunner.cancel() → SIGTERM + 3 s SIGKILL escalation.
+    @State private var runTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -63,7 +75,11 @@ struct RunStep: View {
                 Label("Cancelled — partial output left on disk at output folder.", systemImage: "stop.circle.fill")
                     .foregroundStyle(.orange)
                 HStack {
-                    Button("Retry") { cancelRequested = false; Task { await start() } }
+                    Button("Retry") {
+                        cancelRequested = false
+                        runTask?.cancel()
+                        runTask = Task { await start() }
+                    }
                         .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                     Button("Delete partial output", role: .destructive) {
                         if let out = coord.plan.outputURL {
@@ -86,7 +102,11 @@ struct RunStep: View {
                 }
             } else if coord.plan.run == .failed {
                 Label("Conversion failed — see log", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
-                Button("Retry") { cancelRequested = false; Task { await start() } }
+                Button("Retry") {
+                    cancelRequested = false
+                    runTask?.cancel()
+                    runTask = Task { await start() }
+                }
                 Button("Copy Diagnostics") {
                     // M109 (iter 36): `.first!` would crash the app in sandboxed /
                     // MDM environments where `.desktopDirectory` isn't available.
@@ -130,8 +150,20 @@ struct RunStep: View {
         // auto-start path needs the tighter gate.
         .onAppear {
             if coord.plan.run == .idle {
-                Task { await start() }
+                runTask = Task { await start() }
             }
+        }
+        .onDisappear {
+            // M170 (iter 93): cancel the conversion when RunStep unmounts.
+            // SwiftUI fires .onDisappear on window close (red-X), tab switch
+            // away, and app quit (cmd-Q). Without this hook, the Python
+            // convert subprocess kept running for up to 30 more minutes as
+            // an orphaned child of launchd — user saw Mac pegged at 100%
+            // CPU with no UI to cancel from. The cancel propagates through
+            // iter-32 M100's withTaskCancellationHandler → runner.cancel()
+            // → SIGTERM + 3 s SIGKILL. Matches iter-85 M162 sheet pattern
+            // but for the main-window view.
+            runTask?.cancel()
         }
     }
 
