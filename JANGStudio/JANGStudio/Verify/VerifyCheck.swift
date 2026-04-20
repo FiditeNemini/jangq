@@ -5,7 +5,11 @@ enum VerifyID: String, CaseIterable {
     case jangConfigExists, jangConfigFormat, schemaValid, capabilitiesPresent,
          chatTemplate, tokenizerFiles, shardsMatchIndex, vlPreprocessors,
          videoPreprocessors, generationConfig, layerCountSane,
-         miniMaxCustomPy, tokenizerClassConcrete
+         miniMaxCustomPy, tokenizerClassConcrete,
+         // M116 (iter 40): feedback_model_checklist.md rule 2 — disk size
+         // ≈ GPU RAM, no bloat. Warns when actual disk size differs ≥2×
+         // from what the target bit-width + source size would predict.
+         diskSizeSanity
 }
 
 struct VerifyCheck: Identifiable, Equatable {

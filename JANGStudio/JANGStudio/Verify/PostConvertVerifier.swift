@@ -132,7 +132,79 @@ struct PostConvertVerifier {
                             status: layerCount > 0 ? .pass : .fail, required: true,
                             hint: layerCount > 0 ? "\(layerCount) layers" : "config.json missing or has num_hidden_layers=0"))
 
+        // #13 (M116, iter 40) disk-size sanity — `feedback_model_checklist.md`
+        // rule 2: "disk size ≈ GPU RAM. No bloat." Compare the actual on-disk
+        // shard bytes to what target-bits * source-size would predict.
+        checks.append(Self.diskSizeSanityCheck(
+            outputDir: out,
+            sourceBytes: plan.detected?.totalBytes ?? 0,
+            jangCfg: jangCfg))
+
         return checks
+    }
+
+    /// Shared helper so tests can pin the size-sanity ratios independently.
+    /// Returns a VerifyCheck for the current size-vs-estimate comparison.
+    ///
+    /// Estimate model: quantized size ≈ source_bytes * (actual_bits / 16)
+    /// (assuming bf16 source). Warn window is ≥2× bloat OR ≤0.5× underrun;
+    /// wider than strict to avoid false-positives from overhead files
+    /// (tokenizer, chat templates, etc. add ~5-50 MB which is negligible on
+    /// 10s-of-GB models but significant on small ones).
+    static func diskSizeSanityCheck(
+        outputDir: URL,
+        sourceBytes: Int64,
+        jangCfg: [String: Any]
+    ) -> VerifyCheck {
+        // Sum *.safetensors bytes in the output. Skip imatrix (iter 38 M114:
+        // local cache, not part of the model weights).
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: outputDir.path)) ?? []
+        var diskBytes: Int64 = 0
+        for f in files where f.hasSuffix(".safetensors") && f != "jang_imatrix.safetensors" {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: outputDir.appendingPathComponent(f).path),
+               let size = attrs[.size] as? Int64 {
+                diskBytes += size
+            }
+        }
+
+        // Extract avg bits from jang_config.json. Keys vary across versions:
+        // `quantization.actual_bits_per_weight` (v2) or `quantization.actual_bits` (v1).
+        let quant = (jangCfg["quantization"] as? [String: Any]) ?? [:]
+        let avgBits = (quant["actual_bits_per_weight"] as? Double)
+            ?? (quant["actual_bits"] as? Double)
+            ?? 0.0
+
+        // Missing data → n/a-equivalent pass with a hint noting we couldn't check.
+        // Diagnosing requires at least source-size AND avg-bits.
+        if sourceBytes <= 0 || avgBits <= 0 {
+            return .init(id: .diskSizeSanity, title: "Disk size within expected range",
+                         status: .pass, required: false,
+                         hint: "couldn't compute estimate (missing source size or avg bits)")
+        }
+
+        let expectedBytes = Double(sourceBytes) * avgBits / 16.0
+        let ratio = Double(diskBytes) / expectedBytes
+        let diskGB = Double(diskBytes) / 1_000_000_000
+        let expectedGB = expectedBytes / 1_000_000_000
+
+        // Tolerant thresholds: rule-2 is "≈ GPU RAM", not strict equality.
+        // <0.5× suggests the shards are incomplete or the estimate is way off
+        // (e.g. lots of embeddings skipped). >2× suggests bloat (extra shards
+        // orphaned — matches the M115 failure mode this check is a safety net
+        // for). Anything in [0.5, 2.0] passes silently.
+        if ratio < 0.5 || ratio > 2.0 {
+            return .init(
+                id: .diskSizeSanity,
+                title: "Disk size within expected range",
+                status: .warn, required: false,
+                hint: String(format: "disk=%.2f GB, expected≈%.2f GB (source=%.2f GB @ %.2f bits). ratio=%.2f×",
+                             diskGB, expectedGB,
+                             Double(sourceBytes) / 1_000_000_000, avgBits, ratio))
+        }
+        return .init(id: .diskSizeSanity, title: "Disk size within expected range",
+                     status: .pass, required: false,
+                     hint: String(format: "disk=%.2f GB ≈ expected %.2f GB (ratio=%.2f×)",
+                                  diskGB, expectedGB, ratio))
     }
 
     /// Default wall-time budget for `jang validate`. Validation is file-inspection

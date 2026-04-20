@@ -54,6 +54,102 @@ final class PostConvertVerifierTests: XCTestCase {
         XCTAssertFalse(ok, "validate on a non-existent path must return false")
     }
 
+    // MARK: - Iter 40: M116 disk-size sanity (feedback_model_checklist.md rule 2)
+
+    private func sizeSanityDir(_ name: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("disksize-\(name)-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func plantShard(in dir: URL, name: String, bytes: Int) throws {
+        let data = Data(repeating: 0xAA, count: bytes)
+        try data.write(to: dir.appendingPathComponent(name))
+    }
+
+    func test_diskSizeSanity_inRange_passes() throws {
+        // 1 GB source @ 4 bits = 256 MB expected. Disk 250 MB → ratio 0.98×.
+        let dir = try sizeSanityDir("inrange")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 250_000_000)
+        let check = PostConvertVerifier.diskSizeSanityCheck(
+            outputDir: dir,
+            sourceBytes: 1_000_000_000,
+            jangCfg: ["quantization": ["actual_bits_per_weight": 4.0]])
+        XCTAssertEqual(check.status, .pass, check.hint ?? "")
+        XCTAssertEqual(check.id, .diskSizeSanity)
+    }
+
+    func test_diskSizeSanity_bloated_warns() throws {
+        // 1 GB source @ 4 bits = 256 MB expected. Disk 1 GB (4×) → warn.
+        // This is the M115 failure mode's safety net — orphan old shards
+        // doubling disk size should trip the warn bucket.
+        let dir = try sizeSanityDir("bloated")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 1_000_000_000)
+        let check = PostConvertVerifier.diskSizeSanityCheck(
+            outputDir: dir,
+            sourceBytes: 1_000_000_000,
+            jangCfg: ["quantization": ["actual_bits_per_weight": 4.0]])
+        XCTAssertEqual(check.status, .warn, check.hint ?? "")
+        XCTAssertTrue(check.hint?.contains("disk=") ?? false)
+        XCTAssertTrue(check.hint?.contains("expected") ?? false)
+    }
+
+    func test_diskSizeSanity_underrun_warns() throws {
+        // 1 GB source @ 4 bits = 256 MB expected. Disk 50 MB (0.19×) → warn.
+        // Incomplete convert detected.
+        let dir = try sizeSanityDir("underrun")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 50_000_000)
+        let check = PostConvertVerifier.diskSizeSanityCheck(
+            outputDir: dir,
+            sourceBytes: 1_000_000_000,
+            jangCfg: ["quantization": ["actual_bits_per_weight": 4.0]])
+        XCTAssertEqual(check.status, .warn, check.hint ?? "")
+    }
+
+    func test_diskSizeSanity_excludes_imatrix() throws {
+        // imatrix file should NOT count toward disk size — it's cache, not
+        // weights. 250 MB real shard + 500 MB imatrix should still ratio
+        // to 0.98× (expected 256 MB), not 2.9×.
+        let dir = try sizeSanityDir("with-imatrix")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 250_000_000)
+        try plantShard(in: dir, name: "jang_imatrix.safetensors", bytes: 500_000_000)
+        let check = PostConvertVerifier.diskSizeSanityCheck(
+            outputDir: dir,
+            sourceBytes: 1_000_000_000,
+            jangCfg: ["quantization": ["actual_bits_per_weight": 4.0]])
+        XCTAssertEqual(check.status, .pass, "imatrix must NOT count toward disk ratio: \(check.hint ?? "")")
+    }
+
+    func test_diskSizeSanity_missing_source_passes_with_hint() throws {
+        // No source bytes + no avg bits → can't compute expected. Pass
+        // (not a failure — just no data to check).
+        let dir = try sizeSanityDir("missing")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 100_000_000)
+        let check = PostConvertVerifier.diskSizeSanityCheck(
+            outputDir: dir, sourceBytes: 0, jangCfg: [:])
+        XCTAssertEqual(check.status, .pass)
+        XCTAssertTrue(check.hint?.contains("couldn't compute") ?? false)
+    }
+
+    func test_diskSizeSanity_accepts_v1_bitsField_fallback() throws {
+        // Some older jang_config.json used "actual_bits" (no _per_weight suffix).
+        // Helper must accept both so v1 outputs don't get falsely warned.
+        let dir = try sizeSanityDir("v1-bits")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 250_000_000)
+        let check = PostConvertVerifier.diskSizeSanityCheck(
+            outputDir: dir,
+            sourceBytes: 1_000_000_000,
+            jangCfg: ["quantization": ["actual_bits": 4.0]])
+        XCTAssertEqual(check.status, .pass)
+    }
+
     func test_runJangValidate_timeoutFiresWithinTolerance() async {
         // Use an intentionally unreachable executable override so the child
         // subprocess just hangs waiting for stdin / never returns. The timeout

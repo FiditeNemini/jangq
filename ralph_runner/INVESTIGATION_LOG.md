@@ -1592,3 +1592,50 @@ Or a domain item: M87, M97, M106, Cat D.
 - Rule 6 (config audit) → PostConvertVerifier rows #1-#4 cover ✓
 
 **Next iteration should pick:** M116 (Swift size-check — closes rule 2, Cat D completion impulse). OR rotate to domain items (M87, M97, M106). OR a final grep-audit on ralph_runner Python (Swift saturation detected iter 37; Python side hasn't been swept).
+
+---
+
+## 2026-04-20 iteration 40 — M116 Swift disk-size sanity + feedback_model_checklist.md rule 2 closure
+
+**Angle:** Third consecutive iter on `feedback_model_checklist.md`. iter 38 closed rule 1 publish-side (M114), iter 39 closed rule 1 convert-side (M115), iter 40 closes rule 2 (size ≈ GPU RAM).
+
+**Deep trace walkthrough:**
+1. audit.py:a7 already has size-vs-estimate (iter-15 M72). Ralph harness uses it. Swift PostConvertVerifier — the wizard-side verifier that users actually SEE in the UI — does not.
+2. That means: iter-39 M115 pre-fix scenario (orphan shards doubling disk size from re-convert leakage) would be caught BY RALPH but INVISIBLE TO USERS USING THE WIZARD. The M115 fix in convert.py removes the bug source, but a defense-in-depth verifier row catches it if it ever recurs (e.g., from a different code path that also leaves orphans).
+3. **Fix architecture:**
+   - New VerifyID case `diskSizeSanity`. Row #13.
+   - Static helper `diskSizeSanityCheck(outputDir:sourceBytes:jangCfg:)` so tests can exercise ratios without constructing a full ConversionPlan.
+   - Estimate: `expected = source_bytes * actual_bits / 16` (bf16 source).
+   - Warn window `<0.5×` or `>2.0×`. Tolerance is intentional — rule 2 is "≈", not strict equality. Overhead from tokenizer + chat template + generation_config is ~5-50 MB which matters on small models (500 MB 0.6B models) but is noise on 10s-of-GB outputs. Wider window avoids false-positives on the small case.
+   - Excludes `jang_imatrix.safetensors` (iter-38 M114: not-part-of-the-model).
+   - Accepts both `actual_bits_per_weight` (v2) and `actual_bits` (v1) keys.
+   - Missing data → clean pass with hint. Verifier shouldn't nag about uncheckable configurations.
+4. **Test trade-offs:**
+   - Ratios tested with planted safetensors files of exact sizes. No dependency on real conversion.
+   - Regression-safety test for M115: 4× bloat → warn. If M115 regresses (orphan shards re-appear), this row would flag it in the UI.
+   - Imatrix-exclusion test (250 MB shard + 500 MB imatrix → still 0.98× ratio). Pins the iter-38 boundary.
+   - Negative test (missing data → pass): prevents a future over-zealous change from making the check fail on edge cases.
+
+**Items touched:**
+- M116 [x] — Swift PostConvertVerifier now catches disk-size drift. Rule 2 closed.
+
+**Commit:** (this iteration)
+
+**Verification:** 128 Swift tests (was 122, +6). jang-tools 270 + ralph_runner 68 unchanged.
+
+**Closed-status tally:** 54 (prior) + M116 = 55 closed / 90 total = 61% closure rate.
+
+**feedback_model_checklist.md rule status after iter 40:**
+- Rule 1 ✓ (M114 publish + M115 convert)
+- Rule 2 ✓ (iter-40 M116)
+- Rule 3 (speed test) — M117 open, scope creep
+- Rule 4 (coherent output) — Ralph a3 covers
+- Rule 5 (VL test) — Ralph a11/a12 cover
+- Rule 6 (config audit) — PostConvertVerifier rows #1-#4 cover
+
+**4 of 6 rules now fully automatable-closed.** The 2 remaining (speed test, coherent output) require actual inference which is in the Ralph harness but NOT in the wizard's pre-publish flow. A future Test Inference integration into VerifyStep would close those — logged as M117 + potential M118 for future consideration.
+
+**Next iteration should pick:** 
+- Continue to M117 (in-wizard inference smoke — would close feedback_model_checklist.md rules 3 + 4 in one stroke but requires pulling TestInferenceSheet logic into VerifyStep flow)
+- OR rotate to domain items untouched for many iters (M87 Mistral 4 RoPE live validation, M97 partial HF repo cleanup, M106 DiagnosticsBundle main-thread block)
+- OR a final grep-audit on ralph_runner Python side (Swift saturation detected iter 37; ralph_runner/ Python still unswept since iter 8/12/13/15/16/18)

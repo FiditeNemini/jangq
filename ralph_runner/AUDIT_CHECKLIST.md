@@ -474,7 +474,17 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Tests (8 new):** patterns-list invariant pin, v1 shard removal, v2 shard-count-change orphan removal, imatrix + jang_config removal, user-file protection (13 realistic user files must survive), idempotency, missing-dir tolerance, non-recursive guarantee.
       **Evidence:** `convert.py:33-77` constant + helper, `convert.py:1055-1063` call site, `tests/test_convert_cleanup.py` 8 new tests. 270 jang-tools tests pass (was 262, +8).
       **Commit:** (this iteration)
-- [ ] **M116** — Memory rule 2 says "disk size ≈ GPU RAM. No bloat." PostConvertVerifier has NO size vs estimate check. iter-26 would be the natural home (audit row a7 already does this for Ralph's audit harness, but the Swift PostConvertVerifier doesn't). Add a row that warns when disk size differs ≥20% from the pre-flight size estimate.
+- [x] **M116** — Swift PostConvertVerifier had no disk-size sanity check. Memory rule 2: "disk size ≈ GPU RAM. No bloat." audit.py row a7 covered this for Ralph harness but the wizard-side verifier didn't, so users publishing from JANG Studio got no warning if their convert output bloated (e.g., iter-39 M115 pre-fix: orphan shards doubled disk size silently).
+      **Fix (iter 40):** new VerifyCheck row `#13 diskSizeSanity`.
+      - Exposed as static helper `diskSizeSanityCheck(outputDir:sourceBytes:jangCfg:)` so tests can exercise the ratio math without constructing a full ConversionPlan.
+      - Estimate model: `expected = source_bytes * actual_bits / 16` (bf16 source ≈ 16 bits/weight). Compare actual sum-of-shard-bytes to expected.
+      - Warn window: ratio <0.5× (under-run, incomplete convert) OR >2× (bloat, orphan shards). Deliberately wide since tokenizer/template overhead adds ~5-50 MB on top.
+      - **Excludes `jang_imatrix.safetensors`** from the disk sum (iter-38 M114 ruled it not-part-of-the-model). Separately tested by `test_diskSizeSanity_excludes_imatrix`.
+      - **Accepts both v1 and v2 config keys** (`actual_bits_per_weight` OR `actual_bits`) — older converts used the shorter form. Pinned by `test_diskSizeSanity_accepts_v1_bitsField_fallback`.
+      - **Missing data = clean pass with hint**: if source size or avg bits aren't known (e.g., running against a detached output dir), pass with "couldn't compute estimate" instead of failing. Verifier's job is to spot real problems, not nag about untested configurations.
+      **Tests (6 new):** in-range pass, 4×-bloat warn (M115 regression safety-net), 0.19×-underrun warn, imatrix exclusion (iter-38 M114 boundary test), missing-source pass-with-hint, v1 bits key fallback.
+      **Evidence:** `VerifyCheck.swift:9-10` enum case, `PostConvertVerifier.swift:125-203` row + helper. 128 Swift tests pass (was 122, +6).
+      **Commit:** (this iteration)
 - [ ] **M117** — Memory rule 3 says "Speed test — load model, warm up, run 3 prompts at correct temp". PostConvertVerifier doesn't test inference at all (audit.py does via a15 but only as one-shot). Consider a pre-publish inference smoke test in the wizard: 3 prompts, 20 tokens each, surface tok/s and any loops. Would extend VerifyStep. Scope creep; logged for future consideration.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button
