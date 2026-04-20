@@ -225,6 +225,25 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M185 (JANGQuantizer.swiftpm — URL query injection in listJobs + silent health-check error in SettingsView)** — Iter-120 audited the previously-unaudited `jang-server/frontend/JANGQuantizer.swiftpm/` Swift Package (jang-server's standalone client UI). Found two bugs in the first pass — different classes, both real, both standard fixes from the iter-83/92/94/101 patterns I've been refining.
+      **Bug A — URL query injection in `APIClient.listJobs` (APIClient.swift:49):**
+      ```swift
+      var path = "/jobs?"
+      if let u = user, !u.isEmpty { path += "user=\(u)&" }
+      if let p = phase, !p.isEmpty { path += "phase=\(p)&" }
+      ```
+      String concatenation without URL encoding. A username containing `&`, `=`, `?`, `#`, `+`, space, or `%` breaks the URL OR injects parameters. Example: user named `alice&phase=COMPLETED` → server receives `user=alice` AND `phase=COMPLETED` (overriding any phase the caller intended). Not adversarial in the usual SSRF sense (user names are typically benign) but a real data-correctness bug.
+      **Fix:** rebuilt with `URLComponents` + `URLQueryItem`. URLSession encodes correctly. Defensive `guard let pathPlusQuery = components.string` surfaces composition failures clearly.
+      **Bug B — silent health-check error in `SettingsView.Check Connection` button:**
+      ```swift
+      Button("Check Connection") { Task { do { health = try await api.getHealth() } catch { health = nil } } }
+      ```
+      Classic iter-35 M107 / iter-90 M167 silent-swallow pattern in a fresh file. User clicks "Check Connection" → server unreachable / wrong URL / bad token → `health = nil` → status indicator simply disappears with NO error message. User has zero diagnostic for what failed.
+      **Fix:** added `@State private var lastError: String?`. Catch branch sets `lastError = "Connection failed: \(error.localizedDescription)"` (uses iter-91 M168 / iter-92 M169 actionable-description pattern from `APIError.errorDescription`). Renders in red below the button when non-nil. Initial-load `.task` keeps silent-fail behavior (server-not-yet-started shouldn't show a banner on first app open) — only the user-clicked button surfaces the error.
+      **Tests:** the swiftpm has no XCTest harness; visual code review + re-running M182 sweep (78 ralph_runner tests pass; the new edits are clean per the secrets sweep).
+      **Meta-lesson — patterns identified in one app surface in fresh apps the same way.** iter-35 M107 (Settings silent-swallow) was fixed in JANGStudio months ago. JANGQuantizer.swiftpm is a younger, smaller app written by the same team — and shipped with the same anti-pattern. **Rule: when a meta-pattern is established for one app, sweep ALL apps in the monorepo for the same pattern.** Iter-117 M182's repo-wide approach for secrets is the same idea applied at the test level; iter-120 M185 applies it as a code-pattern review.
+      **Meta-lesson — string concatenation for URL query strings is an evergreen bug.** Even in 2025 Swift code with the `URLComponents` API readily available, devs reach for the simpler `+= "param=\(value)&"` pattern. **Rule: any URL query construction in any HTTP client must use `URLComponents` + `URLQueryItem`. Banner this in the JANGQuantizer code review checklist (and in feedback memory if a session-spanning rule is warranted).**
+      **Commit:** (this iteration)
 - [x] **M184 (M182 sweep was scanning 569 generated files in `.build/` dirs — SKIP_DIR_NAMES gap)** — Iter-119 was originally scoped as "extend coverage to HTML/JS for jang-server frontend." Found that the frontend is a Swift Package (`.swiftpm`) — Swift files already covered by M182. While inspecting coverage, ran a diagnostic that revealed M182's `_iter_source_files` was scanning **569 files inside `JANGQuantizer.swiftpm/.build/` build outputs every test run** — generated code that has no business being audited. Slowed the test ~5× AND risked false positives from compiler-generated identifiers that happen to shape-match secret regexes.
       **Root cause:** `SKIP_DIR_NAMES` had `"build"` (lowercase, no dot) but the SwiftPM output dir is named `.build` with a leading dot. `Path.parts` matches whole components — `.build` doesn't match `build` even with substring logic.
       **Fix (iter 119):** added `.build` to SKIP_DIR_NAMES with an explanatory comment. Pre-emptively also added `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox` (other common dotted build/cache dirs that could appear in future).

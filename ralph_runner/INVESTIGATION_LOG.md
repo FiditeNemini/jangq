@@ -5229,3 +5229,43 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: add a diagnostic test that asserts file count in each scope is within an expected range (catches future skip-set bugs of the M184 class).
 
 **Next iteration should pick:** audit JANGQuantizer.swiftpm with the iter-83 pipe-drain / iter-94 view-lifecycle / iter-92 remediation / iter-101 ambiguous-pass patterns (fresh surface, high-yield given prior patterns), OR rate-limiting on jang-server, OR add the diagnostic file-count test from M184's meta-lesson.
+
+---
+
+## 2026-04-20 iteration 120 — M185 JANGQuantizer.swiftpm audit (URL injection + silent error)
+
+**Angle:** Iter-119 forecast: audit jang-server's Swift frontend for established patterns.
+
+**Deep trace walkthrough:**
+1. **Inventoried JANGQuantizer.swiftpm Sources:** 7 files, ~1228 lines. `APIClient.swift` (HTTP client), `Models.swift` (Codable types), `JANGQuantizerApp.swift` (app entry), `SettingsView.swift`, `SubmitView.swift`, `QueueView.swift`, `Theme.swift`.
+2. **Audit lens 1 — URL handling:** read APIClient.swift end-to-end. Found `listJobs` building query string with raw concatenation (`path += "user=\(u)&"`). Classic URL-encoding bug. Username with `&`/`=`/`?` injects parameters or breaks the URL.
+3. **Audit lens 2 — silent-swallow patterns** (iter-35 M107):  Read SettingsView.swift. The "Check Connection" button's catch branch was `} catch { health = nil }` — silent swallow. User sees nothing happen + no error message.
+4. **Two distinct fixes:**
+   - APIClient: rebuild query with `URLComponents` + `URLQueryItem`. Add defensive `guard let pathPlusQuery = components.string` for composition failures.
+   - SettingsView: added `@State lastError: String?`. Surface on user-clicked Check Connection (initial-load `.task` keeps silent-null because the server might not be started yet — a banner on first open would be jarring).
+5. **No test harness in the swiftpm.** SwiftPM-with-XCTest setup wasn't established. Future iter could add one. For now, validation is via M182 secrets sweep (still passes) + visual code review.
+
+**Meta-lesson — patterns identified in one app surface in fresh apps the same way.** iter-35 M107 fixed JANGStudio's Settings silent-swallow months ago. JANGQuantizer.swiftpm — written by the same dev — shipped with the same pattern. Same dev, same blind spot, but in a new file outside the previous audit's scope. **Rule: when a meta-pattern is established for one app in a monorepo, sweep ALL apps for the same pattern.** iter-117 M182's repo-wide approach for secrets is the same idea at the test level; iter-120 M185 is the same idea at code-review level. Could codify this with a per-pattern app-coverage table — "iter-35 silent-swallow check applied to: JANGStudio ✓, JANGQuantizer ✓, jang-server ✓ (iter-111), ralph_runner ✓ (iter-106)".
+
+**Meta-lesson — URL query construction without URLComponents is an evergreen bug.** Even in 2025 Swift with URLComponents readily available, devs reach for `+= "key=\(value)&"`. The pattern keeps appearing because it's "obviously simple" right up until a value contains `&`. **Rule: any URL query construction in any HTTP client must use URLComponents + URLQueryItem. Codify in a feedback memory if this comes up a second time.**
+
+**Items touched:**
+- M185 [x] — APIClient.listJobs URL injection fixed; SettingsView health-check error surfacing added.
+
+**Commit:** (this iteration)
+
+**Verification:** 78 ralph_runner tests pass (M182 secrets sweep clean post-edit). Frontend has no XCTest harness; visual code review only.
+
+**Closed-status tally:** 138 (iter 119) + M185 = 139 items touched, all closed. Zero known bugs as of iter-120 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: continue JANGQuantizer.swiftpm audit — sweep remaining files (Models.swift, JANGQuantizerApp.swift, SubmitView.swift, QueueView.swift, Theme.swift) for the established meta-patterns (sheet-dismiss orphans, view-lifecycle cancel, ambiguous-pass states).
+- **NEW**: rate-limiting on jang-server (DoS surface).
+- **NEW**: codify "URL query construction → URLComponents always" as feedback memory.
+
+**Next iteration should pick:** continue JANGQuantizer.swiftpm sweep (remaining 5 files, likely more pattern hits given the M185 results), OR rate-limiting on jang-server.
