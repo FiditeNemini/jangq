@@ -1,0 +1,15 @@
+# Which profiles to exercise per tier. Profile list itself is authoritative in
+# jang_tools/allocate.py (JANG_PROFILES dict); this file only picks a subset
+# for Ralph to cycle through.
+
+tier_1_profiles:
+  jang: [JANG_4K]       # first smoke: single profile only, expand after green
+  jangtq: []            # no JANGTQ on tier 1 (no whitelisted archs here)
+
+tier_2_profiles:
+  jang: [JANG_4K, JANG_2S, JANG_4M]
+  jangtq: [JANGTQ4]
+
+tier_3_profiles:
+  jang: [JANG_4K, JANG_2L, JANG_4M]
+  jangtq: [JANGTQ2, JANGTQ3, JANGTQ4]
