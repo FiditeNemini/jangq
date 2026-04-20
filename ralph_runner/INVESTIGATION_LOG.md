@@ -3209,3 +3209,44 @@ Three iters building the same pattern — it's now a template. Future read-side 
 - Continue peer-helper audit: are there other 3+-copy patterns in the Swift codebase? Pipe-drain code in PythonRunner + PublishService + InferenceRunner might be a candidate.
 
 **Next iteration should pick:** M154 dedicated PythonCLIInvoker tests (closes the contract) OR Pipe-drain peer-helper audit.
+
+## 2026-04-20 iteration 77 — M154 PythonCLIInvoker dedicated contract tests
+
+**Angle:** Iter-76 M153 extracted the helper. 34 existing service tests verified the migration preserved behavior, but they exercise the helper INDIRECTLY — through type-specific service assertions. A regression in the helper itself (e.g., a future timeout addition gone wrong) might pass through the service tests if it doesn't touch the service's observable surface.
+
+**Deep trace walkthrough:**
+1. **Coverage gap:** iter-76's verification was "34 existing tests still pass." That confirms no behavioral break, but it doesn't PIN each contract of the helper. Future changes could break invariants the service tests don't directly assert.
+2. **Five contracts to pin:**
+   - Happy path: zero-exit → stdout bytes returned as Data.
+   - Error path: non-zero exit → errorFactory invoked with (code, stderr).
+   - Error propagation: errorFactory's returned error rethrown as-is (no envelope/wrapping).
+   - Args plumbing: argv forwarded to subprocess unchanged.
+   - Cancel propagation: Task.cancel → SIGTERM → subprocess stops within 3s.
+3. **executableOverride param.** To test without invoking a real Python, need to point the invoker at a shell script. Added `executableOverride: URL? = nil` — matches iter-31 M98 (PythonRunner) and iter-32 M100 (InferenceRunner) patterns. Default nil preserves production behavior; tests supply the override.
+4. **Test harness: shell scripts via makeTempScript.** Same pattern as InferenceRunnerTests. `#!/bin/bash` + 0o755 permissions.
+5. **Cancel test specifics:** the classic iter-31 M98 shape — tick-writing subprocess + mtime non-advance check. Critically does NOT await the cancelled Task's value (would hang on regression and time out at 10min). 5s sleep past the SIGTERM+3s-SIGKILL window, then 1s gap between mtime reads.
+6. **Args-forward test.** Shell script `for a in "$@"; do echo "$a"; done > argsFile` dumps argv to a tempfile. Test reads the file, verifies `alpha`, `--beta`, `gamma` all appear. Catches any future change that modifies argv (e.g., env prepending).
+
+**Why these five specifically:** each corresponds to ONE line of the helper body. If a future refactor replaces `proc.executableURL = …`, `proc.arguments = args`, `proc.waitUntilExit()`, the cancel wrap, or the errorFactory call, the corresponding test fails with a specific line pointer.
+
+**Meta-lesson — when you extract, pin the contract.** iter-75 M152 extracted `_json_utils` WITH 11 direct tests from the start. Iter-76 M153 extracted PythonCLIInvoker WITHOUT, betting that service-level tests would catch issues. That's a weaker bet. Future crystallizations: write the helper's dedicated test file in the same iter.
+
+**Items touched:**
+- M154 [x] — PythonCLIInvoker gains executableOverride test hook + 5 dedicated contract tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 175 Swift tests pass (was 170, +5 for PythonCLIInvokerTests). Python 348 + ralph 73 unchanged.
+
+**Closed-status tally:** 89 (iter 76) + M154 = 90 closed / 100 total = **90.0% closure rate.**
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: loader.py's 7 mid-load json.loads sites (iter-74 deferred these) — now trivial with `_json_utils` in place.
+- **NEW**: routing_profile.py (3 sites) + codebook_vq.py (2 sites) — same `_json_utils` migration.
+- **NEW**: Pipe-drain peer-helper audit (iter-76 forecast) — PythonRunner + PublishService + InferenceRunner each drain stdout/stderr with Task.detached patterns; check for 3+-copy threshold.
+
+**Next iteration should pick:** loader.py mid-load migration (now cheap with `_json_utils` ready) OR Pipe-drain audit.

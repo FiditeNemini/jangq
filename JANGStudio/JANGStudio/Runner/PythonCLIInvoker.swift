@@ -35,11 +35,19 @@ enum PythonCLIInvoker {
     ///
     /// - Parameters:
     ///   - args: full argv to pass to the python binary (including `-m jang_tools …`).
+    ///   - executableOverride: test-only override for the executable URL.
+    ///     Production code passes nil (defaults to `BundleResolver.pythonExecutable`);
+    ///     tests pass a short-sleep / echo shell-script URL to exercise
+    ///     cancel, error-factory invocation, and stdout-round-trip paths
+    ///     without needing an actual Python + model. Mirrors the
+    ///     `executableOverride` pattern on PythonRunner / InferenceRunner
+    ///     (iter-31 M98 / iter-32 M100).
     ///   - errorFactory: closure invoked on non-zero exit. Receives the
     ///     terminationStatus and captured stderr; should return the
     ///     service-specific typed error.
     static func invoke(
         args: [String],
+        executableOverride: URL? = nil,
         errorFactory: @escaping @Sendable (Int32, String) -> Error
     ) async throws -> Data {
         let handle = ProcessHandle()
@@ -48,7 +56,7 @@ enum PythonCLIInvoker {
                 DispatchQueue.global().async {
                     do {
                         let proc = Process()
-                        proc.executableURL = BundleResolver.pythonExecutable
+                        proc.executableURL = executableOverride ?? BundleResolver.pythonExecutable
                         proc.arguments = args
                         let out = Pipe()
                         let err = Pipe()

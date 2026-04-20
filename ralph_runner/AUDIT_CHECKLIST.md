@@ -892,6 +892,18 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M154 (dedicated `PythonCLIInvoker` contract tests)** — iter-76 M153 extracted the shared helper but relied on existing service-level tests to verify behavior (34 tests across CapabilitiesServiceTests/ProfilesServiceTests/AdoptionServicesTests). That's indirect coverage — a helper-level regression could slip through the service tests' type-specific assertions. Iter-77 pins the contract directly.
+      **Fix (iter 77):**
+      - Added `executableOverride: URL? = nil` parameter to `PythonCLIInvoker.invoke` (matches iter-31/32 InferenceRunner / PythonRunner pattern). Production code passes nil; tests pass shell-script URLs.
+      - New `Tests/JANGStudioTests/PythonCLIInvokerTests.swift` with 5 contract tests covering:
+        1. `test_invoke_returns_stdout_on_zero_exit` — happy-path data round-trip.
+        2. `test_invoke_calls_errorFactory_with_code_and_stderr_on_nonzero_exit` — errorFactory receives actual terminationStatus + captured stderr.
+        3. `test_errorFactory_error_is_rethrown_not_wrapped` — caller's returned error is thrown as-is (not wrapped in any envelope).
+        4. `test_invoke_forwards_args_to_subprocess` — argv reaches the spawned process (shell script dumps `"$@"` to file, verified).
+        5. `test_consumer_task_cancel_terminates_subprocess_within_3_seconds` — Task.cancel propagates SIGTERM to subprocess; mtime-non-advance verification matches iter-31 M98 style (avoids hanging test harness on regression).
+      **Why matters now:** iter-76 eliminated ~160 lines of duplicated subprocess-cancel code. Any future change (timeout support, retry logic) now touches ONE file. Dedicated tests mean a regression in that file will fail loudly with a test-name that points directly at the bug.
+      **Evidence:** `JANGStudio/JANGStudio/Runner/PythonCLIInvoker.swift:33-45, 56-59`, new `JANGStudio/Tests/JANGStudioTests/PythonCLIInvokerTests.swift`. 175 Swift tests pass (was 170, +5 for M154). Python 348 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [x] **M153 (Swift-side analog of M152: extract shared `PythonCLIInvoker`)** — Iter-51 M129 aligned the typed-error shapes across 5 adoption services (Recommendation/Examples/ModelCard/Capabilities/Profiles); iter-75 M152 established the "3+ local copies = extract" threshold Python-side; iter-76 applies the same crystallization to the Swift side.
       **Pre-M153 state:** each of the 5 services had a nearly-identical 31-37-line private `invokeCLI(args:)` body — ProcessHandle + withTaskCancellationHandler + DispatchQueue + waitUntilExit dance + typed error on non-zero exit. **5 copies of the same M101 (iter-33) cross-layer cancel pattern.**
       **Fix (iter 76):** New `JANGStudio/JANGStudio/Runner/PythonCLIInvoker.swift`:
