@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		205C14AFA0822C693EADFF4E /* PublishToHuggingFaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA263C1681E544386558CE46 /* PublishToHuggingFaceSheet.swift */; };
 		25C84B0C74922EE8949D4919 /* PublishService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DBFFA8816FEFBC7EFF5FF5D /* PublishService.swift */; };
+		268698DABB093D7C391FC033 /* RecommendationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04AD44A81E1DAF14ED12741 /* RecommendationService.swift */; };
 		2CA760527194D4934549CBB9 /* WizardCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55E86AE1E8A9CA41738204F /* WizardCoordinator.swift */; };
 		33F6AA5CCCA39B8E97910D8A /* SourceStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60D58AD503750EE0B4438BE /* SourceStep.swift */; };
 		361E49E2886C5FDEA36281E6 /* CLIArgsBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7B997A8EC3B7474A12CA184 /* CLIArgsBuilder.swift */; };
@@ -26,6 +27,7 @@
 		5CF3EB0BD85E74F7C4A75946 /* PythonRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570938F731FB414081F9CBED /* PythonRunner.swift */; };
 		61AB1FE690E52ECD9BF4F047 /* broken_output in Resources */ = {isa = PBXBuildFile; fileRef = D88E45BF47B4C6BE9011652A /* broken_output */; };
 		641152AD3B374C0ACFBFE03C /* TestInferenceViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A1EBBC25F8952FDB89345F /* TestInferenceViewModel.swift */; };
+		66088183C87E8C622FB3A00A /* InfoHint.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF811908F2588183C287B65E /* InfoHint.swift */; };
 		69E48802F67A8560875697D3 /* CLIArgsBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 277EB647F5B498995EECE22B /* CLIArgsBuilderTests.swift */; };
 		6B9F115F2F6B1C5BF471445D /* PreflightRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */; };
 		6D1E60F17B76C9066EAEADFC /* ExamplesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E8D05B41D11B2CF1DFB26F2 /* ExamplesService.swift */; };
@@ -127,6 +129,7 @@
 		B7B997A8EC3B7474A12CA184 /* CLIArgsBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIArgsBuilder.swift; sourceTree = "<group>"; };
 		C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JANGStudioApp.swift; sourceTree = "<group>"; };
 		CB6996C22CD2CF0F5D29A975 /* ProfilesService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesService.swift; sourceTree = "<group>"; };
+		D04AD44A81E1DAF14ED12741 /* RecommendationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationService.swift; sourceTree = "<group>"; };
 		D234B511E845AC30646F6D62 /* TestInferenceSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestInferenceSheet.swift; sourceTree = "<group>"; };
 		D2562B5664B3474649948706 /* ProfilesServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesServiceTests.swift; sourceTree = "<group>"; };
 		D730781F656472007CB478AD /* InferenceRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InferenceRunner.swift; sourceTree = "<group>"; };
@@ -136,6 +139,7 @@
 		E15422D1BC7171E8BB13BA57 /* ModelCardService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelCardService.swift; sourceTree = "<group>"; };
 		E1A1EBBC25F8952FDB89345F /* TestInferenceViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestInferenceViewModel.swift; sourceTree = "<group>"; };
 		E694F8C56C73EE3B6ADC6A9F /* ConversionPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversionPlan.swift; sourceTree = "<group>"; };
+		EF811908F2588183C287B65E /* InfoHint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfoHint.swift; sourceTree = "<group>"; };
 		F665B5BD78256BE6B512B888 /* GenerateModelCardSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerateModelCardSheet.swift; sourceTree = "<group>"; };
 		FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONLProgressParserTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -192,6 +196,7 @@
 			isa = PBXGroup;
 			children = (
 				F665B5BD78256BE6B512B888 /* GenerateModelCardSheet.swift */,
+				EF811908F2588183C287B65E /* InfoHint.swift */,
 				AA263C1681E544386558CE46 /* PublishToHuggingFaceSheet.swift */,
 				09F43E4E816CE16F4461846C /* SettingsWindow.swift */,
 				D234B511E845AC30646F6D62 /* TestInferenceSheet.swift */,
@@ -266,6 +271,7 @@
 				CB6996C22CD2CF0F5D29A975 /* ProfilesService.swift */,
 				7DBFFA8816FEFBC7EFF5FF5D /* PublishService.swift */,
 				570938F731FB414081F9CBED /* PythonRunner.swift */,
+				D04AD44A81E1DAF14ED12741 /* RecommendationService.swift */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -494,6 +500,7 @@
 				6D1E60F17B76C9066EAEADFC /* ExamplesService.swift in Sources */,
 				F904F16D695D501680DE6196 /* GenerateModelCardSheet.swift in Sources */,
 				411D22571A36869118D0CB81 /* InferenceRunner.swift in Sources */,
+				66088183C87E8C622FB3A00A /* InfoHint.swift in Sources */,
 				8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */,
 				9480E209FB0E63DFC3C755D1 /* JSONLProgressParser.swift in Sources */,
 				9A50B4212901B90908B5BD5D /* ModelCardService.swift in Sources */,
@@ -506,6 +513,7 @@
 				25C84B0C74922EE8949D4919 /* PublishService.swift in Sources */,
 				205C14AFA0822C693EADFF4E /* PublishToHuggingFaceSheet.swift in Sources */,
 				5CF3EB0BD85E74F7C4A75946 /* PythonRunner.swift in Sources */,
+				268698DABB093D7C391FC033 /* RecommendationService.swift in Sources */,
 				42CC99F4C90F03FD1B6E9B47 /* RunStep.swift in Sources */,
 				B775DFA18A0AF1B202DB3764 /* SettingsWindow.swift in Sources */,
 				33F6AA5CCCA39B8E97910D8A /* SourceStep.swift in Sources */,

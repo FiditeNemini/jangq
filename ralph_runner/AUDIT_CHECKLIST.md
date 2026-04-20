@@ -153,7 +153,15 @@ The goal: every item reaches `[x]` with production-ready behavior. "Production" 
 
 - [x] **L01** — `jang-tools recommend --model <dir> --json` CLI exists; returns `detected`, `recommended`, `beginner_summary`, `warnings`, `why_each_choice` for any source model.
       **Evidence:** commit in iteration 2; 35 pytest tests across 17 model families pass (dense: llama/mistral/qwen2/qwen3/gemma3/phi3/falcon; MoE: qwen2_moe/mixtral/qwen3_5_moe/deepseek_v32/mistral4/minimax_m2/glm_moe_dsa; hybrid: nemotron_h; VL: qwen2_vl/idefics3/qwen3_vl video).
-- [ ] **L02** — `SourceDetector` (Swift) calls `jang-tools recommend` alongside `inspect-source` and pre-fills the wizard's defaults (profile, family, method, hadamard, force_dtype).
+- [x] **L02** — `SourceDetector` (Swift) calls `jang-tools recommend` alongside `inspect-source` and pre-fills the wizard's defaults (profile, family, method, hadamard, force_dtype).
+      **Evidence:** new `RecommendationService.swift` wraps the CLI via `JSONDecoder` with `.convertFromSnakeCase`; `SourceStep.detectAndRecommend(url:)` runs both calls in sequence and applies defaults via `applyRecommendation(_:)`. Beginner summary + warnings + InfoHint tooltips shown in new "Recommended for this model" section. Step 1 now renders the full recommendation block below the Detected card.
+      **Commits:** (this iteration, see git log).
+- [x] **L06** — Step 1 shows a "Recommended for this model" banner once folder is picked, pre-populated from `recommend` output (beginner_summary + warnings).
+      **Evidence:** same commit as L02; rendered via `Section { ... } header: { Text("Recommended for this model") ... }` in SourceStep.
+- [x] **L07** — Alternative profiles appear as expandable "Other options" in Step 3 with `use_when` description. (Moved to Step 1 — fits better there since it's part of the recommendation.)
+      **Evidence:** `DisclosureGroup("Other options")` in SourceStep renders each `Recommendation.Alternative` with family badge + `useWhen` caption.
+- [x] **L08** — Every warning from `recommend.warnings` surfaces as a banner in the appropriate step.
+      **Evidence:** SourceStep iterates `rec.warnings` with `Label(w, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)`.
 - [ ] **L03** — Every field in Step 2 (Advanced overrides) has an `InfoHint` popover with plain-English explanation derived from `recommend`'s `why_each_choice`.
 - [ ] **L04** — Every field in Step 3 (Profile, Method, Hadamard, Block size, Output folder) has an `InfoHint` popover + alternatives surface.
 - [ ] **L05** — Preflight rows in Step 3 link to plain-English remediation steps on failure (e.g., "Disk space" → "This is the free GB on your output volume. You need ~X GB — free up space or pick a different drive").
