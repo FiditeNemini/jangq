@@ -5185,3 +5185,47 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: audit jang-server frontend assets for hardcoded secrets (HTML/JS files weren't covered by M182 because not .py/.swift, nor by M183 because not config/script).
 
 **Next iteration should pick:** add HTML/JS to the secrets sweep coverage (small completion of M182/M183 line), OR rate-limiting on jang-server, OR a fresh non-security audit angle.
+
+---
+
+## 2026-04-20 iteration 119 — M184 SKIP_DIR_NAMES gap (.build) + SwiftPM coverage diagnostic
+
+**Angle:** Iter-118 forecast: "add HTML/JS to the secrets sweep for jang-server frontend." Started here, found the frontend is a Swift Package — already covered by M182's `.swift` extension. Pivoted to a coverage-diagnostic check that revealed a real bug.
+
+**Deep trace walkthrough:**
+1. **Investigated jang-server frontend.** `jang-server/frontend/JANGQuantizer.swiftpm/` — Swift Package, not HTML/JS. M182 already covers `.swift` files repo-wide.
+2. **Wrote a diagnostic to confirm SwiftPM Sources are picked up** by `_iter_source_files`. Output:
+   - 8 SwiftPM source files covered ✓
+   - **569 files in `.build/` dirs being scanned** ✗ (should be 0)
+3. **Root cause:** `SKIP_DIR_NAMES` had `"build"` (lowercase, no dot) but the SwiftPM build output is `.build` (with leading dot). `Path.parts` matches whole components — `.build` ≠ `build`.
+4. **Impact:** M182's `test_no_hardcoded_secrets_repo_wide` was scanning ~5x more files than necessary every test run. Performance cost (~few hundred ms wasted) + future false-positive risk if compiler-generated identifiers shape-match secret regexes.
+5. **Fix:** added `.build` + `.pytest_cache` + `.mypy_cache` + `.ruff_cache` + `.tox` to SKIP_DIR_NAMES. Pre-emptive coverage of common dotted build/cache dirs.
+6. **Almost added a serious bug:** initially also added `.swiftpm` to the skip set. Would have skipped the legit JANGQuantizer Sources because they live INSIDE `JANGQuantizer.swiftpm/Sources/`. `.swiftpm` is a CONTAINER directory (like `.app`), not build output. Caught by my own follow-up verification ("7 SwiftPM Sources still covered" check). Removed the offending entry and added a NOTE comment for the next maintainer.
+7. **Post-fix verification:** 7 SwiftPM Sources still covered; 0 files in `.build/` dirs scanned. M182 test still passes.
+
+**Meta-lesson — diagnostic checks reveal infrastructure bugs the test logic can't catch.** M182's test PASSED before iter-119 (no real secrets in .build/ output) — the bug was PERFORMANCE + RISK-OF-FUTURE-FP, not correctness. The test had no signal that something was wrong. **Rule: when designing an exclusion-based test, periodically print what it IS scanning to confirm the exclusion matches intent. Cheap diagnostic; catches the "wrong dir name" / "case mismatch" / "missing dotted variant" skip-set bug class.** Could be a separate diagnostic test that asserts file count is in an expected range.
+
+**Meta-lesson — dotted build dirs need explicit skip entries.** Path-component matching doesn't treat `.build` as containing `build`. Same trap exists for `.gradle`, `.cargo`, `.terraform`, `.idea`. **Rule: when adding skip entries, list BOTH dotted and undotted variants for any dir that could appear with either prefix.**
+
+**Meta-lesson — container directories are NOT build outputs.** `.swiftpm`, `.app`, `.framework`, `.bundle` are macOS bundle conventions — they look like extensions but contain real source code. Distinguish "package container" from "build output" before adding to skip list. The NOTE comment I added in code prevents a future iter from re-introducing the trap I just avoided.
+
+**Items touched:**
+- M184 [x] — fixed M182's silent SKIP_DIR_NAMES gap. Added `.build` + 4 other dotted cache dirs. Added NOTE comment about `.swiftpm` being a container-dir not a build output.
+
+**Commit:** (this iteration)
+
+**Verification:** 78 ralph_runner tests pass (count unchanged — fix is in skip-set logic). Test runtime improvement: ~5x fewer files scanned for the secrets sweeps.
+
+**Closed-status tally:** 137 (iter 118) + M184 = 138 items touched, all closed. Zero known bugs as of iter-119 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: rate-limiting on jang-server (DoS surface).
+- **NEW**: audit JANGQuantizer.swiftpm (jang-server's Swift frontend) for the same patterns swept on JANGStudio Swift — pipe-drain, view-lifecycle cancel, error remediation, ambiguous-pass UX.
+- **NEW**: add a diagnostic test that asserts file count in each scope is within an expected range (catches future skip-set bugs of the M184 class).
+
+**Next iteration should pick:** audit JANGQuantizer.swiftpm with the iter-83 pipe-drain / iter-94 view-lifecycle / iter-92 remediation / iter-101 ambiguous-pass patterns (fresh surface, high-yield given prior patterns), OR rate-limiting on jang-server, OR add the diagnostic file-count test from M184's meta-lesson.

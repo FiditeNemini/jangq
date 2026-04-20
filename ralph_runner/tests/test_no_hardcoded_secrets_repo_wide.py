@@ -43,6 +43,19 @@ REPO_ROOT = Path(__file__).parent.parent.parent  # /Users/eric/jang/
 SKIP_DIR_NAMES = {
     "__pycache__", ".git", ".venv", "venv", "build", "Build",
     "DerivedData", "node_modules", "site-packages",
+    # M184 (iter 119): SwiftPM .build/ output. Dotted-prefix dirs need
+    # explicit entry — `.build` doesn't match the lowercase `build`
+    # entry above (Path.parts compares whole components). Pre-fix the
+    # M182/M183 sweeps scanned 569 generated files inside JANGQuantizer.
+    # swiftpm/.build/ on every run, slowing the test 5× and risking
+    # false positives from shape-matching identifiers in generated code.
+    ".build",
+    # Other common dotted build/cache dirs worth pre-emptively skipping.
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox",
+    # NOTE: do NOT skip ".swiftpm" — that's a Swift Package CONTAINER
+    # directory (like .app), and Sources/ lives INSIDE it. We want to
+    # audit those Swift files. Only the `.build/` subdir within is
+    # generated output and is already covered above.
 }
 
 
