@@ -529,6 +529,62 @@ def _save_job(job: Job):
     conn.close()
 
 
+def _backfill_redact_persisted_logs():
+    """M195 (iter 132): one-shot-per-startup backfill for pre-M193/M194
+    persisted secrets.
+
+    M193 (iter 130) and M194 (iter 131) added redact_for_log at WRITE
+    time — but job rows written BEFORE those iters landed still have
+    unredacted tracebacks and phase_detail strings sitting in
+    WORK_DIR/jobs.db. An operator who rotated their HF_UPLOAD_TOKEN
+    after M181 (iter 116) would STILL have the pre-rotation token
+    embedded in old persisted error tracebacks, readable by anyone
+    with disk access to the server's work dir.
+
+    Idempotent: redact_for_log's ***REDACTED*** sentinel doesn't match
+    any of the 5 patterns, so re-applying the sweep on every restart
+    is safe. Writes happen only when a field actually changes (avoids
+    churn on the sqlite page cache).
+
+    Scope is `phase_detail` + `error` — the two string fields in
+    _job_to_dict that can carry exception text or library-supplied
+    URLs. `log_lines` and `webhook_url` are in-memory-only (never
+    serialized by _job_to_dict), so they need no backfill.
+    """
+    if not DB_PATH.exists():
+        return
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        rows = conn.execute("SELECT id, data FROM jobs").fetchall()
+        updates: list[tuple[str, str]] = []
+        for row_id, data_str in rows:
+            try:
+                d = json.loads(data_str)
+            except Exception:
+                # Corrupt row; _load_jobs_from_db logs a warning later.
+                # Skip here so one bad row doesn't kill the backfill.
+                continue
+            changed = False
+            for field in ("phase_detail", "error"):
+                orig = d.get(field)
+                if isinstance(orig, str) and orig:
+                    redacted = redact_for_log(orig)
+                    if redacted != orig:
+                        d[field] = redacted
+                        changed = True
+            if changed:
+                updates.append((json.dumps(d), row_id))
+        if updates:
+            conn.executemany(
+                "UPDATE jobs SET data = ? WHERE id = ?",
+                updates,
+            )
+            conn.commit()
+            log.info(f"M195 backfill: redacted secrets in {len(updates)} pre-M193/M194 job rows")
+    finally:
+        conn.close()
+
+
 def _load_jobs_from_db():
     """Load completed/failed jobs from DB on startup."""
     if not DB_PATH.exists():
@@ -820,6 +876,9 @@ async def limit_body_size(request: Request, call_next):
 @app.on_event("startup")
 def startup():
     _init_db()
+    # M195 (iter 132): scrub pre-M193/M194 rows at-rest before loading
+    # them into memory. Idempotent; cheap (5 regex subs × #rows).
+    _backfill_redact_persisted_logs()
     _load_jobs_from_db()
     _start_worker()
     log.info(f"Loaded {len(_jobs)} jobs from database, worker started")

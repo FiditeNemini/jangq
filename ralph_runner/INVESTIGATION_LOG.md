@@ -5779,3 +5779,51 @@ Missing any layer creates a silent gap at that boundary. **Rule: for credential 
 - **NEW:** audit jang-server's sqlite DB content — if a job's log lines or error were persisted PRE-M193/M194, they have unredacted secrets on disk. One-shot migration needed: scrub all existing `jobs` rows through `redact_for_log` at startup.
 
 **Next iteration should pick:** sqlite DB backfill for pre-M193/M194 persisted secrets (real data-at-rest leak — operational, actionable), OR JANGStudio Swift-side redaction parity (cross-language consistency), OR Pydantic 422 audit (quick verification).
+
+---
+
+## 2026-04-20 iteration 132 — M195 data-at-rest backfill for pre-M193/M194 persisted secrets
+
+**Angle:** iter-131 forecast top-priority: sqlite DB carries PRE-M193/M194 job rows with unredacted tracebacks + phase_details. Code is clean, data-at-rest isn't. Real operational leak because an operator who rotated their HF_UPLOAD_TOKEN still has the old token embedded in persisted error tracebacks.
+
+**Deep trace walkthrough:**
+1. **Audited what's actually persisted.** `_job_to_dict` serializes 6 structured sub-dicts + 7 top-level fields. Of the free-form strings, only `phase_detail` and `error` can carry exception text or URLs. Crucially:
+   - `log_lines` is NOT serialized — in-memory-only, gone on restart. No backfill needed.
+   - `webhook_url` is NOT serialized — also in-memory-only. Nice side-effect: webhook URLs (which ARE secrets for Slack/Discord) don't survive restart. Not intentionally designed for this but fortuitous.
+2. **Scoped backfill to `phase_detail` + `error`.** Two string fields per row, 5 regex passes each, only write-back if changed.
+3. **Placement decision: startup() hook, BEFORE `_load_jobs_from_db`.** Ordering matters: if the backfill runs AFTER the load, the in-memory `_jobs` dict already has unredacted strings (loaded before scrub), which would be served via `GET /jobs/{id}` until the next save. The ordering pin is load-bearing for the security property.
+4. **Designed for idempotency.** `redact_for_log`'s `***REDACTED***` sentinel doesn't match any of the 5 redaction patterns, so re-applying on every restart is safe. Second-run is effectively a no-op (clean rows aren't rewritten). Design choice: run unconditionally on every startup rather than tracking a version marker. YAGNI — if the DB ever gets huge in production, add a version table, but the cost today is trivial (<1ms per row × small N).
+5. **Edge cases.** Corrupt JSON rows: skip and let `_load_jobs_from_db`'s existing warning fire. Clean rows (no matches): don't rewrite — protects sqlite page cache. DB doesn't exist: early-return on `DB_PATH.exists()`.
+6. **Tests (+7):** real-DB tests using tempfile dirs + importlib module reloading so each test gets an isolated server instance with its own `WORK_DIR`. The module-reload pattern (`sys.modules` delete + re-exec_module) is necessary because the module caches `DB_PATH = WORK_DIR / "jobs.db"` at import time; without re-exec, every test would share the first test's WORK_DIR. Also added a source-inspection pin for the startup ordering.
+7. **Ran suite.** 68/68 pass (was 61, +7).
+
+**Meta-lesson — code-clean ≠ data-clean.** Security hardening on write paths protects NEW data but not data already on disk. The natural mental model after M193/M194 was "we redact now, done" — but "done" only applies to rows written after the helper landed. **Rule: when a security hardening is added to a write path, audit whether any previously-written data has the old vulnerable shape. If so, design a backfill to bring data-at-rest up to spec.** Otherwise you have code-clean + data-dirty = false confidence + real leaks. Parallels iter-117 M182's source sweep lesson: source can be cleaned in one commit; data-at-rest has latency.
+
+**Meta-lesson — startup ordering pins are load-bearing for security properties.** The backfill-then-load ordering isn't just "nice to have" — it's the difference between redaction that actually protects runtime vs. redaction that only protects the next write. A future refactor that "cleans up the startup sequence" could swap the order without touching the backfill function itself. The source-inspection pin (`backfill_idx < load_idx`) catches that specific class of regression. **Rule: when two startup operations have a security-relevant ordering, pin the ordering in a test, not just the existence of each operation.** Existence pins miss ordering regressions; ordering pins catch both.
+
+**Meta-lesson — idempotency is the unsung operational backbone.** Idempotency wasn't added in M195 — it was added in M193 (`redact_for_log`'s sentinel design) and `test_redact_for_log_idempotent`. That one property bought us: (a) safe re-apply on every startup without versioning, (b) retry-friendly if the backfill is interrupted mid-sweep, (c) coordination-free integration at any new boundary. **Rule: when designing a security or data-transform helper, promote idempotency to a first-class design requirement. The cost is typically a well-chosen sentinel; the payoff is flexibility at every later integration point.** Same shape as "pure functions compose well" — idempotent transforms compose well across time.
+
+**Meta-lesson — conditional writes > unconditional writes for backfills.** The `if redacted != orig` check lets clean rows pass through untouched. A naive "always rewrite" backfill would thrash the sqlite page cache on every restart for large DBs, AND trigger mtime-based backup + replication pipelines unnecessarily. **Rule: for any backfill or migration, let conditionality flow to the write path. Conditional writes = clean rows truly untouched = stable cache + stable tooling downstream.** Same principle as idempotency but for side-effects (I/O) rather than computation (transforms).
+
+**Items touched:**
+- M195 [x] — data-at-rest backfill for pre-M193/M194 persisted secrets. Idempotent, ordering-pinned, write-conditional. 7 new regression tests with real sqlite fixtures.
+
+**Commit:** (this iteration)
+
+**Verification:** 68 jang-server tests pass (was 61, +7).
+
+**Closed-status tally:** 148 (iter 131) + M195 = 149 items touched, all closed. Zero known bugs as of iter-132 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings — M195 now handles the DB side AFTER rotation (old token embedded in tracebacks gets scrubbed from disk on next server restart).
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (cross-language parity):** JANGStudio Swift-side has `DiagnosticsBundle.scrubSensitive` — verify its pattern coverage matches Python's `redact_for_log`. Candidates from M193/M194: Bearer tokens, `?api_key=/?token=`, Slack/Discord webhooks. If Swift's scrubber is missing any of these, a JANGStudio diagnostic bundle from a user who hit a JANG-server error could carry secrets.
+- **NEW:** Pydantic 422 body audit. Submit a wrong-shape JobRequest with secret-bearing fields (e.g. `{"webhook_url": 42, "junk_field": "hf_TOKEN"}`). Does Pydantic echo "junk_field" value in the 422 body? Typically no (by-name + by-type), but verify via a real FastAPI TestClient test.
+- **NEW:** extend the rate-limit dependency to /retry + /admin/purge (carried forward 5+ iters; real DoS surface on /retry).
+- **NEW:** audit jang-tools CLI — does `convert_model.py` ever log env dumps or write tokens to disk (cache dirs, HF dirs, etc.)? If yes, those leaked tokens persist past server lifecycle.
+- **NEW (policy audit):** check whether CLEANUP_HOURS (24 default) is honored for completed jobs. If yes, old rows get purged naturally after a day — reduces backfill relevance over time. If no, rows accumulate forever + backfill becomes more important.
+
+**Next iteration should pick:** JANGStudio Swift-side scrubber parity audit (cross-language consistency — natural M193/M194/M195 follow-on, makes the 4-boundary + backfill pattern universal across the stack), OR extend rate-limit to /retry+/admin/purge (quick win long-deferred), OR CLEANUP_HOURS enforcement audit (checks whether the backfill relevance has a natural decay).
