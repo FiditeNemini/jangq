@@ -4,7 +4,7 @@ USAGE:
   python3 audit.py --model <converted_dir> [--rows a1,a3,a15] [--json]
 
 Each audit row returns {"status": "pass"|"warn"|"fail"|"n/a", ...fields}.
-Runs A1-A7 + A15 by default. Tier 2+ (perplexity) and Tier 3 (MMLU) are opt-in.
+Runs A1-A9 + A15-A18 by default. Tier 2+ (perplexity) and Tier 3 (MMLU) are opt-in.
 
 This script is DESIGNED to run on macstudio (remote), not locally.
 Runner.py rsyncs it as part of the jang-tools tree + invokes via SSH.
@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -278,6 +279,231 @@ def audit_a15_inference(model_dir: Path) -> dict:
         return _fail(f"inference: {type(e).__name__}: {e}")
 
 
+# ───────────────────────── A8 — Tool/reasoning parser preservation ─────────
+
+_PARSER_FIELDS = [
+    "tool_call_parser",
+    "tool_choice_parser",
+    "reasoning_parser",
+    "thinking_parser",
+    "enable_thinking",
+    "chat_template_kwargs",
+]
+
+
+def audit_a8_parser_preservation(model_dir: Path, source_dir: Path | None = None) -> dict:
+    """If source config had parser/thinking fields, assert they round-trip into the output config.
+
+    Skipped (n/a) when no source path is provided or source had none of the fields.
+    """
+    if source_dir is None:
+        return _na("source model not available — A8 requires --source-model")
+    src_cfg_path = source_dir / "config.json"
+    out_cfg_path = model_dir / "config.json"
+    try:
+        src_cfg = json.loads(src_cfg_path.read_text()) if src_cfg_path.exists() else {}
+        out_cfg = json.loads(out_cfg_path.read_text()) if out_cfg_path.exists() else {}
+    except Exception as e:
+        return _fail(f"config parse: {type(e).__name__}: {e}")
+
+    # Include text_config shadows (some multimodal models nest these)
+    src_text = src_cfg.get("text_config", {}) or {}
+    out_text = out_cfg.get("text_config", {}) or {}
+
+    missing = []
+    mismatched = []
+    checked = []
+    for field in _PARSER_FIELDS:
+        src_val = src_cfg.get(field, src_text.get(field))
+        if src_val is None:
+            continue
+        checked.append(field)
+        out_val = out_cfg.get(field, out_text.get(field))
+        if out_val is None:
+            missing.append(field)
+        elif out_val != src_val:
+            mismatched.append({"field": field, "source": src_val, "output": out_val})
+
+    if not checked:
+        return _na("source config had no parser/thinking fields")
+    if missing or mismatched:
+        return _fail(f"{len(missing)} missing, {len(mismatched)} mismatched",
+                     missing=missing, mismatched=mismatched, checked=checked)
+    return _ok(preserved=checked)
+
+
+# ───────────────────────── A9 — Special tokens preservation ─────────────
+
+def audit_a9_special_tokens(model_dir: Path, source_dir: Path | None = None) -> dict:
+    """Assert every key in source special_tokens_map.json appears in output with same value."""
+    out_path = model_dir / "special_tokens_map.json"
+    if not out_path.exists():
+        return _fail("output has no special_tokens_map.json")
+    try:
+        out_tokens = json.loads(out_path.read_text())
+    except Exception as e:
+        return _fail(f"parse output special_tokens_map: {e}")
+
+    if source_dir is None:
+        # Can't compare to source — just assert output has a non-empty map
+        if not out_tokens:
+            return _warn("output special_tokens_map is empty and no source to compare")
+        return _ok(output_keys=sorted(out_tokens.keys()))
+
+    src_path = source_dir / "special_tokens_map.json"
+    if not src_path.exists():
+        # Source lacked one — output may still have a valid one, just record
+        return _ok(note="source had no special_tokens_map", output_keys=sorted(out_tokens.keys()))
+    try:
+        src_tokens = json.loads(src_path.read_text())
+    except Exception as e:
+        return _fail(f"parse source special_tokens_map: {e}")
+
+    missing = []
+    mismatched = []
+    for k, v in src_tokens.items():
+        if k not in out_tokens:
+            missing.append(k)
+        elif out_tokens[k] != v:
+            mismatched.append({"key": k, "source": v, "output": out_tokens[k]})
+    if missing or mismatched:
+        return _fail(f"{len(missing)} missing, {len(mismatched)} mismatched",
+                     missing=missing, mismatched=mismatched)
+    return _ok(preserved_keys=sorted(src_tokens.keys()))
+
+
+# ───────────────────────── A16 — Chat template functional ──────────────
+
+def audit_a16_chat_template_functional(model_dir: Path) -> dict:
+    """If model has a chat template, render a 3-turn conversation and assert non-empty + role markers."""
+    try:
+        tok = load_tokenizer(model_dir)
+    except Exception as e:
+        return _fail(f"tokenizer_load: {type(e).__name__}: {e}")
+
+    has_template = (
+        bool(getattr(tok, "chat_template", None))
+        or (model_dir / "chat_template.jinja").exists()
+        or (model_dir / "chat_template.json").exists()
+    )
+    if not has_template:
+        return _na("no chat template present")
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there!"},
+        {"role": "user", "content": "How are you?"},
+    ]
+    try:
+        rendered = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    except Exception as e:
+        return _fail(f"apply_chat_template: {type(e).__name__}: {e}")
+
+    if not rendered or len(rendered) < 20:
+        return _fail("rendered prompt too short", rendered_preview=rendered[:100])
+
+    # Heuristic: count how many of the 4 messages' content words appear in the rendered output.
+    # We require at least 2 (typical templates wrap each message with role markers).
+    matches = 0
+    for m in messages:
+        content_words = m["content"].split()[:3]
+        if content_words and any(w in rendered for w in content_words):
+            matches += 1
+    if matches < 2:
+        return _warn(f"only {matches}/4 message contents visible in rendered prompt",
+                     rendered_preview=rendered[:200])
+    return _ok(rendered_len=len(rendered), messages_seen=matches)
+
+
+# ───────────────────────── A17 — Model card generatable ────────────────
+
+def audit_a17_modelcard_generatable(model_dir: Path) -> dict:
+    """Run `jang-tools modelcard --json` and validate the output JSON shape."""
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "jang_tools", "modelcard", "--model", str(model_dir), "--json"],
+            capture_output=True, text=True, check=False, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return _fail("jang-tools modelcard timed out after 60s")
+    if r.returncode != 0:
+        return _fail(f"jang-tools modelcard rc={r.returncode}",
+                     stderr_tail=r.stderr[-200:])
+    try:
+        data = json.loads(r.stdout.strip())
+    except Exception as e:
+        return _fail(f"modelcard JSON decode: {e}", stdout_head=r.stdout[:200])
+
+    required_keys = ["license", "base_model", "quantization_config"]
+    missing = [k for k in required_keys if k not in data]
+    if missing:
+        return _fail(f"modelcard missing keys: {missing}", got_keys=list(data.keys()))
+
+    qc = data.get("quantization_config", {})
+    qc_keys = ["family", "profile", "actual_bits"]
+    qc_missing = [k for k in qc_keys if k not in qc]
+    if qc_missing:
+        return _fail(f"quantization_config missing: {qc_missing}", got_qc_keys=list(qc.keys()))
+
+    return _ok(license=data["license"], base_model=data["base_model"],
+               family=qc["family"], profile=qc["profile"])
+
+
+# ───────────────────────── A18 — Usage examples generatable ────────────
+
+_EXAMPLE_LANGS = ["python", "swift", "server", "hf"]
+
+
+def audit_a18_examples_generatable(model_dir: Path) -> dict:
+    """For each of 4 langs, run `jang-tools examples --json` and verify the snippet.
+
+    For Python specifically, the snippet must compile cleanly under Python.
+    """
+    results: dict[str, Any] = {}
+    overall_fail = []
+    for lang in _EXAMPLE_LANGS:
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "jang_tools", "examples",
+                 "--model", str(model_dir), "--lang", lang, "--json"],
+                capture_output=True, text=True, check=False, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            results[lang] = "timeout"
+            overall_fail.append(lang)
+            continue
+        if r.returncode != 0:
+            results[lang] = f"rc={r.returncode}"
+            overall_fail.append(lang)
+            continue
+        try:
+            data = json.loads(r.stdout.strip())
+        except Exception:
+            results[lang] = "json_decode_failed"
+            overall_fail.append(lang)
+            continue
+        snippet = data.get("snippet", "")
+        if not snippet.strip():
+            results[lang] = "empty_snippet"
+            overall_fail.append(lang)
+            continue
+        # Python snippet must compile
+        if lang == "python":
+            try:
+                compile(snippet, "<ralph_audit>", "exec")
+            except SyntaxError as e:
+                results[lang] = f"compile_error: {e}"
+                overall_fail.append(lang)
+                continue
+        results[lang] = f"ok ({len(snippet)} chars)"
+
+    if overall_fail:
+        return _fail(f"{len(overall_fail)}/{len(_EXAMPLE_LANGS)} languages failed",
+                     results=results, failed=overall_fail)
+    return _ok(results=results)
+
+
 # ───────────────────────── Runner ──────────────────────────────────────────
 
 AUDIT_REGISTRY = {
@@ -287,12 +513,18 @@ AUDIT_REGISTRY = {
     "a4": ("Tokens/sec throughput", audit_a4_tokens_per_sec, False),
     "a5": ("Chat turn end-to-end", audit_a5_chat_turn, False),
     "a7": ("Size vs estimate", audit_a7_size_estimate, False),
+    "a8": ("Tool/reasoning parser preservation", audit_a8_parser_preservation, False),
+    "a9": ("Special tokens preservation", audit_a9_special_tokens, True),   # required
     "a15": ("Inference works", audit_a15_inference, True),                  # required
+    "a16": ("Chat template functional", audit_a16_chat_template_functional, False),
+    "a17": ("Model card generatable", audit_a17_modelcard_generatable, True),  # required
+    "a18": ("Usage examples generatable", audit_a18_examples_generatable, True),  # required
 }
 
 
 def run_audits(model_dir: Path, rows: list[str], convert_wall_s: float | None = None,
-               baseline_wall_s: float | None = None, predicted_bytes: int | None = None) -> dict:
+               baseline_wall_s: float | None = None, predicted_bytes: int | None = None,
+               source_dir: Path | None = None) -> dict:
     results: dict[str, Any] = {
         "model_dir": str(model_dir),
         "timestamp": dt.datetime.now().isoformat(),
@@ -308,6 +540,8 @@ def run_audits(model_dir: Path, rows: list[str], convert_wall_s: float | None = 
                 r = audit_a6_wall_time(convert_wall_s or 0, baseline_wall_s)
             elif row == "a7":
                 r = audit_a7_size_estimate(model_dir, predicted_bytes)
+            elif row in ("a8", "a9"):
+                r = fn(model_dir, source_dir)
             else:
                 r = fn(model_dir)
         except Exception as e:
@@ -325,11 +559,13 @@ def run_audits(model_dir: Path, rows: list[str], convert_wall_s: float | None = 
 def main() -> None:
     p = argparse.ArgumentParser(prog="ralph_audit")
     p.add_argument("--model", required=True, help="Path to converted JANG/JANGTQ model dir")
-    p.add_argument("--rows", default="a1,a2,a3,a4,a5,a7,a15",
+    p.add_argument("--rows", default="a1,a2,a3,a4,a5,a7,a8,a9,a15,a16,a17,a18",
                    help="Comma-separated audit rows to run")
     p.add_argument("--convert-wall-s", type=float, default=None)
     p.add_argument("--baseline-wall-s", type=float, default=None)
     p.add_argument("--predicted-bytes", type=int, default=None)
+    p.add_argument("--source-model", default=None,
+                   help="Path to source HuggingFace model (for A8/A9 preservation checks)")
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
 
@@ -339,11 +575,13 @@ def main() -> None:
         sys.exit(2)
 
     rows = [r.strip() for r in args.rows.split(",") if r.strip()]
+    source_dir = Path(args.source_model) if args.source_model else None
     results = run_audits(
         model_dir, rows,
         convert_wall_s=args.convert_wall_s,
         baseline_wall_s=args.baseline_wall_s,
         predicted_bytes=args.predicted_bytes,
+        source_dir=source_dir,
     )
     print(json.dumps(results, indent=None))
 
