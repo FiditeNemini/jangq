@@ -1992,3 +1992,54 @@ Pivoted to re-audit M121. Iter 45 closed the text path but the VL path is a SEPA
 - broader `open(` without `with` audit — non-JSON call sites.
 
 **Next iteration should pick:** peer-helper asymmetry grep-audit (iter 47 generalization — likely to find at least one missing-parameter bug in the `_detect_*` / `_resolve_*` / `_load_*` / `render_*` family) OR M126 polish if wanting a small concrete close.
+
+## 2026-04-20 iteration 50 — M127 `_resolve_modality` text_config misclassification bug (peer-helper sweep)
+
+**Angle:** Iter 47's meta-rule: "after a wire-through fix, grep for peer helpers in the same module and verify matching plumbing." iter 47 found `_generate_vl` missing enable_thinking. Iter 50 generalizes: grep all `def _<verb>_` helpers and systematically audit each family for asymmetry.
+
+**Deep trace walkthrough:**
+1. **Grep `^def _(load|generate|detect|resolve|render|build|recommend|apply|get)_\w+\(`** with head_limit=0 across `jang-tools/jang_tools/`. Returned ~25 helper functions organized into families:
+   - `_load_llm` / `_load_vlm` — inference.py, same signature, both single-arg. Low asymmetry risk.
+   - `_load_jang_v2` / `_load_jang_v2_vlm` — loader.py, both `(path, jang_cfg)`. Asymmetry candidate.
+   - `_load_jang_v1` / `_load_jang_v1_vlm` — loader.py, both `(path, jang_cfg, config_path)`. Asymmetry candidate.
+   - `_generate_text` / `_generate_vl` — inference.py, already unified in iter 47.
+   - `_recommend_*` family — recommend.py, different signatures by purpose (expected).
+   - `_resolve_family_str` / `_resolve_modality` — capabilities.py, both `(jang, config, ...)`. **Asymmetry candidate.**
+2. **Traced `_load_jang_v2` vs `_load_jang_v2_vlm`:**
+   - LLM path handles nemotron + mistral4 via `_needs_gate_dequant` branch (lines 152-203).
+   - VLM path has a parallel gate-dequant branch (lines 554-587) for any model with `n_routed_experts > 0` OR `num_local_experts > 0`.
+   - Subtle difference: LLM path keeps the dequantized gate as whatever dtype `mx.dequantize` returns (comment claims float32, code doesn't cast). VLM path **explicitly** casts to bfloat16. LLM path comment literally says "bfloat16 loses 3 mantissa bits → breaks MoE expert selection" — so VLM path may be actively wrong for some models.
+   - **Decision: NOT touched this iter.** Changing gate dtype is a runtime-sensitive quality change that could alter routing behavior for all currently-shipped VL models. Needs Eric review + actual runtime testing (memory rule: feedback_runtime_before_quant). Logged as **observation for future M128** — not closing anything this iter because the right experiment requires a live Qwen3.6-VL test.
+3. **Traced `_resolve_family_str` vs `_resolve_modality` in capabilities.py:** both take `(jang, config)`, both return a resolved value. Read carefully…
+   - `_resolve_family_str` has priority order with four fallbacks, each carefully checks `isinstance(x, str)` before adding.
+   - `_resolve_modality` has priority order with three fallbacks:
+     1. `jang.has_vision` (top-level) ✓
+     2. `jang.architecture.has_vision` ✓
+     3. `"text_config" in config or "vision_config" in config` → return "vision" ← **BUG**
+4. **The bug, explained:** Many HF configs use a nested structure where language-backbone params live under `text_config`. This is common for: qwen3_moe, qwen3_5_moe, glm_moe_dsa, mistral4, and any "next-gen" MoE that the HF team wraps for future multimodal extension. Having `text_config` DOES NOT mean the model is vision. Having `vision_config` is the actual vision signal.
+5. **Who triggers the bug?** For our own converters: never. Both `convert.py` and `convert_qwen35_jangtq.py` stamp `has_vision`, so steps 1-2 always succeed before the fallback. For **third-party JANG models, legacy pre-stamp jang_configs, and manually-edited configs**: fallback fires, text-only MoE misclassified as vision, vmlx routes through VLMModelFactory, model class mismatch, load crash.
+6. **Why iter 44 Cat D missed it:** iter 44 verified the converters' stamping behavior and found it correct. It did NOT simulate the edge case "what if a jang_config arrives WITHOUT a has_vision stamp?" — the cross-ref was happy-path only. This is a subtle Cat D gap: verify invariants AND fallbacks.
+7. **Fix:** Tighten the fallback to `"vision_config" in config`. One line change. 10 tests pinning behavior: 6 preserve existing correct paths, 3 capture the misclassification regression, 1 proves the real-VL path still works when BOTH text_config and vision_config are present.
+
+**Meta-lesson.** Peer-helper grep-audit paid off on first application (iter 47) AND generalizes well (iter 50). Building a mental checklist: "when two functions in the same file have matching docstring intent, scan BOTH for (a) parameter parity, (b) fallback parity, (c) dtype/cast parity, (d) error-path parity." Each is a bug class.
+
+**Items touched:**
+- M127 [x] — `_resolve_modality` text_config→vision fallback removed + 10 tests.
+- (Observation logged for future M128: `_load_jang_v2` vs `_load_jang_v2_vlm` gate dtype asymmetry. Needs Eric review + live test before any change.)
+
+**Commit:** (this iteration)
+
+**Verification:** 297 jang-tools tests pass (was 287, +10 for modality suite). Swift 132 + ralph 73 unchanged.
+
+**Closed-status tally:** 62 (iter 49) + M127 = 63 closed / 97 total = 64.9% closure rate. M128 observation NOT opened as a new checklist item until we have the live runtime signal.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (iter-30 spawn)
+- M117 in-wizard inference smoke (feedback_model_checklist.md rule 3 — multi-iter feature)
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 (observation, not yet a tracked item): `_load_jang_v2*` gate dtype asymmetry — needs live test, flagged for Eric.
+- **NEW**: peer-helper sweep CONTINUED — `_load_jang_v1` vs `_load_jang_v1_vlm` pair (legacy path, lower priority but worth one pass).
+- **NEW**: peer-helper sweep in Swift — RecommendationService / CapabilitiesService / ProfilesService / ExamplesService parallel adoption services — all implement `invoke(args:)` privately. Check for drift.
+
+**Next iteration should pick:** Swift-side peer-helper sweep on the adoption services (likely finds at least ONE subtle drift between services given 4 near-parallel implementations).

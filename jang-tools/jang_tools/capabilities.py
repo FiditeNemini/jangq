@@ -111,13 +111,24 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
 
 
 def _resolve_modality(jang: dict, config: dict, model_path: Path | None = None) -> str:
-    """text | vision. jang.has_vision is authoritative when present."""
+    """text | vision. jang.has_vision is authoritative when present.
+
+    M127 (iter 50): the fallback used to return "vision" if EITHER
+    ``text_config`` OR ``vision_config`` appeared in the HF config. But many
+    text-only MoE families (qwen3_moe, qwen3_5_moe, glm_moe_dsa, mistral4)
+    wrap their text params under ``text_config`` with NO ``vision_config``,
+    so any jang_config missing a ``has_vision`` stamp (legacy v1 files,
+    third-party JANG models, manually-edited configs) got misclassified as
+    vision. vmlx's CapabilityDetector would then route through
+    VLMModelFactory and fail to load. Tightened to require ``vision_config``
+    specifically — text_config alone is NOT a vision signal.
+    """
     if "has_vision" in jang:
         return "vision" if jang["has_vision"] else "text"
     arch_dict = jang.get("architecture")
     if isinstance(arch_dict, dict) and "has_vision" in arch_dict:
         return "vision" if arch_dict["has_vision"] else "text"
-    if "text_config" in config or "vision_config" in config:
+    if "vision_config" in config:
         return "vision"
     return "text"
 
