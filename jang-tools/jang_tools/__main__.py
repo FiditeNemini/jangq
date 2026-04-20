@@ -275,6 +275,9 @@ def main():
     from .inference import register as _register_inference
     _register_inference(subparsers)
 
+    from .profiles_cli import register as _register_profiles
+    _register_profiles(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -287,7 +290,8 @@ def main():
         return
 
     suppress_banner = args.quiet_text or (
-        args.command in ("inspect-source", "examples", "modelcard", "inference")
+        args.command in ("inspect-source", "examples", "modelcard", "inference",
+                         "profiles", "capabilities", "estimate-model", "publish")
         and getattr(args, "json", False)
     )
     if not suppress_banner:
