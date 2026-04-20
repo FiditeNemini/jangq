@@ -492,3 +492,42 @@ sub-items in one patch.
 1. **audit.py (765 lines, never traced, Cat K debt since iter 8).** The most impactful untouched surface — Ralph's audit harness is what judges whether a convert passed, and we've never looked at how it does that.
 2. **Cat A remaining publish items (M42 verify cancellation, M43 publish progress streaming, M45 modelcard per-arch coverage).** Adopter journey is 80% done.
 3. **Cat E spawned-M easy picks:** M02 (data-shaped-but-wrong-content HF clone), M07 (non-standard nested model_type), M15 (publish token clear-on-complete), M22 (DiagnosticsBundle race during running convert).
+
+---
+
+## 2026-04-19 iteration 14 — DiagnosticsBundle audit (Cat E / M22 + M16)
+
+**Angle:** Rotating out of Ralph-harness work after 3 of the last 6 iterations there. Picked M22 (Cat E spawned-M) because DiagnosticsBundle is the surface where bug reports get generated — and it's where the LATEST secrets can leak into a public GitHub Issue zip. It's a low-LOC surface (40 lines pre-iter-14) with a high blast radius.
+
+**Deep trace walkthrough:**
+1. Read `DiagnosticsBundle.swift` (40 lines). MainActor, synchronous, zips a tempdir via `/usr/bin/ditto`. Single call site in `RunStep.swift` on the failed-convert branch.
+2. **M22 original question — race on @State array?** Tracing: `logs` and `events` are `@State private var logs: [String]`. All mutations go through `logs.append(...)` on MainActor. `DiagnosticsBundle.write(logLines: logs, ...)` passes a Swift Array by value — value semantics, immediate snapshot. No race. **Original M22 is a non-issue.**
+3. BUT the trace surfaced three actual bugs:
+4. **BUG M22d — collision on back-to-back clicks.** `ISO8601DateFormatter()` without `.withFractionalSeconds` emits second-precision timestamps. Two clicks within the same wall-clock second land in the same `workDir`. `createDirectory(withIntermediateDirectories: true)` doesn't fail if the dir exists, so the second write REUSES the directory — stale files from the first click get zipped into the second bundle (if the first bundle hadn't completed the `removeItem` cleanup yet, which is mid-function).
+5. **BUG M22e / M16 — no token scrubbing.** The zip includes raw `logLines` and `eventLines`. If ANY of those strings contains `hf_abc...` (because an HTTP client logged the Authorization header, or the user pasted a token into an input field that ended up in the log, or a future huggingface_hub exception embedded it), the token lands in a bug-report zip. iter 6 fixed the publish-error call site specifically; the diagnostics layer never scrubbed.
+6. **BUG M62-anonymize — inert setting.** `AppSettings.anonymizePathsInDiagnostics` was declared with UI wiring but never consulted. `plan.sourceURL` and `plan.outputURL` went into plan.json verbatim — bug report reveals the user's filesystem layout (e.g., `/Volumes/WorkDisk/secrets-dir/MyModel`).
+7. **Fix:**
+   - **M22d:** `ISO8601DateFormatter` with `[.withInternetDateTime, .withFractionalSeconds]` → millisecond precision in the stamp. Each click gets a unique workDir AND a unique zip filename.
+   - **M22e/M16:** `DiagnosticsBundle.scrubSensitive(_:)` runs 4 regex patterns before `String.write(to:)`:
+     - `hf_[A-Za-z0-9_-]{20,}` — HF format tokens
+     - `huggingface_[A-Za-z0-9_-]{20,}` — legacy format
+     - Case-insensitive `Authorization: Bearer …`
+     - Case-insensitive generic `Bearer …`
+     All require ≥20-char suffix so a variable like `hf_short` in a log line doesn't trigger. Replacement is `<redacted>`.
+   - **M62-anonymize:** `write` gained `anonymizePaths: Bool = false` parameter. Plan is serialised via an explicit dict construction (not Codable) so we can selectively rewrite `sourceURL` / `outputURL` to basenames. RunStep call site passes `settings.anonymizePathsInDiagnostics` through.
+8. **Design decision — scrub at write-time, not post-zip:** Post-zip scrubbing would require unzipping, rewriting, re-zipping. Too expensive and error-prone. Scrubbing the in-memory strings before they hit disk is strictly cheaper AND it means the tempdir on disk never contains the secret (matters if the user cancels/crashes mid-zip).
+9. **Design decision — `≥20` char min:** Real HF tokens are ~40 chars. 20 is comfortably below real-token length but above incidental occurrences. Validated with negative test `test_scrub_short_hf_lookalike_not_redacted`.
+10. **Testing:** 10 new tests covering scrub for each pattern (4 positive + 1 negative non-match + 1 preserves-normal-text), end-to-end zip-then-unzip assert-no-secret, anonymize-on / anonymize-off plan.json roundtrip with JSON parsing (NOT substring matching, because JSONSerialization escapes `/` as `\/` in raw bytes — bug caught during test writing), millisecond uniqueness for back-to-back writes.
+
+**Items touched:**
+- M22 [x] — original non-issue confirmed; 3 adjacent real bugs found + fixed
+- M16 [x] — token scrubbing at the diagnostics boundary
+- M62-anonymize [x] — one more inert setting wired; M62 parent now 10/12 done
+
+**Commit:** (this iteration)
+
+**Verification:** 106 Swift tests (was 96), 231 jang-tools Python, 44 ralph_runner Python — all pass. Total Python 275 across both suites.
+
+**Closed-status tally:** 23 (prior) + M16 + M22 + M62-anon = 26 closed / 66 total = 39% closure rate.
+
+**Next iteration should pick:** **audit.py (Cat K debt since iter 8, 765 lines, never traced)** is now the clear priority — 6 iters of debt and it's the harness that judges whether a convert passed. Alternatively, Cat A remaining publish items (M42 verify cancellation, M43 publish progress streaming, M45 modelcard per-arch coverage) which would round out the adopter journey begun in iters 6+7. Cat D (memory cross-ref) also hasn't been revisited since iter 5 — could scan for additional drift now that 10 more iters' worth of code has landed.

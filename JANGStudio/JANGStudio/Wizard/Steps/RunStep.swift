@@ -61,8 +61,12 @@ struct RunStep: View {
                 Button("Copy Diagnostics") {
                     let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
                     let events = logs.filter { $0.hasPrefix("{") }
+                    // M62-anonymize: honor Settings → Diagnostics →
+                    // "Anonymize paths in diagnostics". Otherwise a bug report
+                    // zip leaks the user's filesystem layout.
                     if let url = try? DiagnosticsBundle.write(plan: coord.plan, logLines: logs, eventLines: events,
-                                                              verify: [], to: desktop) {
+                                                              verify: [], to: desktop,
+                                                              anonymizePaths: settings.anonymizePathsInDiagnostics) {
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     }
                 }
