@@ -970,3 +970,42 @@ Sheet wiring: `isPublishing: Bool` → `progress: (done: Int64, total: Int64, la
 - **M88 (new):** the sheet's init ALSO reads token from `ProcessInfo.environment` — but `.task`'s lifecycle differs from init's. Token init happens BEFORE settings are available; org prefix happens AFTER. If a future field needs BOTH at construction time, this pattern breaks. Worth a refactor pass to unify lifecycle but not urgent.
 
 **Next iteration should pick:** Cat D third pass (due iter 27-29 per cadence; can come early). Alternatively M87 Mistral 4 live validation (needs a real convert workflow). Alternatively do M88 adjacent — unify the sheet's init-vs-task field-lifecycle issue. Or investigate whether VerifyStep's adoption action row (iter 14's entry point to publish sheet) passes the right modelBasename through — a subtle off-by-one could mean the prefix runs against the wrong string.
+
+---
+
+## 2026-04-20 iteration 26 — M89 Cat D third pass: EOS coverage for Qwen3-VL
+
+**Angle:** Third Cat D cross-ref pass, brought forward from the scheduled iter-27-29 window because iter-21 and iter-22 both found real coverage gaps in memory↔code alignment. Pattern: each pass finds one bug worth ~1 iter of cleanup. Worth maintaining the cadence.
+
+**Deep trace walkthrough (M89):**
+1. `feedback_chat_template_rules.md` (31 days old) documents the Qwen3.5 eos fix: source ships 248044 (<|endoftext|>), must be 248046 (<|im_end|>) or model loops infinitely during inference.
+2. Cross-ref `convert.py`: `_eos_fixes` dict covers exactly two keys: `qwen3_5` + `qwen3_5_moe`. Works for dense + MoE.
+3. Check `recommend.py` for other Qwen3-family model_types that might share the same tokenizer ID space. Found: `qwen3_vl` (image VL) is a recognised family. Plus the newer Qwen3.6 arch which is registered under `qwen3_5_moe` (confirmed from `project_qwen36.md` and the recommend.py family-map note "Qwen 3.6 (256 experts + gated_deltanet)" — shares the model_type with qwen3_5_moe, so NO gap there).
+4. **Gap CONFIRMED:** if a user converts a Qwen3.5-VL source that ships the wrong 248044 eos, the fix doesn't apply. No user has reported this (maybe no Qwen3-VL sources in that tier have landed with the bug yet, or HF has since published corrected checkpoints). But the memory rule clearly extends to the whole family, and the fix gate (`if tc.get("eos_token_id") in eos_fix_map`) means adding coverage is always safe: models with correct eos see no change, models with wrong eos get corrected.
+5. **Implementation decisions:**
+   - Extract `_eos_fixes` from convert_model's locals to module-level `EOS_FIXES`. Testable independently without instantiating the full convert pipeline.
+   - Added `qwen3_vl`, `qwen3_moe_vl`, `qwen3_5_vl` to the coverage map. All share the Qwen2Tokenizer family.
+   - Kept the `in eos_fix_map` gate at the use site so extension carries zero regression risk.
+6. **Test design trade-off:** could test end-to-end via convert_model on a synthetic tokenizer_config.json. Instead, tested the data structure alone because:
+   - convert_model needs a real safetensors shard + weight quantization setup — heavyweight for a test.
+   - The bug was in the DATA (missing map entries), not the LOGIC (which was already correct). Testing the data directly is more precise.
+   - Pinned shape/coverage/negative/idempotency/numeric invariants in 6 cases.
+7. **Negative test is critical:** `test_no_coverage_for_unrelated_families` asserts that llama/mistral/gemma/phi/qwen2/minimax/deepseek/nemotron are NOT in the map. Otherwise a future "helpful" PR broadening coverage to "everything" would mis-correct token IDs on those architectures (248046 isn't `<|im_end|>` for non-Qwen families).
+
+**Items touched:**
+- M89 [x] — Qwen3-VL variants now covered by the EOS fix; 6 regression tests pin shape + coverage + negative + idempotency + numeric.
+
+**Commit:** (this iteration)
+
+**Verification:** 251 jang-tools (was 245, +6). ralph_runner 68 + Swift 115 unchanged.
+
+**Closed-status tally:** 39 (prior) + M89 = 40 closed / 75 total = 53% closure rate.
+
+**Meta on Cat D cadence observed:**
+- iter 5 (Cat D pass 1): M35 Osaurus remap drift
+- iter 21 (Cat D pass 2): M83 MLP asymmetry threshold drift
+- iter 22 (Cat D pass 2 continued): M86 Mistral 4 architecture spot-check (6/7 clean, M87 flagged)
+- iter 26 (Cat D pass 3): M89 EOS coverage gap
+→ **Three of four Cat D passes found a real coverage / drift bug.** The single clean pass (iter 22 Mistral 4 architecture) was the one where iter 9's loader.py audit had already verified the fixes. Suggests Cat D passes are MOST productive on memory files that haven't been cross-ref'd recently — focus rotation on oldest-unchecked memories for best yield.
+
+**Next iteration should pick:** M88 (sheet init-vs-task field-lifecycle unification — iter-25 spawn, small cleanup). Or continue Cat D with another memory file (iter-26 pattern suggests high yield — candidates: `project_qwen36.md`, `project_cascade2.md`, `project_minimax_m27.md`, `feedback_model_checklist.md`, `feedback_readme_standards.md`). Or M87 live Mistral 4 validation (needs real convert — possible iter-27 work if a Mistral 4 source is at hand).

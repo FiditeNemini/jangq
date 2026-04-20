@@ -26,6 +26,22 @@ from .calibrate import calibrate_from_weights, _load_bf16_tensor
 from .allocate import allocate_bits_greedy, allocate_bits_profile, summarize_allocation, JANG_PROFILES
 
 
+# ── EOS token_id fix map ──────────────────────────────────────────────
+# Exposed at module level so the test suite can pin the covered model_type
+# list without reaching into convert_model's locals. See iter-26 Cat D
+# memory cross-ref against feedback_chat_template_rules.md for the
+# motivation — VL variants of the Qwen3 family shared the Qwen2Tokenizer
+# token IDs but were previously unmapped, so the 248044→248046 fix
+# skipped them.
+EOS_FIXES: dict[str, dict[int, int]] = {
+    "qwen3_5_moe": {248044: 248046},  # <|endoftext|> → <|im_end|>
+    "qwen3_5":     {248044: 248046},
+    "qwen3_vl":    {248044: 248046},
+    "qwen3_moe_vl": {248044: 248046},
+    "qwen3_5_vl":  {248044: 248046},
+}
+
+
 # Pattern for per-expert 2D tensors (MiniMax/Mixtral style)
 # e.g. model.layers.0.block_sparse_moe.experts.5.w1.weight
 _PER_EXPERT_PATTERN = re.compile(
@@ -950,16 +966,13 @@ def convert_model(
     # ── eos_token_id auto-fix ──────────────────────────────────
     # Qwen3.5 source ships with eos_token_id=248044 (<|endoftext|>) which is WRONG.
     # Correct: 248046 (<|im_end|>). Wrong eos causes infinite thinking loops.
-    # Fix in BOTH config.json and tokenizer_config.json.
-    _eos_fixes = {
-        "qwen3_5_moe": {248044: 248046},  # <|endoftext|> → <|im_end|>
-        "qwen3_5": {248044: 248046},
-    }
+    # Fix in BOTH config.json and tokenizer_config.json. Coverage map is at
+    # module scope (EOS_FIXES) so tests can pin the covered model_types.
     model_type = model_config.get("model_type", "")
     text_cfg = model_config.get("text_config", {})
     if not model_type:
         model_type = text_cfg.get("model_type", "")
-    eos_fix_map = _eos_fixes.get(model_type, {})
+    eos_fix_map = EOS_FIXES.get(model_type, {})
     if eos_fix_map:
         # Fix in text_config
         old_eos = text_cfg.get("eos_token_id")
