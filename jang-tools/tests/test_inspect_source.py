@@ -94,3 +94,91 @@ def test_inspect_source_non_dict_config_errors_cleanly(tmp_path):
         capture_output=True, text=True, check=False,
     )
     _assert_clean_error(r, expect_phrase="config.json")
+
+
+# --- M166 (iter 89): HF hub cache layout — symlinked shards ---
+#
+# huggingface_hub's `snapshot_download` creates a cache layout where the
+# user-visible snapshot directory (`~/.cache/huggingface/hub/models--org--
+# name/snapshots/<hash>/`) contains SYMLINKS to real blobs under
+# `../../blobs/`. JANG Studio users who point SourceStep at a snapshot
+# directory rely on this working transparently. The inspect_source
+# implementation currently WORKS for symlinks (pathlib.glob matches them,
+# Path.stat() follows them, open() follows them) but there's no test
+# verifying this behavior. A future perf-motivated refactor (e.g.
+# swapping to lstat, or filtering out symlinks for security reasons)
+# could silently break HF-hub users.
+#
+# These tests lock in the HF-cache-layout contract.
+
+
+def _make_safetensors_shard(path: Path, n_bytes: int) -> None:
+    """Write a minimal valid safetensors file (8-byte header + empty JSON)."""
+    import struct
+    header = b'{"__metadata__": {}}'
+    payload = b"\x00" * max(0, n_bytes - 8 - len(header))
+    with open(path, "wb") as fh:
+        fh.write(struct.pack("<Q", len(header)))
+        fh.write(header)
+        fh.write(payload)
+
+
+def test_inspect_source_handles_symlinked_shards(tmp_path):
+    """HF snapshot dirs symlink .safetensors to blobs. stat() + glob both
+    follow symlinks, but pin that behavior in a regression test."""
+    # Real blobs live in blobs/
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    real_shard = blobs / "abc123_real_blob"
+    _make_safetensors_shard(real_shard, n_bytes=4096)
+
+    # Snapshot dir mimics the HF hub layout: config.json + symlinked shard.
+    snap = tmp_path / "snapshot_hash_deadbeef"
+    snap.mkdir()
+    (snap / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5_moe",
+        "num_hidden_layers": 2,
+        "hidden_size": 128,
+        "num_experts": 8,
+    }))
+    (snap / "model-00001-of-00001.safetensors").symlink_to(real_shard)
+
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "inspect-source", "--json", str(snap)],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(r.stdout)
+    assert data["shard_count"] == 1, (
+        "symlinked shard should be counted by glob — HF cache layout regression"
+    )
+    assert data["total_bytes"] == 4096, (
+        f"total_bytes should be the TARGET size (4096), got {data['total_bytes']} — "
+        "lstat-style regression; HF-hub users would see 0-byte models"
+    )
+    assert data["model_type"] == "qwen3_5_moe"
+
+
+def test_inspect_source_handles_symlinked_directory(tmp_path):
+    """User points at a symlinked directory (e.g. ~/my-model -> ~/.cache/hf/…/snapshot).
+    Both the directory AND the shards-in-directory may be symlinks."""
+    real_model = tmp_path / "real_model"
+    real_model.mkdir()
+    (real_model / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5_moe",
+        "num_hidden_layers": 2,
+        "hidden_size": 128,
+    }))
+    _make_safetensors_shard(real_model / "model.safetensors", n_bytes=2048)
+
+    # Symlink the whole directory.
+    sym_dir = tmp_path / "sym_model"
+    sym_dir.symlink_to(real_model, target_is_directory=True)
+
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "inspect-source", "--json", str(sym_dir)],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(r.stdout)
+    assert data["shard_count"] == 1
+    assert data["total_bytes"] == 2048
+    assert data["model_type"] == "qwen3_5_moe"

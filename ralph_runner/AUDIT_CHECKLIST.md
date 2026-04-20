@@ -892,6 +892,23 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M166 (Symlink handling audit — HF hub cache snapshot-dir compatibility)** — Iter-89 picked the symlink audit from iter-88's forecast. Hypothesis: `huggingface_hub.snapshot_download` creates a cache layout where `~/.cache/huggingface/hub/models--org--name/snapshots/<hash>/*.safetensors` are SYMLINKS to blobs under `../../blobs/<sha>`. JANG Studio users who point SourceStep at a snapshot directory transitively rely on glob-matches-symlinks and stat-follows-symlinks — if those ever break, HF-hub users would see "0-byte models" or "no shards found."
+      **Audit findings:**
+      1. `jang_tools.inspect_source._total_bytes` uses `f.stat().st_size` — `Path.stat()` uses `os.stat`, which follows symlinks. ✓
+      2. `_sniff_dtype` uses `open(shards[0], "rb")` — follows symlinks. ✓
+      3. Shard enumeration uses `sorted(model_path.glob("*.safetensors"))` — glob matches both regular files and symlinks. ✓
+      4. Other `stat()` call sites (`publish.py:47,68,137`, `estimate_model.py:29`) all follow the same pattern. ✓
+      5. Swift side: `NSOpenPanel.url` preserves the user's symlink selection (not auto-resolved); Python receives the symlink path and operates through it transparently. ✓
+      6. `FileManager.attributesOfItem` in `PostConvertVerifier.diskSizeSanityCheck` returns SYMLINK attrs, not target — but that path operates on the convert's output dir (convert writes real files, never symlinks), so not a real exposure.
+      **Result: zero new bugs.** The symlink contract works end-to-end for HF cache layouts. But there was ZERO test coverage locking this in — a future perf-motivated refactor (e.g., swap `stat` to `lstat` for "speed") could silently break every HF-hub user.
+      **Tests (+2) in `jang-tools/tests/test_inspect_source.py`:**
+      - `test_inspect_source_handles_symlinked_shards` — creates `blobs/` with real 4096-byte safetensors + `snapshot/` with a symlink to it. Runs inspect-source on `snapshot/`; asserts shard_count == 1 AND total_bytes == 4096 (target size, not symlink size). Catches any regression where stat gets swapped to lstat or glob starts filtering symlinks.
+      - `test_inspect_source_handles_symlinked_directory` — creates a symlink POINTING at a whole model directory (`~/my-model → ~/.cache/hf/.../snapshot`). Asserts glob traverses INTO the symlinked directory and stats shards correctly.
+      **Evidence:** `jang-tools/jang_tools/inspect_source.py:14, 19, 42`. 8 test_inspect_source tests pass (was 6, +2).
+      **Meta-lesson — contract-preserving tests for transitive-dependency behavior.** The Swift app relies on Python pathlib's symlink semantics which rely on kernel stat/readdir semantics. Neither layer is owned by JANG Studio; both behave correctly today. But the contract CAN break if someone refactors the Python side. Tests that pin the END-TO-END behavior (symlink input → correct output) survive refactors in any layer. Rule: whenever the app depends on a nontrivial filesystem behavior (symlinks, case-insensitive-but-case-preserving paths, unicode normalization, hardlinks), add a lock-in test even if the current implementation "just works." Future-you will thank present-you.
+      **Deferred follow-ups:**
+      - Broken-symlink edge case (HF cache with a git-gc'd blob). Currently surfaces as a cryptic FileNotFoundError traceback; could be caught in `_total_bytes` and surfaced as "shard missing (broken symlink)". Not a regression but a UX polish. Flagged as M167 candidate.
+      **Commit:** (this iteration)
 - [x] **M165 (Diagnostics token-leak audit — verification pass, no new bugs + 2 edge-case pins)** — Iter-88 ran a security-adjacent audit on the diagnostic / bug-report export path. Traced every place that writes log/stderr data to disk or clipboard. **No new bugs found** — iter-14 M22e / M16's scrubbing infrastructure is solid. What the audit verified:
       1. **Coverage of HF token formats.** `DiagnosticsBundle.scrubSensitive` catches `hf_` prefix tokens (current format), `huggingface_` prefix tokens (older format), `Authorization: Bearer <token>` headers, and generic `Bearer <token>` constructs.
       2. **Bundle-write paths both scrub.** Sync `write` and async `writeAsync` both pass logs + events through `scrubSensitive` BEFORE atomically writing to the workDir that gets ditto-zipped.

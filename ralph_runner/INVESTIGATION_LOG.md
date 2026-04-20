@@ -3787,3 +3787,55 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: NSOpenPanel cancel-path hygiene (pickFolder, pickOutput).
 
 **Next iteration should pick:** symlink-handling audit (HF cache snapshot layouts with symlinked `.safetensors`) OR rapid-click debouncing for Choose Folder button — both are fresh ground.
+
+---
+
+## 2026-04-20 iteration 89 — M166 symlink-handling audit (HF cache snapshot-dir compatibility)
+
+**Angle:** Iter-88 forecast option 1: symlink handling. huggingface_hub.snapshot_download creates a cache layout where snapshot/`.safetensors` files are symlinks to blobs. JANG Studio users pointing SourceStep at snapshot/ transitively rely on glob-matches-symlinks and stat-follows-symlinks. If those ever break (e.g., someone swaps `stat` to `lstat` for perf), HF-hub users would see "0-byte models" or "no shards found" with no diagnostic.
+
+**Deep trace walkthrough:**
+1. **Grepped both codebases** for `symlink` / `resolvingSymlinks` / `realpath` / `readlink` / `lstat` — found ZERO mentions. Nothing explicitly handles symlinks; contract relies on default follow-symlinks behavior.
+2. **Traced Python's symlink-sensitive call sites:**
+   - `inspect_source._total_bytes` uses `f.stat().st_size` — Path.stat follows. ✓
+   - `_sniff_dtype` uses `open(shards[0], "rb")` — follows. ✓
+   - `sorted(model_path.glob("*.safetensors"))` — glob matches symlinks. ✓
+   - `publish.py:47,68,137` + `estimate_model.py:29` — all `stat().st_size`. ✓
+3. **Traced Swift's symlink-sensitive sites:**
+   - NSOpenPanel.url preserves the user's symlink selection (not auto-resolved).
+   - Swift passes the symlink path to Python as argv; Python operates through it.
+   - `FileManager.attributesOfItem` in PostConvertVerifier returns SYMLINK attrs (doesn't follow). BUT it runs on the OUTPUT dir, which convert populates with real files — not an exposure.
+4. **Conclusion: behavior is correct today, but there's ZERO test coverage locking it in.** A future perf-motivated refactor (swap stat to lstat, filter symlinks out of glob for "security") could silently break every HF-hub user. This is the exact class of bug where unit tests pay off: a 5-line test forever prevents a whole class of future regressions.
+5. **TDD flow:**
+   - Two tests. First: tmpdir with `blobs/abc123_real_blob` (4096 bytes) + `snapshot/` containing config.json + `model-00001-of-00001.safetensors` symlinked to the blob. Run inspect-source on `snapshot/`. Assert `shard_count == 1` (glob matched) + `total_bytes == 4096` (stat followed to target).
+   - Second test: tmpdir with `real_model/` (real files) + `sym_model` symlinked to `real_model`. Run inspect-source on `sym_model`. Asserts glob-traverses-symlinked-directory + correct output.
+   - Added `_make_safetensors_shard` helper (8-byte header length + JSON metadata + padding) so tests use valid safetensors files, not random bytes (inspect-source's dtype sniffer reads the header).
+   - 8/8 test_inspect_source tests pass (was 6, +2).
+6. **Verified the audit was meaningful** by asking: "what would break if someone swapped `stat` for `lstat` in `_total_bytes`?" → symlinks return their own size (~80 bytes), total_bytes becomes ~400 bytes for a 5-shard model, iter-40 M116 disk-size-sanity check warns "disk 0.00 GB, expected 50 GB", user sees confusing false warning. The new test would fail immediately on such a refactor.
+
+**Meta-lesson — contract-preserving tests for transitive-dependency behavior.** JANG Studio relies on Python pathlib's symlink semantics which rely on kernel stat/readdir semantics. Neither layer is owned by JANG Studio; both behave correctly today. But the contract CAN break if anyone refactors. Tests that pin the END-TO-END behavior (symlink input → correct output) survive refactors in any layer. **Codebase-wide rule: whenever the app depends on nontrivial filesystem behavior (symlinks, hardlinks, case-sensitivity, unicode normalization), add a lock-in test even if the current impl "just works."** Future-you will thank present-you.
+
+**Meta-lesson — zero mentions of a concept can mean "works by accident" or "genuinely correct."** Grepping `symlink` across the codebase returned 0 results. Two interpretations: (a) nobody thought about it and it accidentally works, (b) nobody thought about it because default semantics are correct. Here both are true — the defaults are correct, AND no explicit handling is needed. But the distinction matters: (a) is fragile, (b) is robust. Pinning the behavior with tests disambiguates, turning (a) into (b).
+
+**Items touched:**
+- M166 [x] — symlink audit end-to-end: zero new bugs, 2 regression pins locking the HF-cache-compatibility contract. Also flagged a deferred M167 candidate (broken-symlink FileNotFoundError surfaces as cryptic traceback instead of actionable error).
+
+**Commit:** (this iteration)
+
+**Verification:** 8 test_inspect_source tests pass (was 6, +2). Python 350 total. Swift unchanged. Ralph 73 unchanged.
+
+**Closed-status tally:** 105 (iter 88) + M166 = 106 items touched, all closed. Zero known bugs as of iter-89 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M167 candidate: broken-symlink handling — catch FileNotFoundError in `_total_bytes` and emit actionable "shard X is a broken symlink, re-download the model" message.
+- **NEW**: PublishToHuggingFaceSheet dead `progressLog` cleanup.
+- **NEW**: rapid-click debouncing on "Choose Folder…" (UX polish).
+- **NEW**: NSOpenPanel cancel-path hygiene.
+- **NEW**: unicode/emoji handling in prompt field + transcripts — does the safetensors header parser survive non-ASCII in metadata?
+- **NEW**: hardlink handling. Rare case but if a user hardlinks shards (cp -l), does convert see them correctly?
+
+**Next iteration should pick:** M167 broken-symlink diagnostic (concrete, small, HF-hub-relevant), OR progressLog cleanup (vestigial code tidy), OR rapid-click debounce (UX polish).
