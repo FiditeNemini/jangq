@@ -54,16 +54,51 @@ open build/Build/Products/Release/JANGStudio.app
 <!-- Screenshots captured by Eric on YYYY-MM-DD — replace TODOs with real paths -->
 
 ### Step 1 — Source Model
-<!-- TODO screenshot: Step 1 wizard view, folder picker -->
-Click **Choose Folder…** and pick a HuggingFace model directory (one containing `config.json` and `.safetensors` shards). JANG Studio auto-detects model type, expert count, dtype, and VL/video capability.
+
+![Step 1](docs/screenshots/step1-source.png)
+
+Click **Choose Folder…** and pick a HuggingFace model directory (one containing `config.json` and `.safetensors` shards). JANG Studio auto-detects:
+
+- `model_type` (llama, qwen3_5_moe, minimax_m2, deepseek_v32, idefics3, gemma3, …)
+- Parameter count (approximate, in billions)
+- Expert count for MoE models
+- Source dtype (BF16 / FP16 / FP8)
+- Image-VL vs video-VL capability
+
+It then **recommends a conversion plan** — profile, method, hadamard, force-dtype — based on what it detected. Most beginners can skip Steps 2 and 3 entirely and hit **Start** once the recommendation loads.
 
 ### Step 2 — Architecture
-<!-- TODO screenshot: Step 2 detected arch card + advanced overrides -->
-Review the auto-detected architecture. Use **Advanced overrides** only when detection gets something wrong — rare, usually for brand-new architectures.
+
+![Step 2](docs/screenshots/step2-architecture.png)
+
+Review the auto-detected architecture card. The **Advanced overrides** section is usually not needed — but lets you manually set:
+
+- **Force dtype** — override the auto-detected source dtype. Useful when sniffing fails (rare) or when a 512+ expert model's source uses float16 and you want to force bfloat16.
+- **Block size** — the quantization group size. 64 is the default and works on every architecture. 32 gives finer granularity at the cost of metadata overhead; 128 goes the other way.
 
 ### Step 3 — Profile
-<!-- TODO screenshot: Step 3 profile picker, JANG/JANGTQ segmented control, preflight panel -->
-Pick a **JANG** profile (works on every architecture) or **JANGTQ** profile (Qwen 3.6 + MiniMax today, GLM in v1.1). Pre-flight panel runs 10 checks live as you change options.
+
+![Step 3](docs/screenshots/step3-profile.png)
+
+Pick a **JANG** profile (works on every architecture) or **JANGTQ** profile (Qwen 3.6 + MiniMax today, GLM in v1.1). Each profile has a plain-English description visible on hover.
+
+**Options:**
+- **Method** — MSE is the default (best quality). RTN is fastest. MSE (all) squeezes out extra quality at the cost of time.
+- **Hadamard rotation** — turns on at 3-bit+, off at 2-bit and below (it hurts low-bit quality). JANG Studio auto-picks the right default.
+
+**Pre-flight panel** runs 10 checks live as you change options:
+- Source dir exists & readable
+- config.json parses
+- Output dir valid
+- Free disk space sufficient
+- RAM adequate (>= 1.5× source)
+- JANGTQ arch supported
+- JANGTQ source dtype (bf16 or fp8)
+- BF16 forced for 512+ expert models
+- Hadamard sanity at 2-bit
+- Bundled Python runtime healthy
+
+Start button stays disabled until all required checks are green.
 
 ### Step 4 — Run
 <!-- TODO screenshot: Step 4 running conversion, phase progress bar + fine tensor progress + live logs -->
