@@ -761,3 +761,35 @@ green/fail matrix has been lying.
 - `try/except Exception: pass` wrapping imports (silently converts ImportError to "feature unavailable").
 
 **Next iteration should pick:** M43 (publish progress streaming) — last Cat A item, biggest remaining adopter-UX win, but architecturally non-trivial. Or Cat D memory cross-ref second pass (14 iters idle). Or M48 (default repoName missing org prefix — small UX polish). Or investigate whether `audit.py:272` ok-note `"VL model loaded successfully via load_jangtq_vlm/mlx_vlm.load"` mentions the old wrong name in user-visible messages (likely just a misleading string).
+
+---
+
+## 2026-04-20 iteration 21 — Cat D memory cross-ref (second pass, 16 iters since iter 5)
+
+**Angle:** Iter 5 did memory cross-ref and found M35 (Osaurus remap drift). 16 iterations of code changes have landed since; whatever memory claims were fresh then may have drifted now. Cat D hadn't been revisited. Pick one concrete memory file per critical subsystem and grep its claims against the live code.
+
+**Deep trace walkthrough:**
+1. Started with `project_mlp_asymmetry.md` (11 days old). Memory claim: "Threshold lowered from 512 to 256 on 2026-04-08". Memory says GLM-5.1 (256 experts) degenerates without the floor → repetition loops after single-token coherence. Memory cites `allocate.py:_apply_mlp_asymmetry_floor()` as the implementation.
+2. Read `allocate.py:_apply_mlp_asymmetry_floor`:
+   - Docstring (line 320): "Apply MLP asymmetry bit floors for **256+** expert models"
+   - Code guard (line 325): `if num_experts < **512**: return bits`
+   - **TRIPLICATE DRIFT:** memory says 256, docstring says 256+, code checks <512. Code wins at runtime. Every 256-expert model (GLM-5.1, MiniMax M2.7, Qwen3.6) slipped through the guard without getting the floor.
+3. **Severity assessment:** Per memory, lack of floor causes single-token coherence but multi-token repetition loops. This is an OUTPUT QUALITY bug affecting every JANG_2*/1L convert of a 256-expert source model. Users could have been getting broken models for unknown weeks without noticing because the audit harness's a3 ("generation coherence, does output contain 'Paris'") only checks ONE token.
+4. **Budget impact of the fix:** Per memory, "Budget impact for 2-bit profiles: (4+2+3)/3 = 3.0 avg for expert MLPs. Raises overall average from ~2.15 to ~3.13 bits for GLM-5.1 JANG_1L." → ~50% larger model on disk and in RAM. Higher memory pressure but correct output.
+5. **Fix design:** Don't just flip the number. Extract a named constant `_MLP_ASYMMETRY_MIN_EXPERTS = 256` so future drifts fight a named constant + a regression test, not a magic `512` three lines below its own "256+" docstring. Memory file updated with an iter-21 fix note.
+6. **Test design:** 9 tests cover the full behavior matrix: threshold matches memory (pins future drift), floor values pin to 4/3/no-up_proj, below-threshold passthrough, at-256 floor applies, at-512 still applies, shared_expert exempt, non-MLP names pass through, floor never lowers bits (max semantics), Mixtral w1/w2 naming also covered.
+7. **Adjacent drift spotted:** `capabilities_cli.py:_KNOWN_512_EXPERT_TYPES = ["minimax_m2", "glm_moe_dsa"]` — list name says 512 but per `project_bfloat16_fix.md` MiniMax has 256 experts + hidden≤3072 and is NOT affected by the 512-hidden=4096 bfloat16 overflow. Swift PreflightRunner uses this list for warnings → MiniMax users get misleading "512+ experts" warning. Spawned as M84.
+8. **Adjacent drift spotted:** allocate.py has ~6-8 comments still saying "512+ expert models" in prose while the code is (now) correctly 256+. Sweep-comment task spawned as M85.
+
+**Items touched:**
+- M83 [x] — primary drift fixed: `< 512` → `< _MLP_ASYMMETRY_MIN_EXPERTS`; 9 regression tests pin behaviour.
+
+**Commit:** (this iteration)
+
+**Verification:** 241 jang-tools (was 232). ralph_runner 68 + Swift 109 unchanged.
+
+**Closed-status tally:** 34 (prior) + M83 = 35 closed / 73 total = 48% closure rate. **Cat D revisit useful** — spawned 2 new drift items (M84, M85).
+
+**Meta-observation on memory cross-ref cadence:** 16 iters is probably too long between passes. A single drift fix (M35 at iter 5, M83 at iter 21) per long cycle suggests drift accumulates steadily. Future: revisit Cat D every 5-7 iters when code velocity is high. Catching one bit-allocation-quality bug per cycle is worth one iter's attention.
+
+**Next iteration should pick:** M43 (publish progress streaming, last Cat A item — deferred across iters 14/17/18/19 now; architecturally non-trivial but highest remaining adopter-UX win). Or M85 (sweep the 512→256 prose comments — tiny, zero-risk, would avoid repeating this same investigation 10 iters from now). Or continue Cat D by picking another memory file (e.g., `project_mistral4_architecture.md` claims 6 fixes for MLA+MoE — verify each is still in place).

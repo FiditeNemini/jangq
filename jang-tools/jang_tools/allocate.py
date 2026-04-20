@@ -315,14 +315,23 @@ MLP_ASYMMETRY_FLOORS = {
 }
 
 
+_MLP_ASYMMETRY_MIN_EXPERTS = 256
+
+
 def _apply_mlp_asymmetry_floor(name: str, bits: int, num_experts: int) -> int:
     """
     Apply MLP asymmetry bit floors for 256+ expert models.
 
     Returns the adjusted bit width (may be higher than input if floor applies).
     Only affects routed expert MLP tensors, not shared_expert.
+
+    Iter-21 memory-cross-ref fix: threshold was CODE 512 but docstring 256 —
+    drift from the 2026-04-08 lowering recorded in `project_mlp_asymmetry.md`.
+    GLM-5.1 (256 experts) + MiniMax M2.7 (256 experts) + Qwen3.6 (256 routed)
+    all need the floor to avoid repetition loops at 2-bit MLPs. Threshold
+    constant is now an exported sentinel so a test can pin it.
     """
-    if num_experts < 512:
+    if num_experts < _MLP_ASYMMETRY_MIN_EXPERTS:
         return bits
     name_lower = name.lower()
     if "shared_expert" in name_lower:
