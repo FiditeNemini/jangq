@@ -5357,3 +5357,47 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: apply iter-122's memory rule retrospectively — any other 3+-instance pattern from past iters that hasn't been codified?
 
 **Next iteration should pick:** rate-limiting on jang-server (concrete DoS angle), OR final JANGQuantizer.swiftpm sweep for Models/Theme/App, OR retrospective memory-codification audit.
+
+---
+
+## 2026-04-20 iteration 123 — Retrospective: codify "Don't lie to the user" as 5th memory note
+
+**Angle:** Iter-122 forecast: "apply iter-122's memory rule retrospectively — any other 3+-instance pattern not yet codified?"
+
+**Deep trace walkthrough:**
+1. **Scanned the audit log** for recurring meta-patterns from past iters that hadn't been turned into memory notes:
+   - Cross-process Pipe deadlocks ✓ (codified iter-83)
+   - Error remediation ✓ (codified iter-92)
+   - View lifecycle cancel ✓ (codified iter-94)
+   - try? in Button handlers ✓ (codified iter-122)
+   - **"Don't lie to the user" UI honesty** — iter-101/102/108/109/110 = **5 instances across 3 surfaces** — NOT codified yet.
+   - Cross-boundary formula audit — only 2 instances (iter-99/100); below threshold.
+   - Stale-task content-match guards — 2 instances (iter-57/84); below threshold.
+   - Dual-invariant test pattern (coarse count + precise regex) — 4 instances (iter-104/105/106/111). Borderline; consider for next iter if a 5th appears.
+2. **"Don't lie" pattern is the strongest retrospective candidate.** Five iters touched it, three distinct surfaces (preflight `.pass`, Settings affordances, navigation rows), three-bucket `.pass` taxonomy already codified inline in iter-102 M175 — easy to extract into long-term memory.
+3. **Wrote `feedback_dont_lie_to_user.md`** with: the rule statement, three-bucket `.pass` taxonomy, three rules for UI affordances (match interaction to visual treatment / per-affordance status > section captions / preserve persisted values when impl deferred), audit recipes, green-field guidance, links to related memories (`feedback_remediation_pattern.md` + `feedback_no_try_in_button_handlers.md`).
+4. **Updated MEMORY.md index** with one-line entry. Now 5 feedback memos in the threshold-driven family.
+
+**Meta-lesson — retrospective codification finds rules the dev has been following intuitively but never written down.** The "don't lie to the user" pattern was emerging across 5 iters, each fixed correctly per the principle. But the principle itself was implicit — never stated in one place a future maintainer could reference. Iter-123's retrospective extracts what was already happening into an explicit rule. **Rule for retrospectives: every ~20 iters, scan the audit log for patterns that were applied to 3+ instances without explicit codification. Promote to memory before the pattern's institutional knowledge ages out.**
+
+**Meta-lesson — composition of related memos creates meta-rules.** `feedback_no_try_in_button_handlers.md` is a SUB-CASE of `feedback_dont_lie_to_user.md` (silent-swallow buttons lie about what happened). `feedback_remediation_pattern.md` is the COMPLEMENT (when surfacing a failure, also tell user what to do). Linking related memos in their "Related rules" sections creates a small graph the future maintainer can navigate. **Rule: when writing a memo, link to related memos in the codebase already.** Builds institutional knowledge as a network, not a flat list.
+
+**Items touched:** none code-changed. New memory file + index update. (Same shape as iter-122.)
+
+**Commit:** (this iteration) — docs-only.
+
+**Verification:** none required (no code change).
+
+**Closed-status tally:** 140 (iter 122), unchanged. Zero known bugs as of iter-123 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: rate-limiting on jang-server (DoS surface).
+- **NEW**: scan remaining JANGQuantizer.swiftpm files (Models/Theme/JANGQuantizerApp).
+- **NEW**: scan past iters for OTHER patterns near the 3-instance threshold (dual-invariant test pattern is at 4; one more would warrant codification).
+
+**Next iteration should pick:** rate-limiting on jang-server (concrete DoS), OR final JANGQuantizer.swiftpm sweep, OR start tracking a "near-threshold patterns" list in the audit log so future iters can promote them faster.
