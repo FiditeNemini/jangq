@@ -160,17 +160,20 @@ def cmd_status() -> int:
     return 0
 
 
-def run_audits_remote(output_path: str, convert_wall_s: float) -> dict[str, Any]:
+def run_audits_remote(output_path: str, convert_wall_s: float,
+                      source_path: str | None = None) -> dict[str, Any]:
     """SSH to macstudio + run ralph_runner/audit.py on the converted model dir. Capture JSON."""
     # Make sure ralph_runner/ is on macstudio (same rsync scope as jang-tools)
     print(f"[ralph] sync ralph_runner -> macstudio (for audit)")
     sync_tree(str(JANG_REPO_ROOT / "ralph_runner"), "jang/ralph_runner")
+    source_arg = f"--source-model {source_path}" if source_path else ""
     cmd = (
         f"cd {REMOTE_WORKSPACE}/jang && "
         f"PYTHONPATH=jang-tools:ralph_runner "
         f"python3 -m ralph_runner.audit "
         f"--model {output_path} "
         f"--convert-wall-s {convert_wall_s:.3f} "
+        f"{source_arg} "
         f"--json"
     )
     print(f"[ralph] audit: {cmd}")
@@ -234,7 +237,8 @@ def cmd_next() -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "convert.json").write_text(json.dumps(result, indent=2))
     if result["returncode"] == 0:
-        audit_result = run_audits_remote(result["output_path"], result["wall_time_s"])
+        audit_result = run_audits_remote(result["output_path"], result["wall_time_s"],
+                                         source_path=src)
         (run_dir / "audit.json").write_text(json.dumps(audit_result, indent=2))
         overall = audit_result.get("overall", "fail")
         required_fails = audit_result.get("required_fail_count", 0)
