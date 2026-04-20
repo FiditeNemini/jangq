@@ -83,13 +83,20 @@ struct RunStep: View {
                     // zip leaks the user's filesystem layout.
                     // M107 (iter 35): surface write failure via the existing log
                     // pane instead of silently dismissing.
-                    do {
-                        let url = try DiagnosticsBundle.write(plan: coord.plan, logLines: logs, eventLines: events,
-                                                              verify: [], to: desktop,
-                                                              anonymizePaths: settings.anonymizePathsInDiagnostics)
-                        NSWorkspace.shared.activateFileViewerSelecting([url])
-                    } catch {
-                        logs.append("[diagnostics] FAILED to write zip: \(error.localizedDescription)")
+                    // M106 (iter 42): switched to writeAsync so the ditto
+                    // subprocess runs off MainActor. Pre-fix, a large diag
+                    // bundle (50+ MB of tick events + stderr) could beach-ball
+                    // the UI for several seconds during zip creation.
+                    Task {
+                        do {
+                            let url = try await DiagnosticsBundle.writeAsync(
+                                plan: coord.plan, logLines: logs, eventLines: events,
+                                verify: [], to: desktop,
+                                anonymizePaths: settings.anonymizePathsInDiagnostics)
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        } catch {
+                            logs.append("[diagnostics] FAILED to write zip: \(error.localizedDescription)")
+                        }
                     }
                 }
             }

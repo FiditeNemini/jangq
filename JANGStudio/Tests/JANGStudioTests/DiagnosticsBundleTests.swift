@@ -168,4 +168,100 @@ final class DiagnosticsBundleTests: XCTestCase {
         XCTAssertNotEqual(a.lastPathComponent, b.lastPathComponent,
                           "two writes within a second must produce distinct zip filenames")
     }
+
+    // MARK: - Iter 42: M106 writeAsync doesn't block MainActor on ditto
+
+    @MainActor
+    func test_writeAsync_produces_same_zip_shape_as_sync() async throws {
+        // The async variant must produce an identical-shaped zip (same
+        // entries: plan.json, run.log, events.jsonl, system.json, verify.json
+        // plus the outer zip filename pattern). This pins feature parity so
+        // the async path can't silently regress vs the sync path that iter
+        // 14's M22 tests cover.
+        let plan = ConversionPlan()
+        plan.profile = "JANG_4K"
+        let dest = FileManager.default.temporaryDirectory
+        let zipURL = try await DiagnosticsBundle.writeAsync(
+            plan: plan, logLines: ["[hi]"], eventLines: [#"{"v":1,"type":"info"}"#],
+            verify: [], to: dest)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: zipURL.path))
+        XCTAssertTrue(zipURL.lastPathComponent.hasSuffix(".zip"))
+        XCTAssertTrue(zipURL.lastPathComponent.hasPrefix("JANGStudio-diagnostics-"))
+
+        // Unzip and verify expected entries
+        let unzipDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diag-async-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: unzipDir, withIntermediateDirectories: true)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        p.arguments = ["-x", "-k", zipURL.path, unzipDir.path]
+        try p.run(); p.waitUntilExit()
+        // enumerator().makeIterator() is unavailable from async contexts on
+        // Swift 6; use contentsOfDirectory recursively via a small helper.
+        let foundEntries = Self.allFilenames(under: unzipDir)
+        for required in ["plan.json", "run.log", "events.jsonl", "system.json", "verify.json"] {
+            XCTAssertTrue(foundEntries.contains(required),
+                          "async variant missing expected entry: \(required)")
+        }
+    }
+
+    /// Recursive filename collection that doesn't rely on FileManager.enumerator
+    /// (which can't be iterated from async contexts in Swift 6).
+    private static func allFilenames(under root: URL) -> Set<String> {
+        var out: Set<String> = []
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey]
+        ) else { return out }
+        for entry in entries {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: entry.path, isDirectory: &isDir), isDir.boolValue {
+                out.formUnion(allFilenames(under: entry))
+            } else {
+                out.insert(entry.lastPathComponent)
+            }
+        }
+        return out
+    }
+
+    @MainActor
+    func test_writeAsync_scrubs_sensitive_like_sync() async throws {
+        // M22e boundary — scrubSensitive must apply to BOTH sync AND async paths.
+        let plan = ConversionPlan()
+        plan.profile = "JANG_4K"
+        let secret = "hf_SECRETTOKENabc1234567890XYZ"
+        let logs = ["[error] token=\(secret)"]
+        let zipURL = try await DiagnosticsBundle.writeAsync(
+            plan: plan, logLines: logs, eventLines: [],
+            verify: [], to: FileManager.default.temporaryDirectory)
+
+        let unzipDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diag-async-scrub-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: unzipDir, withIntermediateDirectories: true)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        p.arguments = ["-x", "-k", zipURL.path, unzipDir.path]
+        try p.run(); p.waitUntilExit()
+        // Iterate files via recursive helper (enumerator unavailable in async).
+        for url in Self.allFileURLs(under: unzipDir) where url.pathExtension == "log" {
+            let content = try String(contentsOf: url, encoding: .utf8)
+            XCTAssertFalse(content.contains(secret),
+                           "writeAsync must scrub HF tokens (M22e pattern)")
+        }
+    }
+
+    private static func allFileURLs(under root: URL) -> [URL] {
+        var out: [URL] = []
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey]
+        ) else { return out }
+        for entry in entries {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: entry.path, isDirectory: &isDir), isDir.boolValue {
+                out.append(contentsOf: allFileURLs(under: entry))
+            } else {
+                out.append(entry)
+            }
+        }
+        return out
+    }
 }

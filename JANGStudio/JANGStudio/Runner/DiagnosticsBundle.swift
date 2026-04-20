@@ -106,4 +106,102 @@ enum DiagnosticsBundle {
         try? FileManager.default.removeItem(at: workDir)
         return zipURL
     }
+
+    /// Async variant of `write` — offloads the `ditto` subprocess off MainActor
+    /// so the "Copy Diagnostics" button doesn't beach-ball the UI during a
+    /// multi-second zip of a large bundle (tens of MB of logs + events).
+    ///
+    /// M106 (iter 42): the synchronous `write` above was called on MainActor
+    /// from RunStep's button handler. For a small bundle (<5 MB) the
+    /// `ditto -c -k` runs in ~1s and is invisible, but a convert that
+    /// produced thousands of JSONL tick events + long stderr could easily
+    /// produce a 50 MB bundle — several seconds of frozen UI with nothing
+    /// but a dead button to look at.
+    ///
+    /// Strategy: scrub + write the tempdir files on MainActor (fast, small
+    /// JSONs), then hop to a DispatchQueue for the `ditto` subprocess wait
+    /// via `withCheckedThrowingContinuation`. Same cancel-propagation
+    /// wrapper pattern as iter-33's service-sweep (ProcessHandle from iter 30).
+    static func writeAsync(plan: ConversionPlan,
+                           logLines: [String],
+                           eventLines: [String],
+                           verify: [VerifyCheck],
+                           to desktop: URL,
+                           anonymizePaths: Bool = false) async throws -> URL {
+        // Step 1: build tempdir + write scrubbed logs/events/etc. ON MainActor.
+        // These writes are small (typically <1 MB total before the log tail)
+        // and fast; doing them here avoids needing to make all the MainActor
+        // @State reads Sendable via an isolated snapshot.
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let stamp = fmt.string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("JANGStudio-diag-\(stamp)")
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+
+        var planDict: [String: Any] = [
+            "profile": plan.profile,
+            "family": plan.family.rawValue,
+            "method": plan.method.rawValue,
+            "hadamard": plan.hadamard,
+            "run": plan.run.rawValue,
+        ]
+        if let src = plan.sourceURL?.path {
+            planDict["sourceURL"] = anonymizePaths ? anonymizePath(src) : src
+        }
+        if let out = plan.outputURL?.path {
+            planDict["outputURL"] = anonymizePaths ? anonymizePath(out) : out
+        }
+        try JSONSerialization.data(withJSONObject: planDict).write(
+            to: workDir.appendingPathComponent("plan.json"))
+
+        let scrubbedLogs = logLines.map(Self.scrubSensitive).joined(separator: "\n")
+        try scrubbedLogs.write(to: workDir.appendingPathComponent("run.log"),
+                               atomically: true, encoding: .utf8)
+        let scrubbedEvents = eventLines.map(Self.scrubSensitive).joined(separator: "\n")
+        try scrubbedEvents.write(to: workDir.appendingPathComponent("events.jsonl"),
+                                 atomically: true, encoding: .utf8)
+        let sys: [String: String] = [
+            "macos": ProcessInfo.processInfo.operatingSystemVersionString,
+            "ram_bytes": String(ProcessInfo.processInfo.physicalMemory),
+            "app_version": (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?",
+        ]
+        try JSONSerialization.data(withJSONObject: sys).write(to: workDir.appendingPathComponent("system.json"))
+        let verifyData = verify.map { ["id": $0.id.rawValue, "status": $0.status.rawValue, "required": $0.required] as [String: Any] }
+        try JSONSerialization.data(withJSONObject: verifyData).write(to: workDir.appendingPathComponent("verify.json"))
+
+        let zipURL = desktop.appendingPathComponent("JANGStudio-diagnostics-\(stamp).zip")
+
+        // Step 2: hop off MainActor for the ditto subprocess. Task-cancel
+        // propagation via withTaskCancellationHandler (iter 33 pattern).
+        let handle = ProcessHandle()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                DispatchQueue.global().async {
+                    do {
+                        let p = Process()
+                        p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                        p.arguments = ["-c", "-k", "--keepParent", workDir.path, zipURL.path]
+                        try p.run()
+                        handle.set(process: p)
+                        p.waitUntilExit()
+                        if p.terminationStatus != 0 {
+                            cont.resume(throwing: NSError(
+                                domain: "DiagnosticsBundle.writeAsync",
+                                code: Int(p.terminationStatus),
+                                userInfo: [NSLocalizedDescriptionKey: "ditto exited \(p.terminationStatus)"]))
+                            return
+                        }
+                        cont.resume()
+                    } catch {
+                        cont.resume(throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            handle.cancel()
+        }
+        try? FileManager.default.removeItem(at: workDir)
+        return zipURL
+    }
 }

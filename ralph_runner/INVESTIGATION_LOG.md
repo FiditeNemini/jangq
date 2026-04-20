@@ -1688,3 +1688,37 @@ Or a domain item: M87, M97, M106, Cat D.
 - Domain items untouched for 10+ iters: M87 Mistral 4 RoPE, M97 partial HF repo cleanup, M106 DiagnosticsBundle main-thread
 - Or spawn a NEW class of grep-audit: `json.loads(` without try/except (silent decode failures)
 - Or iterate another Cat D memory file (iter-22 Mistral 4 was clean; other memory files include `reference_architecture_details.md`, `project_minimax_m27.md`, `project_glm51_jang1l_working.md`)
+
+---
+
+## 2026-04-20 iteration 42 — M106 DiagnosticsBundle async-ify
+
+**Angle:** Close M106 — flagged iter 34 when iter-33's grep-audit sweep noticed the bare `waitUntilExit()` but scoped it out as lower priority. It's been 8 iters and the MainActor block is still there. Time to fix.
+
+**Deep trace walkthrough:**
+1. `DiagnosticsBundle.write` is `@MainActor` + synchronous. Copy Diagnostics button handler in RunStep.swift calls it directly. `try p.run(); p.waitUntilExit()` for the `ditto -c -k` zip blocks MainActor.
+2. For a clean convert with <100 tick events the zip is <5 MB and ditto runs in ~500ms. Invisible.
+3. For a multi-hour MoE convert with ~10,000 tick events + verbose stderr, the log data alone can be 20-50 MB. ditto -c -k compresses that to maybe 10-20 MB. Wall clock: 3-5 seconds of completely frozen UI with the Copy Diagnostics button still highlighted and no spinner.
+4. **Design: add async variant, don't replace sync.** The sync path has 10+ existing tests (iter 14's M22 suite). Changing its signature breaks all of them. Cleaner to add `writeAsync` alongside and migrate RunStep.
+5. **Split the work intelligently:**
+   - On MainActor (fast, small): tempdir creation + plan.json/run.log/events.jsonl/system.json/verify.json writes. These are <1 MB pre-zip and run in <100ms. No UI freeze.
+   - Off MainActor (slow, big): only the `ditto` subprocess wait. Hop via `withCheckedThrowingContinuation { DispatchQueue.global().async { ... } }`.
+6. **Reuse iter-30's ProcessHandle + iter-33's withTaskCancellationHandler wrapper.** Consumer Task cancel (e.g., user dismisses the sheet mid-zip) propagates SIGTERM. The iter-30-33 cross-layer cancel pattern is now so proven that applying it here is mechanical.
+7. **Test strategy:** pin parity with sync path. If async regressed the output shape (missing entries, wrong filenames), iter-14's M22 tests would NOT catch it because they only exercise the sync `write`. Two new tests: (a) async produces same 5 entries as sync, (b) async scrubs tokens same as sync. Both unzip + inspect.
+8. **Swift 6 async-context gotcha caught during test writing:** `FileManager.enumerator(at:)` can't be iterated from async contexts in Swift 6 — `makeIterator` is `unavailable from asynchronous contexts`. Replaced with a recursive helper using `contentsOfDirectory`. Minor but worth noting — any test that iterates a fresh directory from async needs the same workaround.
+
+**Items touched:**
+- M106 [x] — DiagnosticsBundle.writeAsync offloads the ditto subprocess; UI stays responsive during large-bundle zip.
+
+**Commit:** (this iteration)
+
+**Verification:** 130 Swift tests (was 128, +2). jang-tools 270 + ralph_runner 73 unchanged.
+
+**Closed-status tally:** 56 (prior) + M106 = 57 closed / 91 total = 63% closure rate.
+
+**Long-idle domain items finally getting picked off.** M106 had been in the backlog since iter 34 (8 iters). Remaining long-idle:
+- M87 Mistral 4 RoPE live validation (needs real convert — not doable in unit test iter)
+- M97 partial HF repo cleanup after cancel (iter-30 spawn)
+- M117 in-wizard inference smoke (feedback_model_checklist.md rule 3)
+
+**Next iteration should pick:** M97 (partial HF cleanup — concrete, testable via HF API mock) OR another grep-audit class (`json.loads(` without try/except) OR Cat D memory-file cross-ref (~6-iter cadence due, last pass was iter 38).
