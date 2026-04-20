@@ -979,6 +979,38 @@ def convert_model(
             if tc.get("eos_token_id") in eos_fix_map:
                 tc["eos_token_id"] = eos_fix_map[tc["eos_token_id"]]
 
+    # ── Osaurus / swift-transformers compatibility fix ───────────
+    # Some HF sources ship `tokenizer_class: "TokenizersBackend"` which
+    # swift-transformers (used by Osaurus, vmlx-swift-lm) can't parse —
+    # it raises `unsupportedTokenizer("TokenizersBackend")` and loading
+    # hard-fails. Remap to a concrete class based on the source model_type
+    # so any downstream Swift consumer can load the model.
+    # Memory ref: feedback_jang_studio_audit_coverage.md (hard requirement).
+    # This fix previously lived only in convert_qwen35_jangtq.py — regular
+    # JANG conversions for the same family were shipping broken.
+    _OSAURUS_TOKENIZER_MAP = {
+        "qwen3_5": "Qwen2Tokenizer",
+        "qwen3_5_moe": "Qwen2Tokenizer",
+        "qwen3": "Qwen2Tokenizer",
+        "qwen2": "Qwen2Tokenizer",
+        "qwen2_moe": "Qwen2Tokenizer",
+        "llama": "LlamaTokenizer",
+        "mistral": "LlamaTokenizer",
+        "gemma": "GemmaTokenizer",
+        "gemma2": "GemmaTokenizer",
+        "gemma3": "GemmaTokenizer",
+        "phi": "LlamaTokenizer",
+        "phi3": "LlamaTokenizer",
+    }
+    if "tokenizer_config.json" in tokenizer_files:
+        _tc = tokenizer_files["tokenizer_config.json"]
+        if _tc.get("tokenizer_class") == "TokenizersBackend":
+            # Resolve based on source model_type; default Qwen2Tokenizer because
+            # most currently-supported TokenizersBackend sources are Qwen-family.
+            _concrete = _OSAURUS_TOKENIZER_MAP.get(model_type, "Qwen2Tokenizer")
+            _tc["tokenizer_class"] = _concrete
+            print(f"  [osaurus-fix] tokenizer_class: TokenizersBackend → {_concrete}")
+
     # Copy VL processor, chat template, and extra config files.
     # Chat templates are CRITICAL — missing or wrong template causes:
     #   - Qwen3.5: infinite thinking loops if eos_token_id wrong

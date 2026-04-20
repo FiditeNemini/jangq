@@ -104,3 +104,39 @@ Each entry records ONE deep trace. Created by iterations under the new Ralph pro
 **New questions added:** 5 (M30-M34).
 
 **Next iteration should pick:** Category D (memory cross-ref) — never done. Walk `memory/MEMORY.md` entries vs. what the app actually does. For example: does the app enforce `feedback_always_vl.md` (VL preprocessor files always copied)? Does it surface `feedback_no_concurrent_mlx.md` (don't run convert + inference in parallel) in the UI? Does the convert path respect `feedback_jang_must_stay_quantized.md` (never dequant to float16)? Or Category A user journey from the POV of an ADOPTER (not beginner) — someone who converted a model, wants to publish it to HF, test inference on it, export a model card, and write usage snippets into their own app.
+
+---
+
+## 2026-04-19 iteration 5 — memory cross-ref (Category D, never done)
+
+**Angle:** Cross-reference memory entries (`feedback_*.md`, `project_*.md`) against actual app + CLI behavior. Pick one claim from memory, verify whether the app upholds it, fix the drift.
+
+**Deep trace walkthrough:**
+1. Read `feedback_no_concurrent_mlx.md` (8 days old): rule is "don't run MLX convert + MLX generate concurrently — 2× wallclock penalty at P8 GPU power". Checked app architecture: `WindowGroup` allows multi-window, no global mutex; user could start convert in window 1 and another in window 2 and saturate the GPU. Flagged as M36 — not fixing this iteration (needs design decision on single-instance enforcement vs queue-based coordinator).
+2. Read `feedback_jang_must_stay_quantized.md` (35 days old): rule is "NEVER dequant to float16 at load". Checked `jang_tools/loader.py:126-275`: only GATE weights (small MoE routers) are dequanted, for Nemotron/Mistral4 correctness; outer `model.set_dtype(bfloat16)` sets activation dtype, not quant weights. Rule upheld. Memory still valid.
+3. Read `feedback_always_vl.md` (33 days old): rule is "every conversion must copy preprocessor_config.json + video_preprocessor_config.json". Checked `convert.py:1018-1028`: both files are in `extra_configs` list and copied via `_safe_copy`. PostConvertVerifier rows #8 + #8b enforce presence gated on `detected.isVL` / `detected.isVideoVL`. Rule upheld.
+4. Read `feedback_jang_studio_audit_coverage.md` (this session): says `tokenizer_class must be concrete (not "TokenizersBackend" — breaks Osaurus)`. **BUG FOUND.**
+5. **BUG M35 CONFIRMED:** grep-audit of repo:
+   - `convert_qwen35_jangtq.py:483-499` has the osaurus remap (TokenizersBackend → Qwen2Tokenizer).
+   - `convert_minimax_jangtq.py` — doesn't have it (MiniMax sources are Qwen-tokenizer family so they were grandfathered in, but not defensively guarded).
+   - `convert.py` (the MAIN JANG path, not the JANGTQ-specific ones) — `grep tokenizer_class` returns ZERO matches. **The regular JANG conversion path does not apply the Osaurus remap at all.** A user who picks a Qwen3.5-VL source and runs a regular JANG convert (not JANGTQ) ships a model that Osaurus will reject on load.
+   - `PostConvertVerifier.swift:108-110` flags this as `status: .warn, required: false` — just a yellow label, user can click "Continue → Publish" and upload a broken model to HuggingFace.
+6. **Fix:** Two layers — source-side remap AND output-side hard fail.
+   - Added `_OSAURUS_TOKENIZER_MAP` to `convert.py` covering qwen/llama/mistral/gemma/phi. If `tokenizer_class == "TokenizersBackend"`, remap by source `model_type`. Logs `[osaurus-fix]` line matching the JANGTQ path style for grep-ability.
+   - Upgraded `PostConvertVerifier` row #10 from `warn/required=false` → `fail/required=true` with a hint that directs future debuggers to the convert.py remap table. If a model_type slips through unmapped (e.g. minimax, deepseek_v2), the default is still Qwen2Tokenizer — verifier now catches cases where the source is unmapped AND remap defaulted to something incompatible.
+   - Updated `CoverageMatrixTests.test_verifier_tokenizerClassConcreteIsWarn` → renamed to `test_verifier_tokenizerClassConcreteIsBlockingFailure` with assertions matching new policy.
+7. **Verification:** 225/225 jang-tools tests, 65/65 Swift tests, all pass.
+
+**Items touched:**
+- M35 [x] — real bug fixed (missing Osaurus remap in main convert path + warn-only verifier)
+- M36 [ ] — multi-window concurrent convert (memory violation; design task, deferred)
+- M37 [ ] — Osaurus remap table incomplete (mistral4, deepseek, minimax, nemotron, glm — all fall through to Qwen2Tokenizer default)
+- M38 [ ] — recommendation warnings are flat strings, no link to source memory doc
+- M39 [ ] — Ralph runner end-to-end trace on macstudio never done
+- M40 [ ] — verify-at-every-layer principle: Osaurus fix covers layers 1+3, no layer 2 (mid-convert) assertion
+
+**Commit:** (this iteration)
+
+**New questions added:** 5 (M36-M40). Net +4 open items after closing M35.
+
+**Next iteration should pick:** Category A (adopter user journey, never done) — trace every step an adopter takes AFTER they've converted a model: model card generation, usage examples export, HF publish, and critically WHAT THE ADOPTER'S END-USER EXPERIENCES when they try to load the uploaded model. Or Category E (M-spawned) — pick one of M02/M03/M07 (mid-priority data flows). Rotating away from Cat D now that we've done one.

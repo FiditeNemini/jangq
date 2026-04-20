@@ -102,12 +102,19 @@ struct PostConvertVerifier {
                                 hint: ok ? nil : "HF trust_remote_code will fail without these"))
         }
 
-        // #10 tokenizer class concrete
+        // #10 tokenizer class concrete.
+        // Memory ref `feedback_jang_studio_audit_coverage.md` makes this a hard
+        // requirement: swift-transformers (Osaurus, vmlx-swift-lm) throws
+        // `unsupportedTokenizer("TokenizersBackend")` and the model won't load.
+        // Upgraded from warn-only to required=true in Ralph iter 5; the Python
+        // side (convert.py Osaurus fix) now auto-remaps, so this verifier row
+        // catches sources that slipped past the remap (e.g. an unmapped
+        // model_type would leave the blocklist value intact).
         let cls = (tokCfg["tokenizer_class"] as? String) ?? ""
         let classOK = !cls.isEmpty && !capabilities.tokenizerClassBlocklist.contains(cls)
         checks.append(.init(id: .tokenizerClassConcrete, title: "Tokenizer class concrete",
-                            status: classOK ? .pass : .warn, required: false,
-                            hint: classOK ? nil : "tokenizer_class=\(cls) — in blocklist \(capabilities.tokenizerClassBlocklist)"))
+                            status: classOK ? .pass : .fail, required: true,
+                            hint: classOK ? nil : "tokenizer_class=\(cls) is in blocklist — Osaurus/vmlx-swift-lm will fail to load. Re-run convert; if it persists, add your model_type to the Osaurus remap in convert.py."))
 
         // #11 generation_config.json — HF consumers expect this. Warn only (HF will fall back to defaults).
         let hasGenCfg = FileManager.default.fileExists(atPath: out.appendingPathComponent("generation_config.json").path)

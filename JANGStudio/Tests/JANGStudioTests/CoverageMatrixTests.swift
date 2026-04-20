@@ -276,7 +276,11 @@ final class CoverageMatrixTests: XCTestCase {
                       "minimax with .py files should pass miniMaxCustomPy")
     }
 
-    func test_verifier_tokenizerClassConcreteIsWarn() async throws {
+    func test_verifier_tokenizerClassConcreteIsBlockingFailure() async throws {
+        // Memory cross-ref (feedback_jang_studio_audit_coverage.md):
+        // TokenizersBackend breaks Osaurus / vmlx-swift-lm hard. Upgraded in
+        // Ralph iter 5 from warn-only to required=true fail so the wizard
+        // blocks users from shipping a broken model.
         let out = tmp.appendingPathComponent("out-\(UUID().uuidString)")
         try Self.writeGoodFixture(at: out)
         try "{\"chat_template\":\"{% for m in messages %}{{m.content}}{% endfor %}\",\"tokenizer_class\":\"TokenizersBackend\"}".write(
@@ -288,8 +292,8 @@ final class CoverageMatrixTests: XCTestCase {
                               dtype: .bf16, totalBytes: 0, shardCount: 1)
         let checks = await PostConvertVerifier().run(plan: plan, skipPythonValidate: true)
         let cls = checks.first { $0.id == .tokenizerClassConcrete }!
-        XCTAssertEqual(cls.status, .warn, "TokenizersBackend should warn not fail")
-        XCTAssertFalse(cls.required, "tokenizerClassConcrete must be required=false")
+        XCTAssertEqual(cls.status, .fail, "TokenizersBackend must fail hard (Osaurus cannot load)")
+        XCTAssertTrue(cls.required, "tokenizerClassConcrete must be a required blocker")
     }
 
     // MARK: - Helpers
