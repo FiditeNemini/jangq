@@ -619,3 +619,39 @@ green/fail matrix has been lying.
 **Closed-status tally:** 28 (prior) + M78 = 29 closed / 71 total = 41% closure rate.
 
 **Next iteration should pick:** Cat A publish remainder (M42/M43/M45) has been on the forecast list since iter 14 — 3 iters of debt now. M43 (publish progress streaming) would materially improve the adopter experience. Alternatively M81 (fixture git-tracking audit) is a concrete 10-minute check. Cat D memory cross-ref hasn't been revisited since iter 5 — 11 iters of drift possible.
+
+---
+
+## 2026-04-19 iteration 17 — M81 fixture invariants + M15 publish token clear
+
+**Angle:** Pair two small items in one iter. M81 is "latent process-gap that could silently degrade a11/a12 on a fresh clone"; M15 is a 15-iter-old security-hygiene TODO (token lingering in memory after publish). Both small enough to batch, both closing audit-checklist items with concrete tests.
+
+**M81 deep trace:**
+1. `git ls-files ralph_runner/fixtures/` — both files tracked.
+2. `git check-ignore -v ralph_runner/fixtures/*` — returns nothing, so no gitignore rules target them.
+3. **No active bug today.** But the invariant wasn't pinned — a future global `.gitignore` rule (e.g., adding `*.npy` for some unrelated reason) could silently un-track `test_video_frames.npy`, and a11/a12 would silently degrade to warn on every fresh-clone run with no visible CI failure.
+4. Close M81 by pinning the invariant with 4 regression tests:
+   - `_FIXTURE_DIR` resolves and is a directory.
+   - test_image.png: exists, PIL opens, dimensions ≥32×32.
+   - test_video_frames.npy: exists, numpy loads, shape=4D, ≥4 frames, ≥16×16, 3 channels.
+   - `git ls-files` explicitly lists both files — catches the "accidentally gitignored" failure mode that existence-on-disk tests can't, because the author's working tree always has the files.
+5. This pattern is a good template for other "implicit dependency on tracked non-code files" — the `subprocess.run(["git", "ls-files"])` check uniquely catches untracked-on-CI / tracked-locally drift.
+
+**M15 deep trace:**
+1. Read `PublishToHuggingFaceSheet.swift`. Token lives in `@State private var token: String`. Sheet init populates it from `HF_HUB_TOKEN` env (iter 9 behaviour).
+2. After a successful publish, `token` stays in memory until sheet dismiss. User may leave sheet open for minutes / forget to close. Passerby at the Mac could see the value in the SecureField buffer — macOS SecureField hides characters visually but the String itself is just a Swift.String in memory.
+3. Also: crash dumps sent via "Copy Diagnostics" could pick up app memory snapshot. Iter 14's scrubSensitive catches tokens in STRINGS but not in in-memory state snapshots. Defense in depth says: don't hold the secret longer than needed.
+4. **Fix:** on successful publish, `token = ""` in runPublish(). On failure, KEEP the token — the user usually wants to retry and re-entering a 40-char token after every transient HTTP hiccup is worse UX than a ~30-second exposure window.
+5. Dry-run path NOT cleared because the user almost always follows dryrun with a real publish — clearing after dryrun would force re-entry for no security benefit.
+
+**Items touched:**
+- M81 [x] — 4 regression tests pin the fixture invariants; 0 functional change but catches a latent failure mode.
+- M15 [x] — token wiped after successful publish; failure path preserves for retry.
+
+**Commit:** (this iteration)
+
+**Verification:** 64 ralph_runner tests (was 60), 106 Swift (unchanged test count but tests still pass after behaviour change), 231 Python jang-tools unchanged. Total 401 tests across all suites.
+
+**Closed-status tally:** 29 (prior) + M15 + M81 = 31 closed / 71 total = 44% closure rate.
+
+**Next iteration should pick:** Cat A publish remainder (M42/M43/M45) — 4 iters on the forecast list, STILL unpicked. M43 (publish progress streaming — no ETA for 30-min uploads) would be the highest adopter-UX win. Alternatively Cat D memory cross-ref second pass (idle 12 iters). Alternatively M82 (run_audits per-row timeout — a15 hang bomb) is a concrete reliability win.

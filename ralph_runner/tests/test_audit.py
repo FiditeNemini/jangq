@@ -370,6 +370,81 @@ def test_a9_unnormalizable_shape_preserved_as_strict_comparison(tmp_path):
     assert "unnormalizable" in r
 
 
+# ────────────────────────────────────────────────────────────────────
+# Iter 17: M81 — fixtures must be git-tracked + valid
+# ────────────────────────────────────────────────────────────────────
+
+def test_fixtures_directory_exists():
+    """Trivially pin the path so a rename / move breaks loudly."""
+    from ralph_runner.audit import _FIXTURE_DIR
+    assert _FIXTURE_DIR.exists()
+    assert _FIXTURE_DIR.is_dir()
+
+
+def test_test_image_fixture_present_and_valid():
+    """The fixture is tracked by git (verified at iter-17 authoring time).
+    This test pins the invariant so a future commit that accidentally deletes
+    or gitignores the file fails CI loudly, rather than silently degrading
+    audit_a11 to a warn on every subsequent run.
+    """
+    from ralph_runner.audit import _FIXTURE_DIR
+    img_path = _FIXTURE_DIR / "test_image.png"
+    assert img_path.exists(), (
+        f"{img_path} is missing — a11 will silently degrade to warn on every run. "
+        "If the file was intentionally removed, update audit_a11 AND this test."
+    )
+    # It must actually be a readable image, not a placeholder.
+    try:
+        from PIL import Image
+    except ImportError:
+        pytest.skip("PIL not available in this test env")
+    with Image.open(img_path) as im:
+        im.load()
+        # Reasonable size bounds — fail loudly if someone replaces it with a 1x1 placeholder.
+        assert im.size[0] >= 32 and im.size[1] >= 32, f"fixture too small: {im.size}"
+
+
+def test_test_video_frames_fixture_present_and_valid():
+    """Same rationale as test_image — pin a12's fixture invariant."""
+    from ralph_runner.audit import _FIXTURE_DIR
+    frames_path = _FIXTURE_DIR / "test_video_frames.npy"
+    assert frames_path.exists(), (
+        f"{frames_path} is missing — a12 will silently degrade to warn on every run."
+    )
+    try:
+        import numpy as np
+    except ImportError:
+        pytest.skip("numpy not available in this test env")
+    frames = np.load(frames_path)
+    # Expected spawn-note shape (16 frames x 32x32 RGB) — lax bounds for future-proofing.
+    assert frames.ndim == 4, f"expected 4D (T,H,W,C) frames, got {frames.shape}"
+    T, H, W, C = frames.shape
+    assert T >= 4, f"too few frames: {T}"
+    assert H >= 16 and W >= 16, f"frames too small: {H}x{W}"
+    assert C == 3, f"expected RGB (C=3), got C={C}"
+
+
+def test_fixtures_are_in_git_manifest():
+    """Run `git ls-files` and assert both fixtures are tracked. Catches the
+    exact "fixture accidentally gitignored" failure mode that M81 named —
+    the file exists on the author's machine but would disappear on a fresh
+    clone. Existence alone (above tests) doesn't catch this.
+    """
+    import subprocess
+    repo_root = Path(__file__).resolve().parents[2]
+    r = subprocess.run(
+        ["git", "ls-files", "ralph_runner/fixtures/"],
+        cwd=str(repo_root), capture_output=True, text=True, check=False,
+    )
+    if r.returncode != 0:
+        pytest.skip(f"git ls-files unavailable: {r.stderr}")
+    tracked = {line.strip() for line in r.stdout.splitlines() if line.strip()}
+    assert "ralph_runner/fixtures/test_image.png" in tracked, \
+        f"test_image.png not git-tracked; fresh clones can't run a11. tracked={tracked}"
+    assert "ralph_runner/fixtures/test_video_frames.npy" in tracked, \
+        f"test_video_frames.npy not git-tracked; fresh clones can't run a12. tracked={tracked}"
+
+
 def test_a2_accepts_chat_template_jinja_file(tmp_path, monkeypatch):
     """Regression test for the pre-existing .jinja path — iter 15's fix
     must not have broken the middle of three valid forms."""

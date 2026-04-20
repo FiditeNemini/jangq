@@ -173,6 +173,12 @@ struct PublishToHuggingFaceSheet: View {
         do {
             let r = try await PublishService.publish(modelPath: modelPath, repo: repoName, isPrivate: isPrivate, token: token)
             publishResult = r
+            // M15 (iter 17): wipe the token from @State after a successful
+            // publish. If the user leaves this sheet open on their screen,
+            // a passerby can't see / copy the token from the SecureField's
+            // buffer. On failure we KEEP the token — the user needs to retry
+            // and retyping it is worse UX than a ~30-second exposure window.
+            token = ""
         } catch {
             errorMessage = error.localizedDescription
         }
