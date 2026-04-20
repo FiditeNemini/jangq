@@ -90,9 +90,21 @@ struct RunStep: View {
                             // gone from disk). Pre-iter-35 the `try?` silently
                             // swallowed every error; user walked away thinking
                             // the output was cleaned up when it wasn't.
+                            //
+                            // M23 (iter 97): distinguish "already gone" from
+                            // real failure. Pre-M23 the catch branch reported
+                            // "delete FAILED: No such file or directory" when
+                            // the folder had already been cleaned up externally
+                            // (manual rm, auto-delete-on-cancel ran, prior
+                            // click already succeeded). User sees "FAILED" but
+                            // the goal state is achieved — misleading. Detect
+                            // NSFileNoSuchFileError → "already gone" success
+                            // message. Real failures still show the error.
                             do {
                                 try FileManager.default.removeItem(at: out)
                                 logs.append("[cleanup] deleted \(out.path)")
+                            } catch CocoaError.fileNoSuchFile {
+                                logs.append("[cleanup] \(out.path) — already gone (nothing to delete)")
                             } catch {
                                 logs.append("[cleanup] delete FAILED: \(error.localizedDescription)")
                             }

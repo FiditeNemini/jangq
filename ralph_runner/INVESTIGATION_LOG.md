@@ -4196,3 +4196,44 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: preflight disk-space estimation accuracy check.
 
 **Next iteration should pick:** scan the checklist for other cheap-to-close open-observation items, OR the preflight disk-space accuracy audit (could find a real bug if the math is off on >100 GB models).
+
+---
+
+## 2026-04-20 iteration 97 — M23 closure: delete-partial distinguishes already-gone
+
+**Angle:** Iter-96 forecast option 1: scan the checklist for cheap-to-close open items. Grep'd `^- \[ \] \*\*M` — 40+ open M-items. Most are either feature scope (M03 drag-drop), documentation (M49 stale-env behavior), or wider surface than fits one iter (M37 Osaurus remap coverage). M23 stood out as partially-closed + one specific gap left.
+
+**Deep trace walkthrough:**
+1. **Re-read M23's original statement.** "Delete partial output silently no-ops when outputURL is NIL or already removed."
+2. **Checked what iter-35 M107 actually did.** Added `do { try removeItem } catch { logs.append("[cleanup] delete FAILED: …") }`. Plus `.disabled(coord.plan.outputURL == nil)` already handles the nil case.
+3. **Identified the remaining gap.** When the folder was already removed externally (auto-delete-on-cancel setting, manual rm, user clicked the button twice rapidly and first click succeeded), `removeItem` throws `NSCocoaErrorDomain Code 4` (`NSFileNoSuchFileError`). Current behavior: shows `[cleanup] delete FAILED: No such file or directory`. User sees "FAILED" but the goal state (folder gone) is achieved. Misleading.
+4. **Designed the fix.** Swift's CocoaError has a typed case `CocoaError.fileNoSuchFile` that matches this specific error. Adding a `catch CocoaError.fileNoSuchFile` branch between the success log and the generic catch lets us emit an "already gone" message instead. Real failures (permission denied, file in use, disk error) still go through the generic catch with the error message.
+5. **Ordered the catches correctly.** Swift matches catches top-to-bottom. Putting `CocoaError.fileNoSuchFile` BEFORE the general `catch { ... }` ensures the specific case matches first. Pattern-matching on typed errors is cleaner than inspecting `(error as NSError).code == 4 && .domain == NSCocoaErrorDomain`.
+6. **Tested via source inspection.** Functional test would require mocking a gone folder, which is platform-level behavior. Source pin is sufficient — any simplification that removes the specific catch branch would fail the test.
+
+**Meta-lesson — "partially closed" items deserve full closure.** M23 was marked as `- [ ]` but iter-35 M107 had already fixed most of it. Scanning open items revealed this gap. Rule: when an item's description is multi-part, close it only when ALL parts are addressed; otherwise track the remaining gap explicitly and come back to it.
+
+**Meta-lesson — Swift's typed catches are cleaner than NSError inspection.** `catch CocoaError.fileNoSuchFile` beats `catch let e as NSError where e.code == 4 && e.domain == NSCocoaErrorDomain`. The typed form is self-documenting and survives NSError-domain renames in future OS versions. Prefer it whenever a Cocoa API might surface a specific typed error that deserves different handling.
+
+**Meta-lesson — success messages must describe the GOAL STATE, not the ACTION.** "Delete failed: No such file" describes what the system DID ("try to delete, fail because no such file"). "Already gone (nothing to delete)" describes what the user WANTED ("the goal state of 'folder gone' is achieved, no action was needed"). Users reason about goal states, not actions. Rule: when a "failure" actually achieves the user's goal, frame the message around the goal state.
+
+**Items touched:**
+- M23 [x] — delete-partial-output now distinguishes "already gone" from real failure. 1 new source-inspection test.
+
+**Commit:** (this iteration)
+
+**Verification:** 31 WizardStepContinueGateTests pass (was 30, +1).
+
+**Closed-status tally:** 113 (iter 96) + M23 = 114 items touched, all closed. Zero known bugs as of iter-97 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: M108 remaining `try?` sites — iter-35 M107 fixed 3, ~27 remain. Spot-check periodically for any that actually mask bugs.
+- **NEW**: M65 SettingsWindow auto-persist if a future crash reporter mutates settings programmatically. Observation-only (no trigger exists today).
+- **NEW**: M64 observeAndPersist race — paired mutations in the same pass might miss the continuation. Verify.
+- **NEW**: preflight disk-space accuracy on >100 GB models.
+
+**Next iteration should pick:** M64 observeAndPersist race (concrete + tractable) OR preflight disk-space accuracy check, OR another cheap M-item from the checklist.

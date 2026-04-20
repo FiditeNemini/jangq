@@ -221,6 +221,20 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M23 (iter 97): Delete partial output distinguishes "already gone" from real failure
+
+    func test_runStep_delete_partial_output_distinguishes_already_gone() throws {
+        let src = try stepSource("RunStep.swift")
+        XCTAssertTrue(
+            src.contains("catch CocoaError.fileNoSuchFile"),
+            "Delete-partial-output must catch CocoaError.fileNoSuchFile separately so 'already gone' doesn't surface as 'FAILED' (M23 iter 97)"
+        )
+        XCTAssertTrue(
+            src.contains("already gone"),
+            "The success-but-already-gone log line must contain 'already gone' so the user understands the goal state is achieved"
+        )
+    }
+
     // MARK: - M172 (iter 95): dead progressLog state removed from PublishSheet
 
     func test_publishSheet_has_no_dead_progressLog_state() throws {
