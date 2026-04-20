@@ -278,6 +278,9 @@ def main():
     from .profiles_cli import register as _register_profiles
     _register_profiles(subparsers)
 
+    from .capabilities_cli import register as _register_capabilities
+    _register_capabilities(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
