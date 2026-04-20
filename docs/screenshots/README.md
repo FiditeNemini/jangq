@@ -1,0 +1,1 @@
+Screenshots go here. Take shots of: Step 1 (folder picker), Step 2 (detected arch card), Step 3 (profile picker + preflight panel), Step 4 (live run), Step 5 (verifier + adoption row), Settings window (Cmd+,), Test Inference chat pane, Usage Examples sheet, Generate Model Card sheet, Publish to HF sheet.
