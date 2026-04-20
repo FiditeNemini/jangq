@@ -166,6 +166,40 @@ def build_capabilities(
     }
 
 
+def _safe_load_json_dict(path: Path, *, purpose: str) -> tuple[dict | None, str | None]:
+    """M150 (iter 72): local variant of the M149 template tuned for
+    ``verify_directory``'s (ok, message) return contract. Instead of
+    raising, returns ``(data, None)`` on success or ``(None, error_msg)``
+    on failure. Caller forwards the msg back up as the verify-failure
+    reason.
+
+    Same failure classes as _read_json_object in format/reader.py:
+      * OSError / UnicodeDecodeError
+      * json.JSONDecodeError
+      * non-dict root
+
+    Keeps capabilities.py self-contained (no cross-module import of the
+    format-reader helper, which lives in a different subpackage).
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, f"could not read {purpose} at {path}: {exc}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, (
+            f"{purpose} at {path} is not valid JSON "
+            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
+        )
+    if not isinstance(data, dict):
+        return None, (
+            f"{purpose} at {path} has a top-level {type(data).__name__}, "
+            f"expected a JSON object"
+        )
+    return data, None
+
+
 def verify_directory(model_dir: Path) -> tuple[bool, str]:
     """Re-read jang_config.json after a converter wrote it and confirm:
 
@@ -186,10 +220,15 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
 
     # `convert_mxtq.py` (legacy) inlines jang under config["jang"] — handle both.
     # M125 (iter 48): wrap open() in `with` so fds close deterministically.
+    # M150 (iter 72): promote disk / parse failures to (False, msg) instead
+    # of raising — matches the function's documented contract. Pre-M150 a
+    # corrupt jang_config.json raised JSONDecodeError mid-verify, breaking
+    # the CLI harness that expects (ok, msg) for all failure modes.
     if not jang_path.exists():
         if cfg_path.exists():
-            with open(cfg_path) as fh:
-                cfg = json.load(fh)
+            cfg, err = _safe_load_json_dict(cfg_path, purpose="config.json (legacy inline jang)")
+            if err is not None:
+                return False, err
             inline = cfg.get("jang")
             if isinstance(inline, dict):
                 jang = inline
@@ -199,11 +238,13 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
         else:
             return False, f"no jang_config.json at {model_dir}"
     else:
-        with open(jang_path) as fh:
-            jang = json.load(fh)
+        jang, err = _safe_load_json_dict(jang_path, purpose="jang_config.json")
+        if err is not None:
+            return False, err
         if cfg_path.exists():
-            with open(cfg_path) as fh:
-                config = json.load(fh)
+            config, err = _safe_load_json_dict(cfg_path, purpose="config.json")
+            if err is not None:
+                return False, err
         else:
             config = {}
 
@@ -262,11 +303,20 @@ def stamp_directory(model_dir: Path, write: bool = False, verbose: bool = True) 
         if verbose:
             print(f"  [capabilities] SKIP {model_dir.name} — no jang_config.json")
         return False
-    with open(jang_path) as fh:
-        jang = json.load(fh)
+    # M150 (iter 72): use _safe_load_json_dict so corrupt jang_config.json
+    # doesn't crash a batch-stamp run. Matches the verify_directory
+    # hardening applied in this iter.
+    jang, err = _safe_load_json_dict(jang_path, purpose="jang_config.json")
+    if err is not None:
+        if verbose:
+            print(f"  [capabilities] SKIP {model_dir.name} — {err}")
+        return False
     if cfg_path.exists():
-        with open(cfg_path) as fh:
-            config = json.load(fh)
+        config, err = _safe_load_json_dict(cfg_path, purpose="config.json")
+        if err is not None:
+            if verbose:
+                print(f"  [capabilities] SKIP {model_dir.name} — {err}")
+            return False
     else:
         config = {}
     caps = build_capabilities(jang, config, model_dir)

@@ -2993,3 +2993,40 @@ Three iters building the same pattern — it's now a template. Future read-side 
 - Python-side audit continuations: routing_profile.py + codebook_vq.py have `json.loads(...)` sites.
 
 **Next iteration should pick:** M150 capabilities.py migration (reuses the helper in another high-traffic module) OR Swift-side continuation.
+
+## 2026-04-20 iteration 72 — M150 capabilities.verify_directory contract fix
+
+**Angle:** Iter-71 crystallized `_read_json_object` in format/reader.py. Iter-72 applies the template to capabilities.py — the other high-traffic read-side module — with a twist: the function's return contract is `tuple[bool, str]`, so the helper must RETURN errors instead of raising.
+
+**Deep trace walkthrough:**
+1. **`verify_directory`'s contract:** doc says `Returns (ok, message)`. Designed for a CLI harness that batch-walks model dirs and tallies results.
+2. **Pre-M150 bare `json.load(fh)` at 3 sites violated the contract.** A corrupt jang_config.json raised JSONDecodeError instead of returning `(False, msg)`. The `verify_capabilities` CLI tool's `for d in discovered: verify_directory(d)` loop aborts on the first corrupt bundle.
+3. **User impact:** batch sweep crashes mid-walk. User with 30 bundles has no idea which one broke without sub-dividing runs.
+4. **Template doesn't apply unchanged.** M149's `_read_json_object` raises. Here we need a variant that returns `(data, None)` on success / `(None, err_msg)` on failure. Created `_safe_load_json_dict(path, *, purpose)` with that shape.
+5. **Applied to BOTH verify_directory AND stamp_directory.** stamp_directory has the same sites; fixing only verify would leave the sibling function still crashable.
+6. **Why not cross-import format.reader._read_json_object:** two reasons.
+   (a) Cross-subpackage import introduces coupling for a 15-line helper.
+   (b) The return contracts differ — a single helper would need either `raise_on_error: bool` flag (ugly) or two wrappers around a private core. Both are more complexity than a local duplicate.
+   For truly shared infrastructure (used by 3+ modules with the same raise-contract), extracting to `jang_tools/_json_utils.py` would be worth it. For now, capabilities.py's helper is local.
+
+**Meta-lesson — contracts matter as much as correctness.** iter-69/70/71 built the raise-on-error template. Iter-72 shows the contract-preserving variant. When applying a pattern to a new site, check what the site PROMISES its caller. If it says "returns bool", raising internally is a contract violation even if the raise is "more informative". Adapt the template to match.
+
+**Items touched:**
+- M150 [x] — capabilities.verify_directory and stamp_directory no longer raise on corrupt JSON; return/print (False, msg) consistently.
+
+**Commit:** (this iteration)
+
+**Verification:** 329 jang-tools tests pass (was 323, +6 for capabilities verify_directory / stamp_directory error-path pins). Swift 170 + ralph 73 unchanged.
+
+**Closed-status tally:** 84 (iter 71) + M150 = 85 closed / 100 total = 85.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish (could apply the template here — ~3 sites)
+- M128 gate dtype asymmetry (observation)
+- **NEW M151 candidate**: audit loader.py's 14 `json.loads(path.read_text())` sites. Those are mid-load (on paths that already passed _find_config_path check), but still could benefit from error-path hardening.
+- **NEW**: routing_profile.py / codebook_vq.py also have sites.
+
+**Next iteration should pick:** M151 loader.py migration (highest-traffic module, many sites) OR M126 examples.py polish (simpler, closes a long-open low-priority item).

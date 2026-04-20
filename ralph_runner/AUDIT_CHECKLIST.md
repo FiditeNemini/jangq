@@ -879,6 +879,19 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Why extract the helper now (vs inline like iters 43/69/70):** four sites with near-identical shape is the threshold where DRY wins over simple inline try/except. `_read_json_object` becomes reusable for future read-side loaders in the same codebase — capabilities.py, loader.py, recommend.py could all migrate. Logged for future iters.
       **Evidence:** `jang-tools/jang_tools/format/reader.py:14-60, 200-220`. 323 Python tests pass (was 318, +5). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M150 (capabilities.verify_directory / stamp_directory: contract-breaking raises on corrupt JSON)** — iter-71 M149 left capabilities.py unmigrated; iter-72 applies the template with a contract-aware twist. `verify_directory` is documented to return `tuple[bool, str]`. But bare `json.load(fh)` at 3 sites raised JSONDecodeError on corrupt JSON instead of returning `(False, msg)` — **contract violation**.
+      **Impact:** `verify_capabilities` CLI tool walks discovered model dirs calling verify_directory on each. Any one corrupt bundle crashes the entire batch walk. User has 30 models; one is corrupt; `jang_tools verify_capabilities --discover` aborts mid-sweep.
+      **Fix (iter 72):** Local helper `_safe_load_json_dict(path, *, purpose)` — variant of M149's `_read_json_object` that RETURNS `(None, msg)` instead of raising. Keeps capabilities.py self-contained without cross-module import. Both `verify_directory` and `stamp_directory` rewired to use it. Every read failure now lands as `(False, msg)` with path + purpose in the message.
+      **Why not import format.reader._read_json_object:** cross-subpackage import coupling, and the return contract differs (raise vs return-tuple). Local helper is tighter.
+      **Tests (+6) in new `tests/test_capabilities_verify_directory.py`:**
+      - `verify_directory_malformed_jang_config_returns_false_with_path`
+      - `verify_directory_non_dict_jang_config_returns_false`
+      - `verify_directory_malformed_legacy_config_returns_false`
+      - `verify_directory_malformed_model_config_returns_false`
+      - `stamp_directory_malformed_jang_config_returns_false`
+      - `stamp_directory_malformed_config_json_returns_false`
+      **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button
