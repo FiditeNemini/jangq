@@ -284,6 +284,9 @@ def main():
     from .estimate_model import register as _register_estimate_model
     _register_estimate_model(subparsers)
 
+    from .publish import register as _register_publish
+    _register_publish(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
