@@ -3914,3 +3914,98 @@ Verify at end of Phase 8:
 **Type consistency:** `ConversionPlan`, `ArchitectureSummary`, `SourceDtype`, `ProgressEvent`, `PreflightCheck`, `VerifyCheck`, `PreflightStatus`, `PythonRunner`, `PostConvertVerifier` are all defined exactly once and used consistently across later tasks.
 
 **Gap closed:** Task 5.8 added to implement the diagnostics zip ("Copy Diagnostics" button) per spec §4.4.
+
+
+---
+
+## Post-v1 Adoption Work (2026-04-19)
+
+Extends the shipped v1.0 baseline with the adoption surface — turns "conversion tool" into "app that makes JANG usable by the world."
+
+### Phase D1 — Dynamic `jang-tools` CLIs (complete)
+
+| SHA | Command |
+|---|---|
+| `811d31a` | `jang-tools profiles --json` — 15 JANG + 3 JANGTQ profiles with metadata |
+| `8d0853c` | `jang-tools capabilities --json` — JANGTQ whitelist, dtypes, methods, block sizes |
+| `bdc8423` | `jang-tools estimate-model --json` — predicted output size for source + profile |
+| `21c31d9` | `jang-tools publish --json` — HF upload + auto-generated card + dry-run |
+
+### Phase D2 — Swift dynamic discovery (complete)
+
+| SHA | Change |
+|---|---|
+| `1f632a6` | `CapabilitiesService` with frozen fallback |
+| `3eaa40e` | `ProfilesService` with frozen fallback |
+| `dad9948` | Inject services via environment |
+| `26519a1` | Consume services; remove hardcoded lists from ProfileStep/ArchitectureStep/ConversionPlan/PreflightRunner/PostConvertVerifier |
+
+**Hardcodes removed:** JANG_PROFILES (15 strings), JANGTQ_PROFILES (3), JANGTQ_V1_WHITELIST, KNOWN_512_EXPERT_TYPES, sizeEstimate bit-per-weight map, block size menu, tokenizer class blocklist.
+
+### Phase A1 — Test Inference chat pane (complete)
+
+The #1 adoption feature — users chat with the converted model inside the app.
+
+| SHA | Change |
+|---|---|
+| `6af0769` | InferenceRunner actor + InferenceResult Codable |
+| `739477f` | ChatMessage model + TestInferenceViewModel |
+| `4a098fe` | TestInferenceSheet — full chat UI with temp/tokens settings, image/video drop, tok/s + RAM stats |
+| `8c8341b` | Wire Test Inference button into Step 5 |
+
+### Phase A2 — Examples + Model Card + Publish (complete)
+
+| SHA | Change |
+|---|---|
+| `6f883f7` | ExamplesService + ModelCardService + PublishService |
+| `5d8a7e2` | UsageExamplesSheet — 4-tab Python/Swift/Server/HF |
+| `fc9c6ed` | GenerateModelCardSheet — preview + save as README.md |
+| `81f34cb` | PublishToHuggingFaceSheet — dry-run preview + HF upload |
+| `4af1ef5` | Wire 4 buttons into Step 5 |
+
+### Phase A3 — Settings pane (Cmd+,) (complete)
+
+27 persisted preferences across 5 tabs.
+
+| SHA | Change |
+|---|---|
+| `1a1a3ee` | AppSettings @Observable + withObservationTracking persistence |
+| `75ba873` | SettingsWindow scaffold + General tab |
+| `ac6eaba` | Advanced tab (Python override, logs, throttling) |
+| `57dd03f` | Performance + Diagnostics tabs |
+| `5f84192` | Updates tab + wire Settings scene into app |
+
+### Phase A4 — Public adoption docs (complete)
+
+| SHA | File |
+|---|---|
+| `20e5d2d` | `docs/adoption/README.md` — entry point for framework authors |
+| `5a71ebe` | `docs/adoption/PORTING.md` — format spec + dequant math + integration checklist |
+| `5d9b15b` | `docs/adoption/EXAMPLES/python.py` — runnable minimal Python loader |
+| `b19f8ba` | Swift example + Osaurus server guide + web/WASM status |
+| `361054f` | `docs/adoption/MODEL_CARD_TEMPLATE.md` — standalone HF card template |
+
+### Ralph Loop test harness (complete)
+
+Autonomous test harness driven by `/ralph-loop` skill; state-tracked combos on macstudio.
+
+| SHA | Change |
+|---|---|
+| `fb01f0f`–`f65b41d` | Scaffold + runner + first smoke (Qwen3-0.6B → JANG_4K in 1.9s GREEN) |
+| `3e119b9` | PROMPT.md extended with A15-A18 inference audits |
+| `bff6abe`–`01381ba` | Jinja templates + examples + modelcard CLIs |
+| `9222fe2`–`6f300cd` | inference CLI + audit.py A1-A7+A15 + runner integration |
+| `34fb247` | First end-to-end audit smoke: A1/A2/A4/A7/A15 pass, A3/A5 warn on base model |
+
+### Grand totals (2026-04-19)
+
+- **260 tests green:** 185 pytest + 65 XCTest + 10 ralph
+- **~130 commits** on `jang-spec-plan5-bundle-python-validation`
+- **Shippable:** full 5-step wizard with adoption surface; signed+notarized DMG path verified; 27 user settings; dynamic profile/capability discovery; public adoption docs; autonomous test harness runs on macstudio
+
+### Remaining deferred
+
+- Tier 1 expansion (Llama-3.2-1B + SmolVLM-256M; Qwen3-0.6B already GREEN)
+- Audit rows A8-A14, A16-A18 (parser preservation, VL/video functional, perplexity, MMLU, chat template functional, modelcard generatable, examples generatable)
+- Swift JANGCore.framework bundled in `.app/Contents/Frameworks/` (Phase P2)
+- Osaurus subprocess integration for "Serve Locally" button
