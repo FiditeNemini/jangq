@@ -60,12 +60,23 @@ def _load_llm(model_dir: Path):
 
 
 def _load_vlm(model_dir: Path):
+    # For JANG v2 VLMs, load_jang_model dispatches to _load_jang_v2_vlm
+    # (mlx_vlm skeleton + instant mmap weights). This handles idefics3,
+    # qwen3_vl, etc. without needing a model-specific loader.
     try:
-        from jang_tools.load_jangtq_vlm import load_jangtq_vlm
-        return load_jangtq_vlm(str(model_dir))
+        from jang_tools.loader import load_jang_model
+        return load_jang_model(str(model_dir))
     except Exception:
-        from mlx_vlm import load
-        return load(str(model_dir))
+        pass
+    # JANGTQ-specific path (for JANGTQ-format VLMs)
+    try:
+        from jang_tools.load_jangtq_vlm import load_jangtq_vlm_model
+        return load_jangtq_vlm_model(str(model_dir))
+    except Exception:
+        pass
+    # Last resort: raw mlx_vlm.load
+    from mlx_vlm import load
+    return load(str(model_dir))
 
 
 def _is_vl(model_dir: Path) -> bool:
