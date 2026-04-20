@@ -60,7 +60,7 @@ final class CoverageMatrixTests: XCTestCase {
         for arch in Self.archClasses {
             for prof in profiles {
                 let p = try makePlan(arch, family: .jang, profile: prof)
-                let checks = PreflightRunner().run(plan: p)
+                let checks = PreflightRunner().run(plan: p, capabilities: .frozen)
                 let archCheck = checks.first { $0.id == .jangtqArchSupported }!
                 XCTAssertEqual(archCheck.status, .pass,
                     "JANG on \(arch.label) profile=\(prof) should not be rejected by jangtq-arch check")
@@ -73,7 +73,7 @@ final class CoverageMatrixTests: XCTestCase {
         for arch in nonWhitelisted {
             for prof in ["JANGTQ2", "JANGTQ3", "JANGTQ4"] {
                 let p = try makePlan(arch, family: .jangtq, profile: prof)
-                let checks = PreflightRunner().run(plan: p)
+                let checks = PreflightRunner().run(plan: p, capabilities: .frozen)
                 let archCheck = checks.first { $0.id == .jangtqArchSupported }!
                 XCTAssertEqual(archCheck.status, .fail,
                     "JANGTQ on \(arch.label) profile=\(prof) must be blocked by preflight")
@@ -88,7 +88,7 @@ final class CoverageMatrixTests: XCTestCase {
         for arch in whitelisted {
             for prof in ["JANGTQ2", "JANGTQ3", "JANGTQ4"] {
                 let p = try makePlan(arch, family: .jangtq, profile: prof)
-                let checks = PreflightRunner().run(plan: p)
+                let checks = PreflightRunner().run(plan: p, capabilities: .frozen)
                 XCTAssertEqual(checks.first { $0.id == .jangtqArchSupported }!.status, .pass,
                     "\(arch.label)/\(prof) arch check should pass")
                 XCTAssertEqual(checks.first { $0.id == .jangtqSourceDtype }!.status, .pass,

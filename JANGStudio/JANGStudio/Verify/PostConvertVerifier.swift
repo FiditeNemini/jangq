@@ -2,7 +2,7 @@
 import Foundation
 
 struct PostConvertVerifier {
-    @MainActor func run(plan: ConversionPlan, skipPythonValidate: Bool = false) async -> [VerifyCheck] {
+    @MainActor func run(plan: ConversionPlan, capabilities: Capabilities = .frozen, skipPythonValidate: Bool = false) async -> [VerifyCheck] {
         guard let out = plan.outputURL else {
             return [.init(id: .jangConfigExists, title: "jang_config.json exists",
                           status: .fail, required: true, hint: "No output dir")]
@@ -104,10 +104,10 @@ struct PostConvertVerifier {
 
         // #10 tokenizer class concrete
         let cls = (tokCfg["tokenizer_class"] as? String) ?? ""
-        let classOK = !cls.isEmpty && cls != "TokenizersBackend"
+        let classOK = !cls.isEmpty && !capabilities.tokenizerClassBlocklist.contains(cls)
         checks.append(.init(id: .tokenizerClassConcrete, title: "Tokenizer class concrete",
                             status: classOK ? .pass : .warn, required: false,
-                            hint: classOK ? nil : "tokenizer_class=\(cls) — Osaurus serving may fail"))
+                            hint: classOK ? nil : "tokenizer_class=\(cls) — in blocklist \(capabilities.tokenizerClassBlocklist)"))
 
         // #11 generation_config.json — HF consumers expect this. Warn only (HF will fall back to defaults).
         let hasGenCfg = FileManager.default.fileExists(atPath: out.appendingPathComponent("generation_config.json").path)

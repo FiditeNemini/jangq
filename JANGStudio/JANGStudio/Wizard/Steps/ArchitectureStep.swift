@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ArchitectureStep: View {
     @Bindable var coord: WizardCoordinator
+    @Environment(CapabilitiesService.self) private var capsSvc
     @State private var showOverrides = false
 
     var body: some View {
@@ -25,17 +26,18 @@ struct ArchitectureStep: View {
                     set: { coord.plan.overrides.forceDtype = ($0 == .unknown) ? nil : $0 }
                 )) {
                     Text("Auto").tag(SourceDtype.unknown)
-                    Text("BF16").tag(SourceDtype.bf16)
-                    Text("FP16").tag(SourceDtype.fp16)
+                    ForEach(capsSvc.capabilities.supportedSourceDtypes, id: \.name) { d in
+                        Text(d.alias.uppercased()).tag(dtypeFromAlias(d.alias))
+                    }
                 }
                 Picker("Block size", selection: Binding(
                     get: { coord.plan.overrides.forceBlockSize ?? 0 },
                     set: { coord.plan.overrides.forceBlockSize = ($0 == 0) ? nil : $0 }
                 )) {
                     Text("Auto").tag(0)
-                    Text("32").tag(32)
-                    Text("64").tag(64)
-                    Text("128").tag(128)
+                    ForEach(capsSvc.capabilities.blockSizes, id: \.self) { bs in
+                        Text("\(bs)").tag(bs)
+                    }
                 }
             }
             Button("Looks right → Profile") { coord.active = .profile }
@@ -44,5 +46,15 @@ struct ArchitectureStep: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func dtypeFromAlias(_ alias: String) -> SourceDtype {
+        switch alias {
+        case "bf16": return .bf16
+        case "fp16": return .fp16
+        case "fp8": return .fp8
+        case "fp8-e5m2": return .fp8
+        default: return .unknown
+        }
     }
 }

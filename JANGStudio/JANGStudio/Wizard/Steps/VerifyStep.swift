@@ -3,6 +3,7 @@ import SwiftUI
 
 struct VerifyStep: View {
     @Bindable var coord: WizardCoordinator
+    @Environment(CapabilitiesService.self) private var capsSvc
     @State private var checks: [VerifyCheck] = []
     @State private var busy = true
 
@@ -45,7 +46,7 @@ struct VerifyStep: View {
 
     private func refresh() async {
         busy = true
-        let c = await PostConvertVerifier().run(plan: coord.plan)
+        let c = await PostConvertVerifier().run(plan: coord.plan, capabilities: capsSvc.capabilities)
         await MainActor.run { checks = c; busy = false }
     }
 

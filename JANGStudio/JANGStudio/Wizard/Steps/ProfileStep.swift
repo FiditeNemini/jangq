@@ -1,33 +1,37 @@
 // JANGStudio/JANGStudio/Wizard/Steps/ProfileStep.swift
 import SwiftUI
 
-private let JANG_PROFILES = [
-    "JANG_1L", "JANG_2S", "JANG_2M", "JANG_2L",
-    "JANG_3K", "JANG_3S", "JANG_3M", "JANG_3L",
-    "JANG_4K", "JANG_4S", "JANG_4M", "JANG_4L",
-    "JANG_5K", "JANG_6K", "JANG_6M",
-]
-private let JANGTQ_PROFILES = ["JANGTQ2", "JANGTQ3", "JANGTQ4"]
-
 struct ProfileStep: View {
     @Bindable var coord: WizardCoordinator
+    @Environment(ProfilesService.self) private var profilesSvc
+    @Environment(CapabilitiesService.self) private var capsSvc
     @State private var preflight: [PreflightCheck] = []
+
+    private var jangProfileNames: [String] {
+        profilesSvc.profiles.jang.map { $0.name }
+    }
+    private var jangtqProfileNames: [String] {
+        profilesSvc.profiles.jangtq.map { $0.name }
+    }
+    private var isJANGTQAllowed: Bool {
+        coord.plan.isJANGTQAllowed(for: capsSvc.capabilities.jangtqWhitelist)
+    }
 
     var body: some View {
         Form {
             Section("Family") {
                 Picker("", selection: $coord.plan.family) {
                     Text("JANG").tag(Family.jang)
-                    Text("JANGTQ").tag(Family.jangtq).disabled(!coord.plan.isJANGTQAllowed)
+                    Text("JANGTQ").tag(Family.jangtq).disabled(!isJANGTQAllowed)
                 }.pickerStyle(.segmented)
-                if !coord.plan.isJANGTQAllowed {
-                    Label("JANGTQ supports Qwen 3.6 and MiniMax only (v1). GLM coming in v1.1.",
+                if !isJANGTQAllowed {
+                    Label("JANGTQ supports \(capsSvc.capabilities.jangtqWhitelist.joined(separator: ", ")) only.",
                           systemImage: "info.circle").font(.caption)
                 }
             }
             Section("Profile") {
                 Picker("", selection: $coord.plan.profile) {
-                    ForEach(coord.plan.family == .jang ? JANG_PROFILES : JANGTQ_PROFILES, id: \.self) { p in
+                    ForEach(coord.plan.family == .jang ? jangProfileNames : jangtqProfileNames, id: \.self) { p in
                         Text(p).tag(p)
                     }
                 }.pickerStyle(.menu)
@@ -78,7 +82,7 @@ struct ProfileStep: View {
         }
     }
 
-    private func refresh() { preflight = PreflightRunner().run(plan: coord.plan) }
+    private func refresh() { preflight = PreflightRunner().run(plan: coord.plan, capabilities: capsSvc.capabilities) }
     private func allMandatoryPass() -> Bool { !preflight.contains { $0.status == .fail } }
 
     private func pickOutput() {

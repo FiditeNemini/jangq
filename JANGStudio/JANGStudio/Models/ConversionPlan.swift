@@ -40,9 +40,6 @@ struct ArchitectureOverrides: Codable, Equatable {
     var calibrationJSONL: URL? = nil
 }
 
-/// v1 JANGTQ whitelist — KEEP IN SYNC with jang-tools/jang_tools/inspect_source.py.
-let JANGTQ_V1_WHITELIST: Set<String> = ["qwen3_5_moe", "minimax_m2"]
-
 @Observable
 final class ConversionPlan: Codable {
     var sourceURL: URL?
@@ -62,9 +59,15 @@ final class ConversionPlan: Codable {
     var isStep3Complete: Bool { isStep2Complete && outputURL != nil }
     var isStep4Complete: Bool { run == .succeeded }
 
+    func isJANGTQAllowed(for whitelist: [String]) -> Bool {
+        guard let mt = detected?.modelType else { return false }
+        return whitelist.contains(mt)
+    }
+
+    @available(*, deprecated, message: "Use isJANGTQAllowed(for:) with CapabilitiesService.capabilities.jangtqWhitelist")
     var isJANGTQAllowed: Bool {
         guard let mt = detected?.modelType else { return false }
-        return JANGTQ_V1_WHITELIST.contains(mt)
+        return ["qwen3_5_moe", "minimax_m2"].contains(mt)
     }
 
     // MARK: - UserDefaults persistence

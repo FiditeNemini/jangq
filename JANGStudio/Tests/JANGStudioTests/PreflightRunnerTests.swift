@@ -16,7 +16,7 @@ final class PreflightRunnerTests: XCTestCase {
         let plan = ConversionPlan()
         plan.sourceURL = URL(fileURLWithPath: "/tmp/definitely_missing_xyz")
         plan.outputURL = tmp
-        let checks = PreflightRunner().run(plan: plan)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
         XCTAssertTrue(checks.contains { $0.id == .sourceReadable && $0.status == .fail })
     }
 
@@ -30,7 +30,7 @@ final class PreflightRunnerTests: XCTestCase {
                               isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
         plan.family = .jangtq
         plan.profile = "JANGTQ2"
-        let checks = PreflightRunner().run(plan: plan)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
         XCTAssertTrue(checks.contains { $0.id == .jangtqArchSupported && $0.status == .fail })
     }
 
@@ -42,7 +42,7 @@ final class PreflightRunnerTests: XCTestCase {
         plan.outputURL = src   // same!
         plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
                               isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
-        let checks = PreflightRunner().run(plan: plan)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
         XCTAssertTrue(checks.contains { $0.id == .outputUsable && $0.status == .fail })
     }
 
@@ -56,7 +56,7 @@ final class PreflightRunnerTests: XCTestCase {
                               isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
         plan.profile = "JANG_2S"
         plan.hadamard = true
-        let checks = PreflightRunner().run(plan: plan)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
         XCTAssertTrue(checks.contains { $0.id == .hadamardVsLowBits && $0.status == .warn })
     }
 }
