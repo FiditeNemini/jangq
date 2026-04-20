@@ -31,7 +31,12 @@ final class AppSettings {
     var defaultFamily: String = "jang"
     var defaultMethod: String = "mse"
     var defaultHadamardEnabled: Bool = false
-    var defaultCalibrationSamples: Int = 256
+    // M200 (iter 137): `defaultCalibrationSamples` removed. The field
+    // was a Settings-UI lie — a Stepper (64...1024) that persisted to
+    // UserDefaults but had no downstream consumer. `jang convert`'s
+    // argparse does not accept `--samples`; `CLIArgsBuilder.args(for:)`
+    // never emitted one. See SettingsWindow.swift rationale for the
+    // re-introduction protocol if a future quant method needs it.
     var outputNamingTemplate: String = "{basename}-{profile}"
     var autoDeletePartialOnCancel: Bool = false
     var revealInFinderOnFinish: Bool = true
@@ -82,7 +87,6 @@ final class AppSettings {
         defaultFamily = "jang"
         defaultMethod = "mse"
         defaultHadamardEnabled = false
-        defaultCalibrationSamples = 256
         outputNamingTemplate = "{basename}-{profile}"
         autoDeletePartialOnCancel = false
         revealInFinderOnFinish = true
@@ -218,7 +222,13 @@ private struct Snapshot: Codable {
     var defaultFamily: String
     var defaultMethod: String
     var defaultHadamardEnabled: Bool
-    var defaultCalibrationSamples: Int
+    // M200 (iter 137): defaultCalibrationSamples removed — was a
+    // settings-UI lie (Stepper with no downstream consumer). Pre-M200
+    // UserDefaults blobs still contain the `defaultCalibrationSamples`
+    // key; JSONDecoder silently ignores unknown keys (extra-field
+    // tolerance is the default), so existing persisted snapshots decode
+    // cleanly on upgrade. No migration shim needed. See AppSettings
+    // live-copy + SettingsWindow for reintroduction protocol.
     var outputNamingTemplate: String
     var autoDeletePartialOnCancel: Bool
     var revealInFinderOnFinish: Bool
@@ -248,7 +258,6 @@ private struct Snapshot: Codable {
         defaultFamily = s.defaultFamily
         defaultMethod = s.defaultMethod
         defaultHadamardEnabled = s.defaultHadamardEnabled
-        defaultCalibrationSamples = s.defaultCalibrationSamples
         outputNamingTemplate = s.outputNamingTemplate
         autoDeletePartialOnCancel = s.autoDeletePartialOnCancel
         revealInFinderOnFinish = s.revealInFinderOnFinish
@@ -279,7 +288,6 @@ private struct Snapshot: Codable {
         s.defaultFamily = defaultFamily
         s.defaultMethod = defaultMethod
         s.defaultHadamardEnabled = defaultHadamardEnabled
-        s.defaultCalibrationSamples = defaultCalibrationSamples
         s.outputNamingTemplate = outputNamingTemplate
         s.autoDeletePartialOnCancel = autoDeletePartialOnCancel
         s.revealInFinderOnFinish = revealInFinderOnFinish

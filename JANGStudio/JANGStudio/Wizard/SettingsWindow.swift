@@ -74,11 +74,22 @@ private struct GeneralTab: View {
                 Toggle("Enable Hadamard rotation by default", isOn: $settings.defaultHadamardEnabled)
             }
 
-            Section("Calibration") {
-                Stepper(value: $settings.defaultCalibrationSamples, in: 64...1024, step: 64) {
-                    LabeledContent("Sample count", value: "\(settings.defaultCalibrationSamples)")
-                }
-            }
+            // M200 (iter 137): "Calibration / Sample count" Stepper was
+            // removed. The Swift setting existed for 100+ iters with a
+            // UI Stepper that user could interact with — but the jang
+            // convert CLI does NOT accept `--samples`/`-n` (the flag is
+            // on the separate `profile` subcommand for TurboSmelt routing
+            // profile collection, not convert). CLIArgsBuilder.args(for:)
+            // never emitted a calibration-sample-count argument. Changing
+            // the Stepper from 64 to 1024 had zero measurable effect.
+            // That's a "don't lie to the user" violation
+            // (feedback_dont_lie_to_user.md). If a future quant method
+            // (AWQ, GPTQ with calibration data) is added, reintroduce
+            // this Section AFTER: (1) adding `--samples` to p_convert's
+            // argparse in jang-tools __main__.py, (2) threading it into
+            // calibrate.py, (3) plumbing plan.calibrationSamples through
+            // CLIArgsBuilder.args(for:). Prove end-to-end first; only
+            // then add the Settings UI.
 
             Section("Output naming") {
                 TextField("Template", text: $settings.outputNamingTemplate)
@@ -485,7 +496,8 @@ private func observeAndPersist(_ settings: AppSettings) async {
                 _ = settings.defaultFamily
                 _ = settings.defaultMethod
                 _ = settings.defaultHadamardEnabled
-                _ = settings.defaultCalibrationSamples
+                // M200 (iter 137): defaultCalibrationSamples removed —
+                // field had no downstream consumer, was a Settings lie.
                 _ = settings.outputNamingTemplate
                 _ = settings.autoDeletePartialOnCancel
                 _ = settings.revealInFinderOnFinish

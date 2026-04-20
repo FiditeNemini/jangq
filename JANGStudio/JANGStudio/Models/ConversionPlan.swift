@@ -37,7 +37,15 @@ struct ArchitectureOverrides: Codable, Equatable {
     var forceDtype: SourceDtype? = nil
     var forceBlockSize: Int? = nil
     var skipPatterns: [String] = []
-    var calibrationJSONL: URL? = nil
+    // M200 (iter 137): `calibrationJSONL` removed — zero downstream
+    // consumers across the entire JANGStudio codebase, would have
+    // been a settings-UI lie if any wizard step had offered a picker.
+    // No UI currently exposes it, so removing the declaration doesn't
+    // affect any user-visible surface; this is pure dead-field cleanup
+    // bundled with the defaultCalibrationSamples removal.
+    // Codable forward-compat: pre-M200 persisted ArchitectureOverrides
+    // JSON blobs (e.g., via plan export) that contain the key will
+    // decode cleanly because JSONDecoder tolerates unknown keys.
 }
 
 @Observable

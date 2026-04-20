@@ -28,7 +28,7 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(s.defaultProfile, "JANG_4K")
         XCTAssertEqual(s.defaultFamily, "jang")
         XCTAssertEqual(s.defaultMethod, "mse")
-        XCTAssertEqual(s.defaultCalibrationSamples, 256)
+        // M200 (iter 137): defaultCalibrationSamples removed as a lie.
         XCTAssertEqual(s.outputNamingTemplate, "{basename}-{profile}")
         XCTAssertEqual(s.logVerbosity, .normal)
         XCTAssertEqual(s.tickThrottleMs, 100)
@@ -272,6 +272,11 @@ final class AppSettingsTests: XCTestCase {
         // New field defaults to empty since the old snapshot didn't carry it.
         XCTAssertEqual(s.defaultHFOrg, "",
                        "pre-iter-25 UserDefaults snapshot must not fail to decode; defaultHFOrg should default to empty")
+        // M200 (iter 137): the blob contains `defaultCalibrationSamples: 256`
+        // which was REMOVED in M200. JSONDecoder tolerates unknown keys by
+        // default, so the snapshot still decodes cleanly and the other
+        // fields round-trip. This test now also serves as a regression
+        // guard for M200's "no migration shim required" claim.
     }
 
     func test_load_resyncs_env_passthrough_keys_on_fresh_process() {

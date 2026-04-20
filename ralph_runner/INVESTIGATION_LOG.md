@@ -6037,3 +6037,73 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **NEW (cross-cutting):** audit jang-tools CLI for leak-vectors. The CLI runs outside the server's redaction umbrella; a user piping CLI output to a logfile could capture unscrubbed tokens. Apply the 5-dim credential hygiene matrix (SOURCE/URL/LOG/RESPONSE/DATA-AT-REST) to jang-tools.
 
 **Next iteration should pick:** JANGStudio main-app invariant-coverage audit (continues iter-135 meta-audit), OR `try? await` anti-regression invariant for main-app (extends iter-122 memory to enforcement), OR jang-tools CLI leak-vector audit (extends credential hygiene matrix to the CLI layer).
+
+---
+
+## 2026-04-20 iteration 137 — M200 Angle I (Setting-actually-affects-behavior): defaultCalibrationSamples was a 100% lie
+
+**Angle rotation:** switched from angle C (concern-deep-dive, 10 consecutive iters 127-136) to **angle I (Setting-actually-affects-behavior)** per the new iter-137 rule "never repeat an angle two iterations in a row". Angle C found 20+ real security/quality bugs but couldn't see this class of defect.
+
+**3 new questions asked:**
+- Q1: Does flipping `AppSettings.defaultCalibrationSamples` (Settings → Advanced → Calibration Stepper 64...1024) actually reach the convert subprocess's argv?
+- Q2: If the convert CLI doesn't accept this flag, is the setting saved-and-forgotten (a lie per `feedback_dont_lie_to_user.md`)?
+- Q3: Does the underlying convert.py use a hardcoded calibration count, making the setting architecturally impossible to respect even if we tried?
+
+**Deep trace walkthrough:**
+1. **Found the setting.** `AppSettings.swift:34` declares `var defaultCalibrationSamples: Int = 256`. Stepper UI at `SettingsWindow.swift:78` binds to `$settings.defaultCalibrationSamples`. User can change 64 → 1024 in 64-step increments. UserDefaults persists the value through `AppSettings.persist()` → `Snapshot` encoder.
+2. **Searched for downstream consumers** via `grep defaultCalibrationSamples` across JANGStudio. Results: only AppSettings.swift itself (declaration + reset + Snapshot), SettingsWindow.swift (Stepper binding + observation-tracking `_ = settings.defaultCalibrationSamples` at line 488), AppSettingsTests.swift (persistence assertions). **Zero consumers in Runner/, Wizard/*Step*.swift, or any convert-pipeline code.**
+3. **Verified the Python CLI surface.** Ran `python3 -m jang_tools convert --help`. Captured output:
+   ```
+   usage: jang convert [-h] [-o OUTPUT] [-p PROFILE] [-m {mse,rtn,mse-all}] [--hadamard] model
+   ```
+   Accepted flags: `-h`, `-o/--output`, `-p/--profile`, `-m/--method`, `--hadamard`. **No `--samples` / `-n`.** The `--samples` flag exists on the SEPARATE `profile` subcommand (TurboSmelt routing profile collection, `__main__.py:249`) — confused no doubt by grep matches in the upstream analysis.
+4. **Verified CLIArgsBuilder argv doesn't emit a samples flag.** Read `JANGStudio/JANGStudio/Runner/CLIArgsBuilder.swift`: the JANG-family branch emits `["-m", "jang_tools", "convert", src, "-o", out, "-p", plan.profile, "-m", plan.method.rawValue, "--progress=json", "--quiet-text"]` + optional `--hadamard`. Zero reference to calibration or samples. JANGTQ family branch is similarly minimal.
+5. **Verified internal convert.py doesn't read calibration samples.** Grep'd convert.py for `n_samples` → zero hits. Convert uses MSE on weights — no data-dependent calibration, no user-tunable sample count.
+6. **Bonus trace: `ArchitectureOverrides.calibrationJSONL`** in `ConversionPlan.swift:40`. Zero references across JANGStudio. Dead field. Bundled for cleanup.
+7. **Verdict: 100% lie.** Flipping the Stepper does nothing. User has every reason to believe the setting affects output quality (bigger number = more calibration data = higher quality, in the mental model of every quantization tool ever). Actual effect: identical output regardless of value.
+
+**Fix: REMOVE, don't plumb.** Rationale documented in audit entry. Core question: does the current quant method need calibration samples? MSE on weights doesn't. Adding `--samples` + argparse + threading = ~50 lines of Python + test infra for a feature users don't need today. Remove is the cheaper, more honest diff; document the reintroduction protocol in the regression test for the future.
+
+**Removals (7 sites):** `defaultCalibrationSamples` from AppSettings.swift (5 sites), Stepper + observation from SettingsWindow.swift (2 sites), test assertion from AppSettingsTests.swift, `calibrationJSONL` from ConversionPlan.swift.
+
+**Invariants (+5) in new `ralph_runner/tests/test_settings_lies_removed.py`:**
+- Pin live-code absence in AppSettings + SettingsWindow + ConversionPlan (comment-stripped — iter-135 M198 technique).
+- Pin CLIArgsBuilder doesn't emit `--samples` (defense against partial reintroduction that would crash convert subprocess).
+- Pin p_convert argparse doesn't accept `--samples`/`-n`. Meta-pin: if THIS fires, the reintroducer must update both sides AND this invariant. Enforces paired-move constraint.
+
+**Evidence:** 33/33 AppSettingsTests pass. 5/5 M200 invariants pass. 69/69 jang-server tests. 17/17 collectible ralph_runner invariants. `xcodebuild build-for-testing` exits 0.
+
+**Spawned NEW [ ] item: M201 — broader Settings-lie audit.** 8 other fields flagged during iter-137 trace as potential lies (outputNamingTemplate, autoDeletePartialOnCancel, revealInFinderOnFinish, preAllocateRam[Gb], metalPipelineCacheEnabled, convertConcurrency, maxBundleSizeWarningMb, autoOpenIssueTrackerOnCrash). Budget 1 iter per 2-3 fields; follow M200's remove-or-plumb-or-document protocol.
+
+**Meta-lesson — angle rotation surfaces bugs no single angle sees.** 10 iters of angle C found 20+ security bugs but couldn't see this lie. Angle I took ~30 minutes to find. **Rule: mandatory angle rotation (F-J + A-E) isn't bureaucracy — it's lens rotation. Each angle illuminates a different surface. The pain of forcing a rotation when you're "in flow" on one angle is worth the new bugs the rotation surfaces.** iter-137 validates the new angle framework and closes out the default meta-insight "I've audited all the code, the app is good" — it's not; it's just good along ONE axis.
+
+**Meta-lesson — "persisted in UserDefaults" ≠ "honored by runtime".** The persistence layer and the behavior layer are independent. AppSettingsTests was 100% green on persistence assertions, yet the field was 100% disconnected from behavior. Testing persistence proves the middle of the pipeline, not the whole pipeline. **Rule: for every Settings field, the honest invariant is "flipping it changes observable behavior" — proof-of-effect, not proof-of-storage. The test must reach the TERMINAL consumer.** Parallels iter-135 M198's "pin CAPTURE and RENDER" — same shape at a different scale. Any intermediate-state test gives false confidence.
+
+**Meta-lesson — remove > plumb when the current codebase doesn't need the feature.** The temptation is always "wire it up" because it feels like progress. But wiring up a feature users don't need today adds complexity, surface area, and maintenance tomorrow. Remove-with-reintroduction-protocol is a smaller, safer move. **Rule: when a disconnected Settings field is found, default to REMOVE. Plumb only if the current quant/convert method actually needs user control. A Settings panel with fewer honest knobs is better UX than one with many lying knobs.**
+
+**Meta-lesson — document reintroduction protocols in the removal invariant.** Without the `test_settings_lies_removed.py` module-docstring's 6-step reintroduction protocol, the next "calibration samples would be nice to tune" contributor would just re-ship the lie. With it, the path is explicit: plumb Python FIRST, prove end-to-end, THEN add Swift UI. **Rule: for every "removed because dead" item, document the reintroduction protocol in the regression test. Otherwise the removal gets mistaken for a prohibition and the cycle repeats.**
+
+**Meta-lesson — backwards-compat decoding is a free upgrade shim.** JSONDecoder silently ignores unknown keys by default. Pre-M200 UserDefaults blobs with `"defaultCalibrationSamples": 256` still decode cleanly post-M200 because the Snapshot struct no longer has that field. No migration code needed. Upgraded AppSettingsTests `test_pre_iter_25_snapshot_decodes_cleanly` (line 235+) with an M200 comment — it now ALSO serves as a backwards-compat regression for the removal. **Rule: when removing a field that was persisted, verify the decoder tolerates the now-unknown key. Swift JSONDecoder does by default; Rust serde needs `#[serde(deny_unknown_fields)]` to be OFF; Python Pydantic v2's default is also tolerant (extra='ignore'). Check your language's default before assuming migration shim is required.**
+
+**Items touched:**
+- M200 [x] — removed `defaultCalibrationSamples` + `calibrationJSONL` lies; 5 invariants; reintroduction protocol documented.
+- M201 [ ] — NEW, spawned: broader Settings-lie audit (8 candidate fields).
+
+**Commit:** (this iteration)
+
+**Verification:** 33 AppSettingsTests + 5 M200 + 17 ralph_runner invariants + 69 jang-server = 124 tests green. Swift build clean.
+
+**Closed-status tally:** 153 (iter 136) + M200 = 154 items touched, 154 closed. Zero known bugs as of iter-137 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (angle-rotation-mandated — iter 138 must pick a DIFFERENT angle):** angles F (cold-start stranger), G (adversarial user), H (output correctness), J (runtime parity) all unpicked so far. Angle I was iter 137.
+- **NEW:** M201 broader Settings-lie audit (8 candidate fields).
+- **NEW (follow-on from iter-137 trace):** `ConversionPlan.calibrationJSONL` was removed; audit ConversionPlan for other unused fields (grep for declared-but-never-read).
+- **NEW:** angle F cold-start stranger audit — first-launch JANGStudio UX. What's the first click? Any dead-ends or unlabeled controls in the first 30 seconds?
+
+**Next iteration should pick (DIFFERENT from angle I):** angle F (cold-start stranger — what does the app look like second 3, 30, 300 after first launch?), OR angle G (adversarial user — click cancel mid-convert, rename output dir, pick an emoji path), OR angle H (output correctness — pick one exported artifact and byte-verify it against source).
