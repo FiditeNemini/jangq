@@ -256,7 +256,8 @@ def test_modelcard_emits_both_reasoning_and_thinking_tags(qwen3_5_thinking_model
     thinking = runtime toggle).
     """
     from jang_tools.modelcard import generate_card
-    card = generate_card(qwen3_5_thinking_model_dir)
+    # M202 (iter 138): generate_card returns (card, license_unknown).
+    card, _ = generate_card(qwen3_5_thinking_model_dir)
     # Both tags must appear in the YAML tags list.
     assert "- reasoning" in card, "missing `reasoning` tag"
     assert "- thinking" in card, "missing `thinking` tag (M90 regression)"
@@ -266,7 +267,8 @@ def test_modelcard_omits_thinking_tag_when_not_applicable(dense_model_dir):
     """Negative: a plain model without enable_thinking must NOT get the
     thinking tag. Prevents spurious tags on models that don't support it."""
     from jang_tools.modelcard import generate_card
-    card = generate_card(dense_model_dir)
+    # M202 (iter 138): generate_card returns (card, license_unknown).
+    card, _ = generate_card(dense_model_dir)
     assert "- thinking" not in card, "thinking tag wrongly added to non-thinking model"
 
 

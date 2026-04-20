@@ -115,7 +115,19 @@ def cmd_publish(args) -> None:
     readme = model_dir / "README.md"
     if not readme.exists() or args.regenerate_card:
         try:
-            card = generate_card(model_dir)
+            # M202 (iter 138): generate_card returns (card, license_unknown).
+            # Surface the license-unknown warning to stderr so the user sees
+            # it BEFORE the upload proceeds — publishing a fabricated license
+            # to HF is legally concerning (Qwen/Llama derivatives != apache-2.0).
+            card, license_unknown = generate_card(model_dir)
+            if license_unknown:
+                print(
+                    "WARNING: source config.json had no `license` key; the "
+                    "auto-generated README uses `license: other`. Edit "
+                    "README.md's YAML frontmatter BEFORE publishing to match "
+                    "the source model's actual license.",
+                    file=sys.stderr,
+                )
             readme.write_text(card)
         except Exception as e:
             print(f"ERROR: failed to generate model card: {e}", file=sys.stderr)

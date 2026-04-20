@@ -6107,3 +6107,61 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **NEW:** angle F cold-start stranger audit — first-launch JANGStudio UX. What's the first click? Any dead-ends or unlabeled controls in the first 30 seconds?
 
 **Next iteration should pick (DIFFERENT from angle I):** angle F (cold-start stranger — what does the app look like second 3, 30, 300 after first launch?), OR angle G (adversarial user — click cancel mid-convert, rename output dir, pick an emoji path), OR angle H (output correctness — pick one exported artifact and byte-verify it against source).
+
+---
+
+## 2026-04-20 iteration 138 — angle H — M202 HF model card license fabrication
+
+**Angle rotation:** switched from angle I → angle H per mandate. Target: pick ONE exported artifact, byte-verify against source intent. Chose the HF model card — it's the first artifact a stranger sees on a public HF listing, so any lie there becomes reputational + legal damage.
+
+**3 new questions asked:**
+- Q1: What does "Generate Model Card" actually write? Does the template hardcode numbers, fill from runtime measurements, or pull from preflight estimates?
+- Q2: Are any fields in the card demonstrably false?
+- Q3: If Python-side and Swift-side (GenerateModelCardSheet) render the same bundle, do they match byte-for-byte?
+
+**Deep trace walkthrough:**
+1. **Opened the template:** `jang-tools/jang_tools/templates/model-card.md.jinja:2` — `license: {{ license | default("apache-2.0") }}`. Silent default.
+2. **Traced `license` source:** `detect_capabilities(model_dir)` in `examples.py:105` reads `"license": cfg.get("license")` — returns None if config.json has no `license` key.
+3. **Live-checked upstream HF reality:** `curl https://huggingface.co/Qwen/Qwen3-8B/raw/main/config.json`, parsed JSON — NO `license` key. HF convention is license-in-README-YAML, not config.json. Same behavior across Qwen/Llama/Mistral/DeepSeek/etc.
+4. **Blast radius:** every JANG card generated from a vanilla upstream HF source silently claimed `license: apache-2.0`. Legal fabrication for Llama-3 Community / Qwen License / NDA-restricted sources.
+5. **Fix applied across 3 files + 1 template:**
+   - `modelcard.py`: `generate_card` returns `(card, license_unknown)`. Missing license coerces to `"other"` (HF standard). CLI emits a separate stderr warning + `--json` carries `license_unknown` flag.
+   - Template: dropped Jinja default. Added visible `> ⚠️ License not detected` banner when unknown.
+   - `publish.py`: unpacks tuple + emits a WARNING on stderr before writing README when license is unknown. Intercepts the upload path too.
+   - All 4 call-sites of `generate_card` updated to unpack the tuple.
+6. **Live verification:** built `/tmp/m202_demo` fixture with config.json missing `license`, ran the CLI, captured output. Confirmed:
+   - YAML frontmatter: `license: other` (NOT apache-2.0).
+   - Body: warning banner present.
+   - stderr: both warnings emit.
+   - stdout: clean (no leakage).
+7. **Self-inflicted regression found + fixed:** my M202 Jinja comment used `{#- -#}` whitespace-strip markers between `---` and `license:`, which collapsed them to `---license:` in the rendered output — YAML-breaking. Only visible via live render. Fixed by dropping the decorative comment entirely.
+8. **Test updates:** 5 new M202 tests + 4 existing test fixes + 1 cascade fix in publish.py (the tuple return broke existing callers — grep-for-callers discipline would have caught this).
+
+**Meta-lesson — silent defaults in publisher-facing templates are fabrications.** `default()` reads as "use this as a neutral fallback" but picking apache-2.0 is a concrete legal claim. **Rule: for user-facing output that WILL BE PUBLISHED, never use silent defaults on fields with concrete meaning. Require the value, use a visible placeholder (`"unknown"`, `"other"`), or make the substitution explicit in the doc. "Most common" ≠ "honest".**
+
+**Meta-lesson — byte-level live verification catches bugs that "looks right" testing misses.** All pre-M202 tests passed because every test fixture set `license` explicitly. Nobody's test exercised the None path → the default was never triggered by any unit test. Only `curl` → real-config → live-render found the gap. **Rule: for output-correctness audits, always exercise the NEGATIVE PATH (the fallback, the default, the else-branch). "Representative" fixtures are usually convenient, which means they set all the fields someone remembered.**
+
+**Meta-lesson — Python return-shape changes need grep-for-callers discipline.** Widening `generate_card` from `str` to `tuple[str, bool]` broke `publish.py:118` and `test_examples.py:259,269` silently because Python doesn't enforce type hints. **Rule: when changing a return shape, grep for all callers FIRST and update them in the same commit.** mypy would have caught this at check-time; without it, grep is the fallback discipline. Parallels iter-133 M196's tuple-widening lesson but with an explicit consumer-update rule.
+
+**Meta-lesson — Jinja whitespace-strip (`{#- -#}`) is lethal in YAML/JSON frontmatter.** My decorative comment collapsed `---` and `license:` onto the same line, breaking YAML. Caught only by live render, not by any test. **Rule: never use `{#- -#}` whitespace-stripping inside data-sensitive blocks (YAML/JSON/TOML). Use plain `{# #}` if you must comment, and visually verify rendered output. Better: skip decorative comments in data blocks entirely — the template is already terse; no comment is better than a lethal comment.**
+
+**Meta-lesson — angle rotation continues to surface new bug classes.** Angle I (iter 137) found a settings lie. Angle H (iter 138) found a template fabrication. Neither would have surfaced from angle C (security) or D (memory cross-ref). **Rule: the F-J angles are each a distinct lens. Each catches bugs invisible to the others. Hitting the "each angle twice" completion bar from the iter-137 prompt requires actually running each angle — can't substitute by over-running one.**
+
+**Items touched:**
+- M202 [x] — HF card license fabrication. 5 new regression tests; 4 existing tests updated for new tuple shape; 1 publish.py cascade fix. Honest "other" placeholder + visible banner + dual stderr warning + `--json` signal field.
+- M203 [ ] — NEW, spawned: further HF card output-correctness audit (PyPI `jang[mlx]` claim, GitHub FORMAT.md link, jangq.ai domain, base_model URL rendering, user-path leakage in Python snippet).
+
+**Commit:** (this iteration)
+
+**Verification:** 360/360 jang-tools tests pass (was 355, +5 new + 4 updated). 69/69 jang-server. 17/17 ralph_runner invariants. Live-rendered card against real fixture confirms YAML correctness + warning banner + dual stderr notes.
+
+**Closed-status tally:** 154 (iter 137) + M202 = 155 items touched. 2 open (M201, M203). Zero known bugs as of iter-138 end.
+
+**Forecast pipeline:**
+- M97, M117, M124, M128, M80 (long-deferred pre-iter-111 items)
+- M201 broader Settings-lie audit (8 candidate fields)
+- M203 further HF card output-correctness sweep (5 candidate claims)
+- **NEW (angle-mandate follow-on):** angles F (cold-start) and G (adversarial) and J (runtime parity) are ALL unpicked so far. iter-137 was I, iter-138 was H. Must pick F/G/J for iter-139.
+- **NEW:** verify the generated Python snippet is executable: copy to a scratch dir, `python3 snippet.py`, assert no ImportError / NameError.
+
+**Next iteration should pick (DIFFERENT from angle H):** angle F (cold-start stranger — what is the first-launch UX like?), OR angle G (adversarial — cancel mid-convert, emoji path, disk full, rename mid-op), OR angle J (Swift/Python runtime parity — tokenization, sampler, stop-token on same bundle).

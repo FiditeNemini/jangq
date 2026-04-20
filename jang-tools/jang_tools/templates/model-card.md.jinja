@@ -1,5 +1,5 @@
 ---
-license: {{ license | default("apache-2.0") }}
+license: {{ license }}
 base_model: {{ base_model }}
 tags:
   - jang
@@ -31,6 +31,10 @@ quantization_config:
 
 # {{ model_name }} — JANG {{ profile }}
 
+{% if license_unknown -%}
+> ⚠️ **License not detected from source `config.json`.** The YAML frontmatter uses `license: other` as a placeholder (HuggingFace standard for custom/unknown licenses). Before publishing to HF, edit the frontmatter to match the source model's actual license (e.g. `apache-2.0`, `mit`, `llama3`, `qwen`) and add `license_name` / `license_link` fields if using `other`. Upstream HF convention places the license in the README YAML rather than `config.json`, so auto-detect from a freshly-downloaded source dir commonly misses it.
+
+{% endif -%}
 Quantized from [`{{ base_model }}`](https://huggingface.co/{{ base_model }}) via [JANG Studio](https://jangq.ai).
 
 ## Quick start (Python)
