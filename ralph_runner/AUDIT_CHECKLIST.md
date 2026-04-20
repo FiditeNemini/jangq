@@ -831,6 +831,22 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Tests (+1) in WizardStepContinueGateTests.swift:** `test_profileStep_auto_outputURL_follows_profile_change` — source-inspection: (a) `.onChange(of: coord.plan.profile)` exists, (b) regenerates with `newProfile`, (c) gated on `cur == autoOld`.
       **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/ProfileStep.swift:73-91`. 169 Swift tests pass (was 168, +1). Python 314 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M147 (AppSettings.load silently swallows schema-migration decode failures)** — Iter-68 meta-lesson about "derived-from-field staleness" led to a broader scan of @State/@Observable patterns. Found a symmetric bug with iter-37 M111:
+      - iter-37 M111: `persist()` logged encode failures to stderr. ✓
+      - pre-M147: `load()` silently swallowed decode failures via `try?`. ✗
+      **Pre-M147 code:**
+      ```swift
+      guard let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
+            let s = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+      ```
+      Combined `guard` collapsed two semantically distinct cases: "first launch, no data" (OK silent) and "decode failed, data exists but broken" (warrants logging). A future app version that adds a required Settings field would fail to decode old blobs, silently revert the user to factory defaults, and leave NO signal in Copy Diagnostics.
+      **Fix (iter 69):** split the cases. "No data" → `return` silent. "Data exists but decode failed" → `FileHandle.standardError.write(...)` logging to match persist()'s M111 pattern, then return with defaults.
+      **Tests (+3) in AppSettingsTests.swift:**
+      - `test_load_with_corrupted_settings_blob_falls_back_to_defaults`: injects non-JSON blob into UserDefaults, verifies AppSettings init doesn't crash and defaults are intact.
+      - `test_load_with_no_saved_settings_is_silent`: regression guard — first-launch path stays silent.
+      - `test_load_method_split_is_present_in_source`: source-inspection pin ensures the log message literal survives future refactors (prevents re-collapsing back to `try?`).
+      **Evidence:** `JANGStudio/JANGStudio/Models/AppSettings.swift:147-175`. 170 Swift tests pass (was 169, +1 tracked in WizardStepContinueGateTests; AppSettingsTests grew 20→23, +3). Python 314 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

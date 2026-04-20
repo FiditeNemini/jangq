@@ -145,8 +145,26 @@ final class AppSettings {
     }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
-              let s = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+        // M147 (iter 69): distinguish "nothing saved yet" (first launch —
+        // OK silent) from "saved data failed to decode" (schema migration
+        // or corrupted blob — warrants logging to match persist()'s
+        // symmetric stderr logging, iter-37 M111). Pre-M147 the combined
+        // `guard let data = …, let s = try? decode…` silently abandoned
+        // the user's saved settings on ANY decode failure. They'd launch,
+        // see fresh defaults, and have no signal that their customization
+        // was lost. Copy Diagnostics (iter-14 M22 pipeline) captures
+        // stderr, so logging here surfaces in bug reports.
+        guard let data = UserDefaults.standard.data(forKey: Self.defaultsKey) else {
+            return   // first launch — no error, just no data
+        }
+        let s: Snapshot
+        do {
+            s = try JSONDecoder().decode(Snapshot.self, from: data)
+        } catch {
+            FileHandle.standardError.write(
+                Data("[AppSettings] load failed (settings decode error — using defaults): \(error)\n".utf8))
+            return
+        }
         s.apply(to: self)
         // Re-sync the dedicated leaf-consumer mirrors after loading — otherwise
         // a fresh process start wouldn't pick up the saved python override

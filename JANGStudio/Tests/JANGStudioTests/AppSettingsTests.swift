@@ -293,4 +293,57 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(UserDefaults.standard.string(forKey: BundleResolver.customJangToolsPathDefaultsKey),
                        "/prior/session")
     }
+
+    // MARK: - M147 (iter 69): corrupted saved settings must not silently vanish
+    //
+    // Pre-iter-69 AppSettings.load() used `try?` on the JSONDecoder call,
+    // so a schema-migration-breaking decode silently reverted the user to
+    // factory defaults. Same asymmetry as iter-37 M111's persist() fix
+    // (which DID log to stderr). Now load() distinguishes "no data yet"
+    // (first launch — silent) from "decode failed" (logs to stderr so
+    // Copy Diagnostics captures the incident in bug reports).
+
+    func test_load_with_corrupted_settings_blob_falls_back_to_defaults() {
+        // Simulate a corrupted UserDefaults blob that cannot decode as
+        // AppSettings.Snapshot. The app must load with factory defaults
+        // (not crash).
+        let key = "JANGStudioSettings"
+        UserDefaults.standard.set(Data("not valid json at all".utf8), forKey: key)
+        defer { UserDefaults.standard.removeObject(forKey: key) }
+
+        let s = AppSettings()   // load() should log + return, not crash
+        // Default values — matches AppSettings's field initializers.
+        XCTAssertEqual(s.defaultProfile, "JANG_4K")
+        XCTAssertFalse(s.defaultHadamardEnabled)
+    }
+
+    func test_load_with_no_saved_settings_is_silent() {
+        // Regression: the "first launch, no data" path must remain
+        // silent — don't surface a log every app open for users who
+        // haven't saved settings yet.
+        let key = "JANGStudioSettings"
+        UserDefaults.standard.removeObject(forKey: key)
+        // There's no easy way to assert stderr stayed empty from this
+        // thread, so this test just exercises the path and verifies no
+        // crash — paired with the corruption test above, together they
+        // pin the split between first-launch and decode-failure branches.
+        let s = AppSettings()
+        XCTAssertEqual(s.defaultProfile, "JANG_4K")
+    }
+
+    func test_load_method_split_is_present_in_source() throws {
+        // Source-inspection pin: verifies the two branches stay separate
+        // so a future refactor can't re-collapse them into a single
+        // `guard … try? … else { return }` that silently swallows both.
+        let srcURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // JANGStudioTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // JANGStudio (xcodeproj root)
+            .appendingPathComponent("JANGStudio/Models/AppSettings.swift")
+        let src = try String(contentsOf: srcURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("load failed (settings decode error"),
+            "AppSettings.load() must log decode failures to stderr per M147 iter 69."
+        )
+    }
 }

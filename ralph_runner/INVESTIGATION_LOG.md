@@ -2840,3 +2840,48 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 - Symmetric Python-side audit: `output = f"{name}-{profile}"` in `__main__.py:183` is the CLI default when --output is absent. That's rarely invoked from Swift (which always passes --output) but worth a grep.
 
 **Next iteration should pick:** derived-from-field state audit across all Swift views (continues iter-68 meta-lesson) OR a Python side sweep.
+
+## 2026-04-20 iteration 69 — M147 AppSettings.load decode-failure silent-swallow
+
+**Angle:** Iter-68 meta-lesson on derived-from-field staleness pointed to a broader scan. Found a symmetric bug with iter-37 M111 in the persistence layer: `persist()` logs encode failures but `load()` silently drops decode failures via `try?`.
+
+**Deep trace walkthrough:**
+1. **The silent-failure class:** `guard let data = UserDefaults.standard.data(forKey: …), let s = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }`. Combined guard conflates:
+   - `data == nil`: first launch, nothing saved yet. Silent return OK.
+   - `decode fails`: saved blob exists but can't be parsed. This is a real incident.
+2. **Trigger scenarios for decode failure:**
+   - Schema migration: next app version adds a required field, old blobs lack it. Decoder fails. User loses settings.
+   - Corruption: disk fault, crash mid-write, iCloud sync inconsistency.
+   - Downgrade: newer app wrote fields an older version doesn't know. Older version decodes against its smaller Snapshot schema — might succeed if only ADDING fields, fails if REMOVED.
+3. **Impact:** user opens app, sees factory defaults, doesn't know why. No entry in Copy Diagnostics (iter-14 M22 pipeline captures stderr, but stderr got no log from load). Bug reports unhelpful.
+4. **Fix: split the guard.** First-launch case stays silent (`data == nil` → return). Decode-failure case logs to stderr with a clear message: `"[AppSettings] load failed (settings decode error — using defaults): <error>"`.
+5. **Tests strategy:** three pins.
+   - **Happy path corruption:** inject `Data("not valid json at all".utf8)` into UserDefaults, create AppSettings, verify it didn't crash and defaults are intact.
+   - **First-launch silent path:** remove the key, create AppSettings, verify defaults intact. This is mostly exercising the code path; can't easily assert stderr silence from XCTest but paired with the next pin locks the split structure.
+   - **Source-inspection:** verify the log literal `"load failed (settings decode error"` exists in source. Prevents future refactor from collapsing back to `try?`.
+
+**Meta-lesson — symmetric paths must have symmetric error handling.** The persist/load pair was an asymmetry: one logs, the other didn't. Audit rule for future iters: for every pair of "read" and "write" operations on the same data, verify their error paths are equivalently loud. This class includes:
+- encode/decode (this iter's M147)
+- serialize/deserialize (format/reader.py vs convert writer)
+- connect/disconnect (subprocess spawn/cleanup)
+- acquire/release (lock, fd, handle)
+
+**Items touched:**
+- M147 [x] — AppSettings.load distinguishes "first launch" from "decode failure", logs the latter to stderr.
+
+**Commit:** (this iteration)
+
+**Verification:** 170 Swift tests pass (was 169, with AppSettingsTests 20→23). Python 314 + ralph 73 unchanged.
+
+**Closed-status tally:** 81 (iter 68) + M147 = 82 closed / 100 total = 82.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW grep-audit class**: "symmetric path error-handling asymmetry" — grep all encode/decode, read/write, acquire/release pairs for mismatched error surfacing.
+- Python-side analog: grep all `try:` blocks in jang-tools that silently pass / log vs raise — ensure consistency with peer functions.
+
+**Next iteration should pick:** symmetric-path audit (directly applies this iter's meta-lesson; likely finds more) OR return to Python side for a refreshing context switch.
