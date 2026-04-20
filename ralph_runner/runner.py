@@ -160,6 +160,40 @@ def cmd_status() -> int:
     return 0
 
 
+def run_audits_remote(output_path: str, convert_wall_s: float) -> dict[str, Any]:
+    """SSH to macstudio + run ralph_runner/audit.py on the converted model dir. Capture JSON."""
+    # Make sure ralph_runner/ is on macstudio (same rsync scope as jang-tools)
+    print(f"[ralph] sync ralph_runner -> macstudio (for audit)")
+    sync_tree(str(JANG_REPO_ROOT / "ralph_runner"), "jang/ralph_runner")
+    cmd = (
+        f"cd {REMOTE_WORKSPACE}/jang && "
+        f"python3 -m ralph_runner.audit "
+        f"--model {output_path} "
+        f"--convert-wall-s {convert_wall_s:.3f} "
+        f"--json"
+    )
+    print(f"[ralph] audit: {cmd}")
+    r = run_remote(cmd, timeout=1800)
+    if r.returncode != 0:
+        return {
+            "overall": "fail",
+            "required_fail_count": 1,
+            "error": f"audit_invocation_rc={r.returncode}",
+            "stderr_tail": r.stderr[-500:],
+            "rows": {},
+        }
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except Exception as e:
+        return {
+            "overall": "fail",
+            "required_fail_count": 1,
+            "error": f"audit_output_parse: {e}",
+            "stdout_tail": r.stdout[-500:],
+            "rows": {},
+        }
+
+
 def cmd_next() -> int:
     if not remote_ok():
         print("BLOCKED: macstudio not reachable via SSH")
@@ -199,10 +233,25 @@ def cmd_next() -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "convert.json").write_text(json.dumps(result, indent=2))
     if result["returncode"] == 0:
-        info["status"] = "green"
-        info["wall_s"] = result["wall_time_s"]
-        save_state(state)
-        print(f"COMBO {s} GREEN wall={result['wall_time_s']:.1f}s")
+        audit_result = run_audits_remote(result["output_path"], result["wall_time_s"])
+        (run_dir / "audit.json").write_text(json.dumps(audit_result, indent=2))
+        overall = audit_result.get("overall", "fail")
+        required_fails = audit_result.get("required_fail_count", 0)
+        if overall == "pass" and required_fails == 0:
+            info["status"] = "green"
+            info["wall_s"] = result["wall_time_s"]
+            save_state(state)
+            print(f"COMBO {s} GREEN wall={result['wall_time_s']:.1f}s audit=pass")
+        else:
+            info["status"] = "failed"
+            info["error"] = f"audit_failed: {required_fails} required rows failed"
+            info["audit_fails"] = [
+                {"row": k, "hint": r.get("hint", "")}
+                for k, r in audit_result.get("rows", {}).items()
+                if r.get("required") and r.get("status") == "fail"
+            ]
+            save_state(state)
+            print(f"COMBO {s} FAILED: audit ({required_fails} required fails)")
     else:
         info["status"] = "failed"
         info["error"] = f"convert_rc={result['returncode']}"
