@@ -4837,3 +4837,53 @@ The three dispositions give a template for triaging open-observation items in th
 - **NEW**: Smelt/dflash invariant sweep per iter-106 template.
 
 **Next iteration should pick:** continue the Button/Toggle affordance sweep across the remaining wizard surfaces (step files, adoption sheets), OR pivot to Smelt/dflash.
+
+---
+
+## 2026-04-20 iteration 111 — M177 jang-server dual-invariant + 3 bare-swallow fixes
+
+**Angle:** Iter-110 forecast: "pivot to Smelt/dflash." Smelt lives outside the repo; dflash is a subdir of jang-tools already covered by iter-105 M113. Pivoted to `jang-server/` which I'd never audited — pure diversification of audit surface.
+
+**Deep trace walkthrough:**
+1. **Grep'd `except Exception` in /Users/eric/jang/jang-server/:** 10 sites in a single 1774-line server.py.
+2. **Applied the iter-106 dual-invariant template directly.** No need to reinvent — copy, update paths, adjust thresholds.
+3. **Precise regex found 4 bare-swallow sites** on first run:
+   - L415: DB row restore (corrupt row shouldn't kill sweep).
+   - L898 + L944: HF config fetch from TWO endpoints (I initially missed L944 — same shape in a sibling handler).
+   - L1113 → L1121: progress-pct calc (bytes_total=0 defensive guard).
+4. **Fixed 3 of 4:** converted the DB-restore + both HF-fetch sites to `log.warning(...)` before the fall-through. Server context demands this — silent-swallows accumulate invisibly over daemon uptime.
+5. **Allowlisted the progress-pct site** with wide line-tolerance — it's a tick-loop guard where spamming `log.warning` every tick would create noise, not value.
+6. **Test regression:** jang-tools 355 + ralph_runner 76 unchanged. New jang-server dir + 2 new tests pass.
+7. **Caught my own mistake:** first edit missed L944 (the second HF fetch in a sibling endpoint). The precise regex caught it on first test run. Fixed. This is a perfect example of why the precise test runs right after writing the fix — the engineer's eye-sweep misses siblings that share structure; the regex doesn't.
+
+**Meta-lesson — dual-invariant template is portable across subprojects.** Fourth iter of this pattern:
+  - iter-104 M108: JANGStudio Swift (coarse-only; no precise signature).
+  - iter-105 M113: jang-tools (dual; 57 sites, 4 allowlisted).
+  - iter-106 M119: ralph_runner (dual; 36 sites, 2 fixed to logs).
+  - iter-111 M177: jang-server (dual; 10 sites, 3 fixed to logs, 1 allowlisted).
+Each follows identical shape: inventory → taxonomy → coarse count → precise regex → fix/allowlist. **Rule for future auditors: copy the test file from a completed iter, update paths + thresholds, run, fix or allowlist.** Takes ~10 min per subproject after the template exists.
+
+**Meta-lesson — precise tests catch your own sibling-missing mistakes.** I edited 3 sites in my first pass; ran the test; got failures at L952 and L1121. L952 was the sibling HF-fetch site I'd missed; L1121 was the known progress-pct site I meant to allowlist. The regex doesn't miss siblings even when the engineer's eye does. **Rule: always run the precise test between edits, not just at the end.** Catches "I forgot the other one" errors immediately instead of at review time.
+
+**Meta-lesson — server context weights the "would a log save 10 min" rule upward.** CLI tool: swallowed error is usually noticed when the tool fails to produce expected output. Server: swallowed error accumulates for hours/days with nobody watching. Rule adjusted: in server code, prefer `log.warning` over bare `pass` even when the fall-through is benign for the main path — operators debugging production failures need every breadcrumb available.
+
+**Items touched:**
+- M177 [x] — jang-server dual invariant + 3 bare-swallow fixes. 1 new test file (2 tests).
+
+**Commit:** (this iteration)
+
+**Verification:** 2 new jang-server tests pass. jang-tools 355 + ralph_runner 76 unchanged.
+
+**Closed-status tally:** 130 (iter 110) + M177 = 131 items touched, all closed. Zero known bugs as of iter-111 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: sweep other Python subprojects I haven't touched — examples/, docs/scripts, models/scripts.
+- **NEW**: audit jang-server for other server-specific anti-patterns (unbounded resource growth, uncaught async failures).
+- **NEW**: continue the Swift Button/Toggle affordance sweep across non-Settings views.
+
+**Next iteration should pick:** continue Swift affordance sweep (step files + adoption sheets) OR audit jang-server for server-specific patterns (unbounded resource growth in long-running jobs, uncaught async failures).
