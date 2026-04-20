@@ -1762,3 +1762,49 @@ Or a domain item: M87, M97, M106, Cat D.
 - **NEW**: grep-audit class — `.parse(`, `.decode(`, or `int(` / `float(` calls on user-supplied strings without try/except (similar risk surface as json.loads)
 
 **Next iteration should pick:** Cat D memory cross-ref (cadence due) OR `int()/float()` grep-audit (natural follow-on to this iter's json.loads class).
+
+## 2026-04-20 iteration 44 — Cat D cross-ref cadence pass + M121 discovered
+
+**Angle:** Iter 43's forecast put Cat D cross-ref first (6-iter cadence due, last pass was iter 38). Cat D = walk through memory claims (feedback_*, project_*) and verify against current code. 4 of 6 historical Cat D passes found real bugs — this one did not find a *drift* but surfaced a latent UX gap.
+
+**Deep trace walkthrough:**
+1. **Selected 4 project memories:** `project_qwen36.md` (3 days old — freshest), `project_mistral4_architecture.md` (28 days), `project_minimax_m27.md` (7 days), `project_glm51_jang1l_working.md` (8 days). Chose these because they make specific code-level claims (layer names, tensor shapes, config defaults) that are directly verifiable via grep.
+2. **Qwen3.6 P1 claim** (linear_attn.* vs delta_net.*): grepped `GATED_DELTANET_CONFIGS` in `architectures.py`. Found lines 221-242 use `linear_attn.in_proj_qkv/z/b/a/out_proj` — memory claim was "fix needed", verified **fix is in**. ✓
+3. **Qwen3.6 P10 claim** (in_proj_b/a tiny-weight 2-bit collapse): verified `architectures.py:230-237` sets `min_bits=4, preferred_bits=8` with descriptor "keep high-bit". ✓
+4. **Mistral4 memory claim** (routed as moe_mla family): grepped `recommend.py:104` (`"mistral4": "moe_mla"`) and `capabilities.py:50-51` (maps `mistral3/mistral4` → `family=mistral4, reasoning=mistral, tool=mistral, cache=mla`). ✓
+5. **MiniMax M2.7 always-reasoning claim**: `capabilities.py:37-39` maps `minimax_m2*` with `think_in_template=True`. `convert_minimax_jangtq.py:307-319` and `convert_qwen35_jangtq.py:420-445` both invoke `build_capabilities` to stamp. ✓
+6. **GLM-5.1 inference config claims** (greedy, no rep penalty): walked Swift → Python paths.
+   - `InferenceRunner.swift:59-73`: defaults `temperature=0.0`, `maxTokens=100`. No rep penalty param exists.
+   - `inference.py:90-98 _make_sampler`: returns None for temp ≤ 0 (greedy argmax path), so no sampler.kwargs passed.
+   - Grepped jang-tools for `repetition` / `repetition_penalty` — zero hits in inference code path. ✓
+
+**Discovery on walkthrough step 6:** `_apply_chat_template_if_any` (`inference.py:67-87`) calls `apply_chat_template` without `enable_thinking=False`. Combined with `TestInferenceViewModel.maxTokens = 150` default, a user running the in-wizard smoke test on GLM-5.1 / Qwen3.6 / MiniMax M2.7 will see exactly what the GLM-5.1 memory explicitly warned about: "GLM-5.1 enters `<think>...</think>` reasoning that eats 100+ tokens before emitting the final answer." All 150 tokens consumed by a partial thinking block, no final answer emitted, user thinks the model is broken.
+
+**Scope decision (the important judgment call of this iter):** Could I fix this in-iter? Yes — add a `--no-thinking` CLI flag + a Swift `noThinking` param + a UI toggle. 3 files + 2 tests = mid-sized patch. But the decision about *whether to flip the default* is a real UX call:
+- If `enable_thinking=False` becomes the smoke-test default, reasoning benchmark users would be surprised.
+- If it stays opt-in, the UX gap still hurts new-user first-impression.
+- If I add the toggle without a UI decision, dead-feature risk.
+
+Punted to M121 with a clear scope specification so a future iter can do the full chain. The Cat D finding is the value of this iter — not a rushed half-fix.
+
+**Meta-lesson:** Cat D passes aren't only for finding drift between memory and code. They also surface "memory warns about X, code doesn't guard against X" class of latent bugs. The GLM-5.1 memory existed precisely BECAUSE the author (me, prior session) hit this exact pain. Encoding the guardrail in code, not memory, would have saved this lookup.
+
+**Items touched:**
+- (no source changes this iter)
+- [documentation] M-audit iter 44 closed as Cat D pass ✓
+- M121 [ ] — flagged open with concrete fix scope for a future iter.
+
+**Commit:** (this iteration — documentation only)
+
+**Verification:** 275 Python + 130 Swift + 73 ralph tests unchanged. No source code delta this iter.
+
+**Closed-status tally:** 58 (prior) + M-audit iter 44 = 58 closed + 1 audit pass / 92 total = 63% closure. M121 opened → 93 total items, 58 closed = 62% closure. Net: no item closed this iter, but Cat D meta-audit closed (the pass itself counts as closed work), plus one new finding documented.
+
+**Forecast pipeline (refreshed):**
+- M97 partial HF repo cleanup after cancel (iter-30 spawn — HF mock testable, still unaddressed)
+- M117 in-wizard inference smoke (feedback_model_checklist.md rule 3)
+- M121 enable_thinking toggle wire-through (this iter's discovery)
+- M87 Mistral 4 RoPE live validation (needs real convert)
+- **NEW**: grep-audit class — `shell=True` in subprocess calls (security + robustness audit class not yet swept)
+
+**Next iteration should pick:** M121 (fresh + concrete scope + the one closest-to-user UX bug we know about right now) OR M97 (more concrete + has testable HF mock).
