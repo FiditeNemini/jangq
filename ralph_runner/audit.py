@@ -335,41 +335,54 @@ def audit_a8_parser_preservation(model_dir: Path, source_dir: Path | None = None
 # ───────────────────────── A9 — Special tokens preservation ─────────────
 
 def audit_a9_special_tokens(model_dir: Path, source_dir: Path | None = None) -> dict:
-    """Assert every key in source special_tokens_map.json appears in output with same value."""
+    """Assert every key in source special_tokens_map.json appears in output with same value.
+
+    If source is provided and has no special_tokens_map.json, the check is n/a — nothing to preserve.
+    If source is not provided but output has no file, warn (cannot verify).
+    """
     out_path = model_dir / "special_tokens_map.json"
+
+    # When source is available, use it to drive the logic
+    if source_dir is not None:
+        src_path = source_dir / "special_tokens_map.json"
+        if not src_path.exists():
+            # Source never had one — nothing to preserve; output is free to omit it
+            return _na("source had no special_tokens_map.json — nothing to preserve")
+        # Source has it — output must too
+        try:
+            src_tokens = json.loads(src_path.read_text())
+        except Exception as e:
+            return _fail(f"parse source special_tokens_map: {e}")
+
+        if not out_path.exists():
+            return _fail("source had special_tokens_map.json but output does not")
+        try:
+            out_tokens = json.loads(out_path.read_text())
+        except Exception as e:
+            return _fail(f"parse output special_tokens_map: {e}")
+
+        missing = []
+        mismatched = []
+        for k, v in src_tokens.items():
+            if k not in out_tokens:
+                missing.append(k)
+            elif out_tokens[k] != v:
+                mismatched.append({"key": k, "source": v, "output": out_tokens[k]})
+        if missing or mismatched:
+            return _fail(f"{len(missing)} missing, {len(mismatched)} mismatched",
+                         missing=missing, mismatched=mismatched)
+        return _ok(preserved_keys=sorted(src_tokens.keys()))
+
+    # No source — check output exists and is non-empty
     if not out_path.exists():
-        return _fail("output has no special_tokens_map.json")
+        return _warn("output has no special_tokens_map.json and no source to compare")
     try:
         out_tokens = json.loads(out_path.read_text())
     except Exception as e:
         return _fail(f"parse output special_tokens_map: {e}")
-
-    if source_dir is None:
-        # Can't compare to source — just assert output has a non-empty map
-        if not out_tokens:
-            return _warn("output special_tokens_map is empty and no source to compare")
-        return _ok(output_keys=sorted(out_tokens.keys()))
-
-    src_path = source_dir / "special_tokens_map.json"
-    if not src_path.exists():
-        # Source lacked one — output may still have a valid one, just record
-        return _ok(note="source had no special_tokens_map", output_keys=sorted(out_tokens.keys()))
-    try:
-        src_tokens = json.loads(src_path.read_text())
-    except Exception as e:
-        return _fail(f"parse source special_tokens_map: {e}")
-
-    missing = []
-    mismatched = []
-    for k, v in src_tokens.items():
-        if k not in out_tokens:
-            missing.append(k)
-        elif out_tokens[k] != v:
-            mismatched.append({"key": k, "source": v, "output": out_tokens[k]})
-    if missing or mismatched:
-        return _fail(f"{len(missing)} missing, {len(mismatched)} mismatched",
-                     missing=missing, mismatched=mismatched)
-    return _ok(preserved_keys=sorted(src_tokens.keys()))
+    if not out_tokens:
+        return _warn("output special_tokens_map is empty and no source to compare")
+    return _ok(output_keys=sorted(out_tokens.keys()))
 
 
 # ───────────────────────── A16 — Chat template functional ──────────────

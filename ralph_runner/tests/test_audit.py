@@ -103,6 +103,16 @@ def test_a9_ok_on_nonempty_output_without_source(mock_model_dir):
     assert "bos_token" in r["output_keys"]
 
 
+def test_a9_na_when_source_has_no_special_tokens_map(tmp_path, mock_model_dir):
+    # Source dir with no special_tokens_map.json — A9 should be n/a (nothing to preserve)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    # No special_tokens_map.json in source
+    from ralph_runner.audit import audit_a9_special_tokens
+    r = audit_a9_special_tokens(mock_model_dir, source_dir=source_dir)
+    assert r["status"] == "n/a"
+
+
 def test_a17_fails_without_jang_config(tmp_path):
     # Empty dir — jang-tools modelcard will fail
     from ralph_runner.audit import audit_a17_modelcard_generatable
