@@ -4568,3 +4568,52 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: scan Python source for the same "user-action silent-swallow" anti-pattern (even though CLI output is less ambiguous, hidden `except Exception: pass` can still mask real failures).
 
 **Next iteration should pick:** M113 Python except-Exception equivalent sweep, OR another checklist item close.
+
+---
+
+## 2026-04-20 iteration 105 — M113 closure: Python `except Exception` taxonomy + dual invariant (precise + coarse)
+
+**Angle:** Iter-104 forecast: apply iter-103's meta-lesson to M113 (Python side analog of Swift M108).
+
+**Deep trace walkthrough:**
+1. **Grep'd `except Exception` across `jang_tools/`:** 57 sites across 20 files. Highest concentration: `inference.py` (8), `loader.py` (7), `convert_minimax_jangtq.py` (5), `calibrate_fp8.py` (4).
+2. **Classified into 5 categories.** Same exercise as iter-104 but with Python-specific patterns:
+   - Optional imports (mlx, torch, numpy fallbacks).
+   - Tensor conversion retries (try primary quant path then slower tolerant one).
+   - Best-effort parse (optional metadata reads).
+   - Error-wrapping-with-context (loader.py / modelcard.py — add "while processing X", re-raise).
+   - CLI top-level catch (`__main__` wrappers).
+3. **Noticed Python has a PRECISE syntactic signature for the anti-pattern** that Swift's `try?` lacks: `except Exception:\n    pass` (literal pass as the ONLY body). Swift's `try? foo()` has no equivalent giveaway — legitimate and illegitimate uses share syntax. Python gives me a tighter regex target.
+4. **Built two tests:**
+   - Coarse: count ≤ 75 (iter-104 pattern — catches bulk additions).
+   - Precise: regex catches `except Exception[: as x]:\n<indent>pass<EOL>` with no further body. Explicit allowlist for legit existing sites.
+5. **Precise test found 4 hits on first run:**
+   - `convert.py:724` — `mx.clear_cache()` optimization; benign if fails.
+   - `loader.py:1568` — last-resort bit-width inference fallback.
+   - `calibrate.py:146` — optional `_scale_inv` tensor lookup (exception-as-lookup idiom).
+   - `convert_mxtq_to_jang.py:369` — another `mx.metal.clear_cache()` same class.
+6. **Audited each of the 4.** All legitimate best-effort operations where failure is benign (optimization or optional lookup). Added to the `allowed` set with rationale comments. Future offenders outside the allowlist fail the test with a pointer to iter-35/iter-90 fix patterns.
+
+**Meta-lesson extension — precise invariants find existing violations; coarse invariants prevent future ones.** The precise regex test NAILED 4 existing sites and forced explicit classification → allowlist with rationale. The coarse count test prevents bulk future additions. **Rule: when a bug class has an obvious syntactic signature, add the precise test FIRST (either finds existing offenders OR proves there are none). ADD the coarse threshold test as the long-term health gate covering the non-obvious additions.** Iter-104 M108 was coarse-only because Swift `try?` has no precise signature; iter-105 M113 used both because Python has `: pass` as a grep-able marker.
+
+**Meta-lesson — "all four offenders were benign" is STILL a valuable test outcome.** The precise test didn't find new bugs. But it forced an EXPLICIT audit of every existing site with a silent-swallow-shaped signature, classified each, documented the rationale inline. Future engineer looking at `calibrate.py:146` sees "oh, this is in the allowlist — why?" → opens test → reads rationale → understands the exception-as-lookup idiom without hunting through git blame. Same anchoring-institutional-knowledge benefit as iter-95 M172.
+
+**Items touched:**
+- M113 [x] — taxonomy audit, coarse count invariant, precise regex invariant with 4-site allowlist. 2 new Python tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 355 Python tests pass (was 353, +2). Swift unchanged.
+
+**Closed-status tally:** 122 (iter 104) + M113 = 123 items touched, all closed. Zero known bugs as of iter-105 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M119 audit.py except Exception sites (28+) — similar to M113 but scoped to ralph-runner's audit.py. Worth a parallel dual-invariant treatment.
+- **NEW**: run the same precise-+-coarse invariant on M119 if it's cheap.
+- **NEW**: sweep remaining Python modules for other anti-patterns that have syntactic signatures (naked `except:` without Exception, `pass` after `print(e)` etc.).
+
+**Next iteration should pick:** M119 audit.py dual-invariant sweep (applies the iter-105 refinement), OR a fresh audit angle.
