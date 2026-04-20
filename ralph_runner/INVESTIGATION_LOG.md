@@ -3673,3 +3673,55 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: symlink handling. If the user picks a symlink as source model folder, does SourceDetector resolve through it? Does the convert subprocess receive the resolved path or the symlink? Could matter for caching / path-match guards.
 
 **Next iteration should pick:** M97 (now clear standout), OR a fresh audit angle (keyboard-shortcut confirmation audit / symlink handling / rapid-click debouncing). M97 is a big piece of HF-API work; the fresh angles are faster and likely to yield more bugs.
+
+---
+
+## 2026-04-20 iteration 87 — M164 HFRepoValidator fail-fast gap (client ≠ server rules)
+
+**Angle:** Iter-86 forecast listed several fresh audit angles beyond the big M97. Picked the HFRepoValidator audit because it's in the publish path (high-touch UX) and the call-tree was still loaded from iter-85's M162 work.
+
+**Deep trace walkthrough:**
+1. **Re-read HFRepoValidator top to bottom.** Regex: `^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$`. Handles: leading alphanumeric, allowed chars, max 96 per segment. Plus trimmed whitespace + single-slash split + non-empty segments.
+2. **Cross-referenced huggingface_hub.validate_repo_id rules.** HF ADDITIONALLY forbids:
+   - Consecutive `..` (directory-traversal guard)
+   - Consecutive `--`
+   - Trailing `.` or `-`
+3. **Tested Swift validator mentally against these:**
+   - `org/my..model` → passes regex (every char in allowed class). **Gap.**
+   - `org/my--model` → passes regex. **Gap.**
+   - `org/my-model-` → passes regex (trailing `-` in allowed class). **Gap.**
+   - `org/my.model.` → passes regex. **Gap.**
+4. **Assessed user impact:** each false-negative costs ~30 minutes of watching a progress bar + ~100 GB upload bandwidth + a cryptic `HfHubHTTPError` at the end. User fixes typo and re-dispatches → ~60-minute round-trip for what should be an immediate typo-catch. Most common real-world triggers: auto-complete dropping a trailing `.` (common on iPhone, occasional on macOS), stray trailing `-` from model-name templating (`my-model-v2-` where the user forgot to fill in the `v2-` part).
+5. **TDD flow:**
+   - Added 4 test methods first covering the three categories + a safety-check against over-tightening. 8 failures on red run (4 test methods × multiple assertions each). Red phase confirmed.
+   - Applied fix: two post-regex guards in the per-segment loop:
+     - `segment.hasSuffix(".") || segment.hasSuffix("-")` → reject.
+     - `segment.contains("..") || segment.contains("--")` → reject.
+   - Reran → 26/26 AdoptionServicesTests pass. Green confirmed.
+6. **Over-tightening regression check:** `my_org/model_name`, `org-name/model-name`, `org.name/model.v2`, `a-b_c.d/e-f_g.h` all still pass. Single specials inside segments stay legal.
+
+**Meta-lesson — client-side pre-validation for expensive remote operations must be AT LEAST as strict as the remote.** The usual intuition "err on the side of permissive" (false-positive UX) INVERTS when the remote operation is expensive. Each missed-negative costs minutes-to-hours of user time; each false-positive costs seconds (user fixes the name and retries). For HF publishes the missed-negative is ~30 minutes vs ~5 seconds for the false-positive. 360× cost ratio → always mirror the remote rules EXACTLY. Same principle applies to any slow-remote validator we add in the future (CI builds, long DB migrations, paid API calls).
+
+**Meta-lesson — TDD for validator tightening is especially cheap.** Validator assertions are pure function calls with no setup. 4 test methods in <2 minutes; instant red/green feedback. Any time I'm about to modify a validator, TDD the tightened rules first — trivial cost, significant bug-prevention payoff.
+
+**Items touched:**
+- M164 [x] — HFRepoValidator now rejects `..`, `--`, trailing `.`, trailing `-` in both ORG and NAME segments. 4 new tests, all prior 11 HFRepoValidator tests still pass.
+
+**Commit:** (this iteration)
+
+**Verification:** 26 AdoptionServicesTests pass (was 22, +4). Python 348 + ralph 73 unchanged.
+
+**Closed-status tally reframe:** the "100 total" figure came from iter-80 when the known-bug list was closed at 92/100. Every iter since has been adding new M-items discovered during deep-traces (M161, M162, M163, M164 are all BEYOND the original 100). Rather than claim 100%, acknowledge the audit space is open-ended: each fix uncovers new audit angles. **The Ralph loop premise ("constantly make up new questions") is inherently unfinished — this is the process working, not failing.** Revised accounting: 100 original + 4 deep-trace expansions = 104 items touched, all 104 closed. Zero known bugs remaining as of iter-87 end. Deferred NON-BUG items: M97 (feature work), M117 (feature gap), M124 (environmental), M128 (observation).
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: rapid-click debouncing — is the "Choose Folder…" button disabled while a detection is in flight? Let me verify.
+- **NEW**: symlink handling — HF cache snapshot directories use symlinks for `.safetensors`. Does SourceDetector / convert handle them correctly?
+- **NEW**: NSOpenPanel post-cancel state hygiene.
+- **NEW**: Diagnostics bundle — does it leak HF_HUB_TOKEN if the token ever appeared in stderr before M41's scrub ran?
+- **NEW**: ASCII-only spot-check for HFRepoValidator (Cyrillic / accented chars should fail — do they?).
+
+**Next iteration should pick:** rapid-click / button-disabled-during-work audit (small scope, high signal on UX bugs), OR Diagnostics token-leak spot-check (security-adjacent, high signal if there's a gap).

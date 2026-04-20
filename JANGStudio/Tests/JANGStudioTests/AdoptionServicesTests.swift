@@ -129,6 +129,56 @@ final class AdoptionServicesTests: XCTestCase {
         XCTAssertNil(HFRepoValidator.validationError("  dealignai/MyModel  "))
     }
 
+    // MARK: - Iter 87 M164: align with huggingface_hub's stricter rules.
+    //
+    // Pre-M164 the Swift validator accepted names that huggingface_hub
+    // REJECTS at upload time (after a 30-minute publish dispatch has
+    // already started). These additions close that fail-slow gap.
+
+    @MainActor
+    func test_repo_validator_rejects_consecutive_dots() {
+        // HF forbids ".." anywhere in a segment — prevents directory-traversal
+        // style constructions at the filesystem layer on the server.
+        XCTAssertNotNil(HFRepoValidator.validationError("org/my..model"),
+            "consecutive dots must fail client-side (HF rejects)")
+        XCTAssertNotNil(HFRepoValidator.validationError("my..org/name"),
+            "consecutive dots in ORG segment must fail client-side")
+    }
+
+    @MainActor
+    func test_repo_validator_rejects_consecutive_dashes() {
+        // HF also forbids "--" anywhere in a segment.
+        XCTAssertNotNil(HFRepoValidator.validationError("org/my--model"),
+            "consecutive dashes must fail client-side (HF rejects)")
+        XCTAssertNotNil(HFRepoValidator.validationError("my--org/name"),
+            "consecutive dashes in ORG segment must fail client-side")
+    }
+
+    @MainActor
+    func test_repo_validator_rejects_trailing_special_char() {
+        // HF forbids segments ending with `.` or `-`. Very common user typo —
+        // auto-complete dropping a trailing period, or a stray "-" from
+        // accidental typing.
+        XCTAssertNotNil(HFRepoValidator.validationError("org/my-model-"),
+            "trailing dash must fail")
+        XCTAssertNotNil(HFRepoValidator.validationError("org/my.model."),
+            "trailing dot must fail")
+        XCTAssertNotNil(HFRepoValidator.validationError("org-/model"),
+            "trailing dash in ORG must fail")
+        XCTAssertNotNil(HFRepoValidator.validationError("org./model"),
+            "trailing dot in ORG must fail")
+    }
+
+    @MainActor
+    func test_repo_validator_still_accepts_safe_names_with_specials() {
+        // Regression guard: the new rules shouldn't reject legitimate names.
+        // Single dots/dashes/underscores inside the segment stay legal.
+        XCTAssertNil(HFRepoValidator.validationError("org-name/model-name"))
+        XCTAssertNil(HFRepoValidator.validationError("org.name/model.v2"))
+        XCTAssertNil(HFRepoValidator.validationError("my_org/model_name"))
+        XCTAssertNil(HFRepoValidator.validationError("a-b_c.d/e-f_g.h"))
+    }
+
     // MARK: - Iter 24: M43 — publishWithProgress stream
 
     @MainActor

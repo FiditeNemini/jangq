@@ -59,6 +59,19 @@ enum HFRepoValidator {
             if segmentRegex?.firstMatch(in: segment, options: [], range: range) == nil {
                 return "Invalid \(label) segment '\(segment)': start with a letter/digit, then letters/digits/._- up to 96 chars."
             }
+            // M164 (iter 87): huggingface_hub.validate_repo_id also forbids
+            // consecutive `..` / `--` and trailing `.` / `-`. Pre-M164 these
+            // passed the client validator but HF rejected them at upload
+            // time — defeating M48's whole purpose (fail-fast before the
+            // 30-minute publish dispatch starts). Most common real-world
+            // triggers: auto-complete dropping a trailing `.`, or a stray
+            // trailing `-` from model-name templating.
+            if segment.hasSuffix(".") || segment.hasSuffix("-") {
+                return "Invalid \(label) segment '\(segment)': cannot end with '.' or '-'."
+            }
+            if segment.contains("..") || segment.contains("--") {
+                return "Invalid \(label) segment '\(segment)': cannot contain consecutive '..' or '--'."
+            }
         }
         return nil
     }
