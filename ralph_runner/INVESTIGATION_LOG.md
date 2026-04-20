@@ -793,3 +793,43 @@ green/fail matrix has been lying.
 **Meta-observation on memory cross-ref cadence:** 16 iters is probably too long between passes. A single drift fix (M35 at iter 5, M83 at iter 21) per long cycle suggests drift accumulates steadily. Future: revisit Cat D every 5-7 iters when code velocity is high. Catching one bit-allocation-quality bug per cycle is worth one iter's attention.
 
 **Next iteration should pick:** M43 (publish progress streaming, last Cat A item — deferred across iters 14/17/18/19 now; architecturally non-trivial but highest remaining adopter-UX win). Or M85 (sweep the 512→256 prose comments — tiny, zero-risk, would avoid repeating this same investigation 10 iters from now). Or continue Cat D by picking another memory file (e.g., `project_mistral4_architecture.md` claims 6 fixes for MLA+MoE — verify each is still in place).
+
+---
+
+## 2026-04-20 iteration 22 — Cat D cross-ref Mistral 4 + M85 prose sweep
+
+**Angle:** Apply iter-21's meta-observation ("catch one drift per 5-7 iter cycle") by doing another Cat D pass on a different memory file, plus the trivial M85 prose cleanup to prevent the same investigation from recurring. Two small checks batched — efficient.
+
+**Deep trace walkthrough (M86 — Mistral 4 architecture claims):**
+1. Read `project_mistral4_architecture.md` (28 days old). Claims 7 fixes; MEMORY.md index says 6 — minor inconsistency, not actionable. Walk through each claim against `mistral4_mlx.py`:
+2. Fix 1 (FP8 bf16 scale_inv loader) — handled in `fp8.py:_load_bf16_from_header`. Already tested. ✓
+3. Fix 2 (`norm_topk_prob=True`) — `mistral4_mlx.py:58` config default True; used at line 382-383. ✓
+4. Fix 3 (`llama_4_scaling_beta=0.1`) — line 76 rope_scaling merge, line 246 loaded into attention. ✓
+5. Fix 4 (attention scale plain `1/sqrt(128)`, NO mscale²) — line 194: `self.scale = self.q_head_dim ** -0.5` = 1/√128 = 0.0884. Confirmed no mscale multiplied in. Line 9 top-of-file comment explicitly says "mscale == mscale_all_dim == 1.0 → no mscale on attention or rope". ✓
+6. Fix 5 (`rope_interleave=True → traditional=True`) — **AMBIGUOUS.** `mistral4_mlx.py:54` config has `rope_interleave: bool = True` (matches HF). Line 151-158 calls `mx.fast.rope(traditional=False)` with comment "interleaved RoPE for Mistral 4". Memory says these should map True↔True. Two possibilities:
+   a) MLX-native path has inverted `traditional` semantics vs mlx-vlm (where the memory fix was originally captured).
+   b) Our native port has a RoPE bug that would show up as garbage output on a real Mistral 4 convert.
+   Too risky to flip without live validation. Flagged as M87 for future verification.
+7. Fix 6 (gate dequant uint32→bfloat16) — handled in loader.py:162-205 (verified iter 9). ✓
+8. Fix 7 (auto bfloat16 via `model.set_dtype(mx.bfloat16)` for MLA) — loader.py:278-280: `elif _text_cfg.get("model_type") == "mistral4" or _text_cfg.get("kv_lora_rank", 0) > 0: model.set_dtype(mx.bfloat16)`. ✓
+9. **6 of 7 memory-claimed fixes confirmed present; 1 needs live validation.** No drift like M83.
+
+**Deep trace walkthrough (M85 — prose sweep):**
+1. After iter 21's M83 fix, `allocate.py` had 8 "512+" prose comments — 6 about MLP asymmetry (wrong post-M83) and 2 about bfloat16 overflow (correct — different concern).
+2. Separated the two concerns by reading each comment's context. Lines 62, 77 describe 397B NaN / float16 overflow — that threshold is genuinely 512 experts + hidden≥4096 per `project_bfloat16_fix.md` (loader.py:271 uses that exact check). Kept unchanged.
+3. Lines 81, 87, 94, 246, 303, 529 describe MLP asymmetry — that's post-M83 at 256. Updated to "256+". Line 81 got a pointer to `_MLP_ASYMMETRY_MIN_EXPERTS` so future auditors can grep the symbol instead of a magic number.
+
+**Items touched:**
+- M85 [x] — 6 prose comments swept 512 → 256 in MLP-asymmetry context; bfloat16-context comments correctly left at 512.
+- M86 [x] — cross-referenced 7 Mistral 4 fixes; 6/7 confirmed, 1 ambiguous (flagged M87).
+- M87 [ ] — new spawn: needs live Mistral 4 validation of rope_traditional semantics.
+
+**Commit:** (this iteration)
+
+**Verification:** 241 jang-tools still pass (no code-path changes this iter, just prose + cross-ref confirmation). ralph_runner 68 + Swift 109 unchanged.
+
+**Closed-status tally:** 35 (prior) + M85 + M86 = 37 closed / 74 total = 50% closure rate. **Half the audit matrix is closed.**
+
+**Meta-observation on Cat D second pass:** iter 21 found a real quality bug (M83 threshold drift). iter 22 found mostly alignment + one ambiguous case (M87). Suggests that after one big drift catch, the marginal yield drops — but the second pass was still cheaper than a real bug to find via user report. Worth doing every 5-7 iters.
+
+**Next iteration should pick:** M43 (publish progress streaming) is now 5 iters deferred — it's the LAST Cat A item and the biggest remaining adopter-UX gap. Architecturally meaty (needs JSONL stream from Python upload_folder + Swift parser) but highly user-visible. Alternatively M48 (default repoName missing org prefix — small polish). Or M87 live Mistral 4 RoPE validation (requires a real convert — can't be done in a unit test).

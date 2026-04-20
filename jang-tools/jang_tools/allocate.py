@@ -78,20 +78,23 @@ def _prev_bit_width(current: int) -> Optional[int]:
 #   Dense MLP              | 3-bit    | No redundancy. 2-bit → quality cliff.
 #   Linear attention (GDN) | 3-bit    | Always active but lower sensitivity.
 #
-# ── MLP Asymmetry (512+ expert models) ────────────────────
+# ── MLP Asymmetry (256+ expert models) ────────────────────
+# Threshold: _MLP_ASYMMETRY_MIN_EXPERTS = 256 (see `_apply_mlp_asymmetry_floor`).
+# Was 512 pre-2026-04-08 — lowered after GLM-5.1 (256 experts) degenerated
+# into repetition loops at 2-bit MLPs. See `project_mlp_asymmetry.md`.
 #
 #   Expert MLP tensors are NOT equal in sensitivity:
 #
 #   gate_proj → SiLU amplifier. Errors get squared through SiLU(gate)*up.
 #              At 3-bit on hidden=4096: produces 45x error → float16 overflow.
-#              MUST be 4-bit on 512+ expert models.
+#              MUST be 4-bit on 256+ expert models.
 #
 #   up_proj   → Linear multiplicand. Errors are bounded, not amplified.
 #              2-bit is safe IF gate_proj has sufficient precision.
 #
 #   down_proj → Projects back to residual stream. Every subsequent layer
 #              sees this output. GGUF always gives +1 bit (Q3_K in Q2_K).
-#              3-bit minimum on 512+ expert models.
+#              3-bit minimum on 256+ expert models.
 #
 #   Budget-neutral: (gate=4 + up=2 + down=3) / 3 = 3.0 average.
 #   Same size as uniform 3-bit, but prevents float16 overflow.
@@ -243,7 +246,7 @@ def classify_tensor(tensor_name: str, num_experts: int = 0, has_shared_mlp: bool
     Uses substring matching with priority ordering. First match wins.
     Handles edge cases like "gate" (MoE router) vs "gate_proj" (MLP).
 
-    Note: For 512+ expert models, MLP asymmetry bit floors are enforced
+    Note: For 256+ expert models, MLP asymmetry bit floors are enforced
     in the allocator functions (allocate_bits_profile, allocate_bits_budget),
     not here. This function only handles tier classification.
 
@@ -300,7 +303,7 @@ def _is_routed_expert_mlp(name_lower: str, component: str) -> bool:
     return component in name_lower and "shared_expert" not in name_lower
 
 
-# ── MLP asymmetry bit floors for 512+ expert models ──────────
+# ── MLP asymmetry bit floors for 256+ expert models ──────────
 # Applied as post-classification floors in allocator functions.
 # gate_proj: SiLU amplifier → 4-bit minimum (prevents 45x error on hidden=4096)
 # down_proj: residual projection → 3-bit minimum (matches GGUF Q2_K behavior)
@@ -526,7 +529,7 @@ def allocate_bits_budget(
 
     Like GGUF K-quants: same size as uniform, better quality.
 
-    For 512+ expert models, classify_tensor applies MLP asymmetry
+    For 256+ expert models, classify_tensor applies MLP asymmetry
     (gate_proj → IMPORTANT) and down_proj gets a 3-bit floor.
 
     Args:
