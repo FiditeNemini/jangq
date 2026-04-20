@@ -1,0 +1,14 @@
+// JANG Swift — load + generate. Requires JANGCore framework bundled in JANGStudio.app
+import JANGCore
+
+let modelURL = URL(fileURLWithPath: "{{ model_path }}")
+{% if family == "jangtq" -%}
+let model = try await JANGTQModel.load(at: modelURL)
+{% else -%}
+let model = try await JANGModel.load(at: modelURL)
+{% endif -%}
+let response = try await model.generate(
+    prompt: "Hello",
+    maxTokens: 200
+)
+print(response.text)

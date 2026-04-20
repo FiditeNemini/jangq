@@ -1,0 +1,38 @@
+{% if is_vl or is_video_vl -%}
+from jang_tools.load_jangtq_vlm import load_jangtq_vlm
+from mlx_vlm import generate
+from PIL import Image
+
+model, processor = load_jangtq_vlm("{{ model_path }}")
+{% if is_vl -%}
+image = Image.open("your-image.jpg")
+prompt = "Describe this image."
+response = generate(model, processor, image=image, prompt=prompt, max_tokens=200)
+{% elif is_video_vl -%}
+# Video inputs — see jang_tools.load_jangtq_vlm for video_processor usage
+# frames = load_video_frames("your-video.mp4", num_frames=16)
+# response = generate(model, processor, video=frames, prompt="Describe this video.")
+{% endif -%}
+print(response)
+{% else -%}
+from jang_tools.loader import load_model
+from mlx_lm import generate
+
+model, tokenizer = load_model("{{ model_path }}")
+{% if has_chat_template -%}
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Hello"},
+]
+{% if has_tool_parser -%}
+tools = [{"type": "function", "function": {"name": "get_weather", "description": "get weather"}}]
+prompt = tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=True)
+{% else -%}
+prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+{% endif -%}
+{% else -%}
+prompt = "Hello"
+{% endif -%}
+response = generate(model, tokenizer, prompt=prompt, max_tokens=200)
+print(response)
+{% endif -%}

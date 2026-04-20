@@ -1,0 +1,12 @@
+## Load `{{ model_name }}` in Python
+
+```python
+{{ snippet_python_short }}
+```
+
+### Via the CLI
+
+```
+pip install 'jang[mlx]'
+mlx_lm.generate --model {{ hf_repo | default("YOUR_HF_ORG/" ~ model_name) }} --prompt "Hello"
+```

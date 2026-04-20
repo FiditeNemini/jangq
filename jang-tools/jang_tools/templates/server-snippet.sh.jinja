@@ -1,0 +1,12 @@
+# OpenAI-compatible server via Osaurus
+# pip install osaurus  (if not already)
+
+osaurus serve --model {{ model_path }} --port 8080 &
+
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "{{ model_name }}",
+    "messages": [{"role": "user", "content": "Hello"}]{% if has_tool_parser %},
+    "tools": [{"type": "function", "function": {"name": "get_weather"}}]{% endif %}
+  }'
