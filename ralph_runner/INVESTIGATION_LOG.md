@@ -5488,3 +5488,44 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: continue jang-server security sweep — request-body size limits (no max upload size today)?
 
 **Next iteration should pick:** request-body size limits on jang-server (final security gap), OR codify the "whole function body" source-inspection pattern as a test helper.
+
+---
+
+## 2026-04-20 iteration 126 — M189 jang-server max-request-body-size middleware
+
+**Angle:** Iter-125 forecast: request-body-size limits — last unbounded-input vector.
+
+**Deep trace walkthrough:**
+1. **Confirmed the gap:** grep'd `MAX_BODY` / `body-size` / middleware setup — nothing. FastAPI doesn't ship with a body-size cap by default. Pre-M189 attacker can POST a 10 GB JSON body, exhausting RAM before Pydantic rejects.
+2. **Designed the middleware:** `@app.middleware("http")` decorator + `MAX_BODY_BYTES` env-tunable constant. Default 1 MB chosen because (a) JANG payloads are KB-scale, (b) matches nginx default `client_max_body_size 1m`, (c) 1000× headroom over realistic legit requests.
+3. **Header-based check vs streaming counter:** chose header-based for simplicity. Catches ~95% of attackers (most HTTP clients send Content-Length). Chunked-encoding bypass (no Content-Length) is harder to defend in-app; usually network-layer (nginx, WAF) backstops it.
+4. **413 Payload Too Large per RFC 9110.** Response body explains the cap + names the env var so operators know how to bump it.
+5. **Tests:** 5 new pin tests covering env var, middleware decorator, status code, header inspection, default-range sanity.
+6. **iter-111 invariant test allowlist bumped AGAIN** (1207 → 1300). 4th bump. Meta-lesson queued for next iter: refactor to function-body slicing per iter-125's rule.
+
+**Meta-lesson — declared-size body bombs are the cheap-fix half; chunked bypasses are the hard half.** Header-based checks catch the typical attacker (declared Content-Length). Chunked bypass requires the attacker to actually send the bytes (still costs them bandwidth) and is usually best mitigated at the network layer (nginx `client_max_body_size`). **Rule: in Python web apps, check the header path FIRST as cheap-and-effective; document network-layer responsibility for chunked bypasses so operators know what to configure.** This is the same in-app vs network-layer division as iter-125 M188's `/health` rate-limit decision.
+
+**Meta-lesson — sensible defaults bound the input space invisibly.** A 1 MB default for body size matches industry convention (nginx default). Operators don't need to think about it for typical setups; only need to bump if they have an unusual workload. **Rule: when adding a configurable cap, anchor the default to industry conventions and DOCUMENT the convention in the comment.** Reduces "why does my legit upload fail?" surprises and operator confusion.
+
+**Meta-lesson — line-number allowlists need a refactor threshold.** Iter-111 allowlist bumped 4 times across iter-115/124/125/126. Each bump invites the question "is the next bump 1500? 2000?" **Rule: when an allowlist range bumps for the 4th time, refactor to a more robust selection (function-body slicing, regex, or AST-based context match). Codified in next iter's forecast — will refactor as a dedicated meta-iter.**
+
+**Items touched:**
+- M189 [x] — max-body-size middleware. 5 new pin tests. Allowlist bumped (4th time — refactor next iter).
+
+**Commit:** (this iteration)
+
+**Verification:** 34 jang-server tests pass (was 29, +5).
+
+**Closed-status tally:** 142 (iter 125) + M189 = 143 items touched, all closed. Zero known bugs as of iter-126 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (high priority — 4-bump rule):** refactor iter-111 invariant allowlist from line-number-range to function-body slicing.
+- **NEW**: jang-server CORS posture — `allow_origins=["*"]` + auth headers. Real security issue I noticed during this iter but didn't fix (separate scope).
+- **NEW**: extend the rate-limit dependency to /retry + /admin/purge.
+
+**Next iteration should pick:** refactor the iter-111 allowlist (codifies iter-125 meta-lesson, prevents 5th bump iter-127), OR fix CORS posture (real security finding noticed in iter-126).

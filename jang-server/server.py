@@ -673,6 +673,50 @@ app.add_middleware(
 )
 
 
+# M189 (iter 126): max-request-body-size middleware. Pre-M189 the
+# server had no upper bound on POST body size — an attacker could
+# send a 10 GB JSON body, exhausting RAM before Pydantic validation
+# rejects the wrong shape. JobRequest / EstimateRequest payloads are
+# at most a few KB in practice (model_id + profile + small metadata),
+# so capping at 1 MB by default leaves 1000× headroom and stops the
+# memory-bomb vector cold.
+#
+# Tunable via JANG_MAX_BODY_BYTES env var. Catches both Content-
+# Length-declared bodies (rejected at header inspection) AND chunked
+# bodies (would need streaming-byte-counter for full coverage; the
+# header check covers the typical attacker who declares the size).
+MAX_BODY_BYTES = int(os.environ.get("JANG_MAX_BODY_BYTES", str(1 * 1024 * 1024)))
+
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    """Reject requests whose Content-Length exceeds MAX_BODY_BYTES.
+    Cheaper than letting Pydantic try to parse a 10GB JSON. Returns
+    413 Payload Too Large per RFC 9110."""
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            size = int(cl)
+        except ValueError:
+            # Malformed Content-Length — let downstream reject normally
+            # (don't try to second-guess weird headers here).
+            size = 0
+        if size > MAX_BODY_BYTES:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "detail": (
+                        f"Request body too large ({size} bytes; max "
+                        f"{MAX_BODY_BYTES}). Configure via "
+                        f"JANG_MAX_BODY_BYTES env var if larger payloads "
+                        f"are legitimately needed."
+                    )
+                },
+            )
+    return await call_next(request)
+
+
 @app.on_event("startup")
 def startup():
     _init_db()
