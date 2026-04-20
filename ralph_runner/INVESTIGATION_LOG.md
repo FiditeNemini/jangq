@@ -1915,3 +1915,42 @@ Pivoted to re-audit M121. Iter 45 closed the text path but the VL path is a SEPA
 - grep-audit class: `open(` calls without context managers (file-descriptor leak class, complement to iter 43's `json.loads`).
 
 **Next iteration should pick:** peer-helper parameter-asymmetry grep-audit (generalization of this iter's finding — potentially rich seam) OR `open(` without `with` (concrete file-descriptor leak class).
+
+## 2026-04-20 iteration 48 — M125 `json.load(open())` / `json.dump(..., open())` bulk migration
+
+**Angle:** Iter 47's forecast listed `open(` without `with` as a concrete file-descriptor leak class. Grepped for the specific high-signal pattern `json\.(load|dump)\(.*open\(` first — common enough to be worth targeting, narrow enough to scope a single-iter fix.
+
+**Deep trace walkthrough:**
+1. **Initial grep against `jang-tools/jang_tools/`:** 24 hits in 6 files. Fixed those.
+2. **Wrote regression guard test** `test_fd_leak_pattern.py` scoped to `jang_tools/` subtree. Test ran — found **13 MORE offender lines** in 5 files I hadn't grepped (my initial grep was via terminal Grep with head_limit=50; truncated silently past the top hits). Broader `.rglob("*.py")` on the test side caught them all.
+3. **Lesson learned about grep head-limits:** `Grep head_limit=50` silently truncates at 50. I'd seen "Showing results with pagination = limit: 250" previously and assumed 50 was a soft hint. It's a HARD cap — results past it don't reach the caller. **Pattern for future grep-audits: always re-run with head_limit=0 or bigger limit after first triage.**
+4. **Fixed remaining 13 hits** across `convert_mxrq.py` (4), `convert_mxtq.py` (6), `convert_mxtq_to_jang.py` (2), `load_mxrq.py` (2), `load_mxtq.py` (2), `scripts/verify_qwen36_artifact.py` (3). Regression guard re-ran cleanly.
+5. **Read-side vs write-side risk differential:**
+   - Read side: CPython's refcount close-on-drop usually saves you, but PyPy / Jython / any non-refcount Python leaks fds. Sandboxed bundled Python could trip its own fd limit.
+   - Write side: **failure can be silent and irreversible.** `json.dump(obj, open(p, "w"))` returns normally. The Python file object's `__del__` runs at some later GC tick to flush and close. If the process crashes (OOM, SIGKILL, user ^C) between those two events, a partial JSON lands on disk with no exception having fired. For a converter writing `config.json` or `jang_config.json`, that's a bricked model with no diagnostic.
+6. **Why this mattered to catch at scale:** convert scripts write ~5 JSON files back-to-back (config, jang_config, index, tokenizer_config, generation_config). With 37 un-context-managed sites and hundreds of convert runs per week, the probability that one of them has ALREADY corrupted an artifact is nonzero. We've been lucky CPython's refcount-GC is prompt.
+7. **Scope discipline:** did NOT touch other `open(`-without-`with` patterns (e.g., `for line in open(path)` in log-tail code). Only the `json.*(open(...))` family because:
+   (a) it's the highest-frequency pattern (deterministic parsing/serialization),
+   (b) it's the highest-risk write pattern (partial JSON = bricked model),
+   (c) scoping the regression guard narrowly keeps false positives near zero.
+
+**Meta-lesson on grep head_limits.** Iter 43's `json.loads` audit also used `Grep head_limit=50` and I accepted 43 files as complete — **might have missed sites.** Re-grep without limit next iter to confirm M120's coverage. Pattern: after any pattern-class fix, re-run the pattern grep with `head_limit: 0` to verify zero offenders remain.
+
+**Items touched:**
+- M125 [x] — 37 call sites across 11 files + regression guard test.
+
+**Commit:** (this iteration)
+
+**Verification:** 287 jang-tools tests pass (was 286, +1 for regression guard). Swift 132 + ralph 73 unchanged.
+
+**Closed-status tally:** 61 (iter 47) + M125 = 62 closed / 96 total = 64.6% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (iter-30 spawn)
+- M117 in-wizard inference smoke (feedback_model_checklist.md rule 3)
+- M124 full-suite Swift-test hang (environmental, still not diagnosed)
+- **NEW**: re-grep M120's `json.loads(` coverage with head_limit=0 to verify no missed sites (applying this iter's meta-lesson).
+- **NEW**: broader `open(` without `with` grep — cover the non-JSON call sites (read_text / write_text wrapping, etc.).
+- peer-helper parameter-asymmetry grep-audit (iter 47 generalization — `_detect_*` / `_resolve_*` family sweep).
+
+**Next iteration should pick:** re-grep M120 coverage (applies this iter's head_limit meta-lesson; could find more real bugs) OR peer-helper asymmetry sweep.

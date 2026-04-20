@@ -50,10 +50,16 @@ from jang_tools.turboquant.tq_kernel import TurboQuantLinear, TurboQuantSwitchLi
 def load_jangtq_model(model_path, skip_params_eval=False):
     """Load JANGTQ model with TurboQuantLinear (Metal kernel, no dequant)."""
     model_path = Path(model_path)
-    config = json.load(open(model_path / "config.json"))
+    # M125 (iter 48): context-manage reads so fds close deterministically.
+    with open(model_path / "config.json") as f:
+        config = json.load(f)
 
     jang_cfg_path = model_path / "jang_config.json"
-    jang_cfg = json.load(open(jang_cfg_path)) if jang_cfg_path.exists() else {}
+    if jang_cfg_path.exists():
+        with open(jang_cfg_path) as f:
+            jang_cfg = json.load(f)
+    else:
+        jang_cfg = {}
     mxtq_seed = jang_cfg.get("mxtq_seed", 42)
     mxtq_bits_map = jang_cfg.get("mxtq_bits", {})
 

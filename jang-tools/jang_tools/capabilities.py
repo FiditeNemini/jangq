@@ -174,9 +174,11 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
     cfg_path = model_dir / "config.json"
 
     # `convert_mxtq.py` (legacy) inlines jang under config["jang"] — handle both.
+    # M125 (iter 48): wrap open() in `with` so fds close deterministically.
     if not jang_path.exists():
         if cfg_path.exists():
-            cfg = json.load(open(cfg_path))
+            with open(cfg_path) as fh:
+                cfg = json.load(fh)
             inline = cfg.get("jang")
             if isinstance(inline, dict):
                 jang = inline
@@ -186,8 +188,13 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
         else:
             return False, f"no jang_config.json at {model_dir}"
     else:
-        jang = json.load(open(jang_path))
-        config = json.load(open(cfg_path)) if cfg_path.exists() else {}
+        with open(jang_path) as fh:
+            jang = json.load(fh)
+        if cfg_path.exists():
+            with open(cfg_path) as fh:
+                config = json.load(fh)
+        else:
+            config = {}
 
     caps = jang.get("capabilities")
     if caps is None:
@@ -244,8 +251,13 @@ def stamp_directory(model_dir: Path, write: bool = False, verbose: bool = True) 
         if verbose:
             print(f"  [capabilities] SKIP {model_dir.name} — no jang_config.json")
         return False
-    jang = json.load(open(jang_path))
-    config = json.load(open(cfg_path)) if cfg_path.exists() else {}
+    with open(jang_path) as fh:
+        jang = json.load(fh)
+    if cfg_path.exists():
+        with open(cfg_path) as fh:
+            config = json.load(fh)
+    else:
+        config = {}
     caps = build_capabilities(jang, config, model_dir)
     if caps is None:
         if verbose:

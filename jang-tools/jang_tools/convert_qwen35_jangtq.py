@@ -76,7 +76,8 @@ if SRC is None or OUT is None:
 try:
     OUT.mkdir(parents=True, exist_ok=True)
 
-    config = json.load(open(SRC / "config.json"))
+    with open(SRC / "config.json") as f:
+        config = json.load(f)
     text_cfg = config.get("text_config", config)
     n_layers = text_cfg["num_hidden_layers"]
     # Qwen3.6: 256 routed experts + 1 shared
@@ -394,7 +395,10 @@ try:
         "metadata": {"format": "jangtq", "total_size": total_size},
         "weight_map": shard_map,
     }
-    json.dump(index, open(OUT / "model.safetensors.index.json", "w"), indent=2)
+    # M125 (iter 48): context-managed open so the write is flushed + closed
+    # deterministically. See convert_minimax_jangtq.py for the full rationale.
+    with open(OUT / "model.safetensors.index.json", "w") as f:
+        json.dump(index, f, indent=2)
 
 
     # Write config (strip any fp8/awq sections; force the default bits to expert bits)
@@ -406,7 +410,8 @@ try:
     config["weight_format"] = "mxtq"
     config["mxtq_seed"] = SEED
     config["mxtq_bits"] = EXPERT_BITS
-    json.dump(config, open(OUT / "config.json", "w"), indent=2)
+    with open(OUT / "config.json", "w") as f:
+        json.dump(config, f, indent=2)
 
 
     # Write jang_config
@@ -458,7 +463,8 @@ try:
               "jang_tools/capabilities.py::FAMILY_MAP if this is a new architecture.",
               flush=True)
 
-    json.dump(jang_config, open(OUT / "jang_config.json", "w"), indent=2)
+    with open(OUT / "jang_config.json", "w") as f:
+        json.dump(jang_config, f, indent=2)
 
     # Validate the final jang_config — catch schema drift / typos / missing keys.
     from jang_tools.capabilities import verify_directory
@@ -490,10 +496,12 @@ try:
     _tok_cfg = OUT / "tokenizer_config.json"
     if _tok_cfg.exists():
         try:
-            _tc = json.load(open(_tok_cfg))
+            with open(_tok_cfg) as f:
+                _tc = json.load(f)
             if _tc.get("tokenizer_class") == "TokenizersBackend":
                 _tc["tokenizer_class"] = "Qwen2Tokenizer"
-                json.dump(_tc, open(_tok_cfg, "w"), indent=2)
+                with open(_tok_cfg, "w") as f:
+                    json.dump(_tc, f, indent=2)
                 print("  [osaurus-fix] tokenizer_class: TokenizersBackend → Qwen2Tokenizer", flush=True)
         except Exception as _e:
             print(f"  [osaurus-fix] skipped: {_e}", flush=True)

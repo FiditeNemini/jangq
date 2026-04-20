@@ -64,9 +64,11 @@ for f in nice_to_have:
     ok = (ART / f).exists()
     print(f"  {'ok' if ok else '--'}: {f}")
 
-# 2. Read jang_config bit-width contract
+# 2. Read jang_config bit-width contract.
+# M125 (iter 48): context-manage reads so fds close deterministically.
 print("\n[2] jang_config.json bit-width contract")
-jcfg = json.load(open(ART / "jang_config.json"))
+with open(ART / "jang_config.json") as _f:
+    jcfg = json.load(_f)
 bits = jcfg.get("mxtq_bits", {})
 print(f"  weight_format: {jcfg.get('weight_format')}")
 print(f"  profile: {jcfg.get('profile')}")
@@ -93,7 +95,8 @@ if bits.get("routed_expert") not in (2, 3, 4):
 
 # 3. config.json shape (layer counts, expert counts)
 print("\n[3] config.json structure")
-cfg = json.load(open(ART / "config.json"))
+with open(ART / "config.json") as _f:
+    cfg = json.load(_f)
 tcfg = cfg.get("text_config", cfg)
 print(f"  model_type: {cfg.get('model_type')}  arch: {cfg.get('architectures')}")
 print(f"  hidden_size:  {tcfg.get('hidden_size')}")
@@ -107,7 +110,8 @@ print(f"  layer_types[:6]: {(tcfg.get('layer_types') or [])[:6]}")
 
 # 4. Walk safetensors index — categorize keys
 print("\n[4] Tensor inventory by kind")
-idx = json.load(open(ART / "model.safetensors.index.json"))
+with open(ART / "model.safetensors.index.json") as _f:
+    idx = json.load(_f)
 weight_map = idx.get("weight_map", {})
 total_size = idx.get("metadata", {}).get("total_size", 0)
 print(f"  total_size: {total_size / 1e9:.2f} GB across {len(set(weight_map.values()))} shards")

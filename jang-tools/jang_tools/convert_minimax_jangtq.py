@@ -51,7 +51,8 @@ try:
 
     OUT.mkdir(parents=True, exist_ok=True)
 
-    config = json.load(open(SRC / "config.json"))
+    with open(SRC / "config.json") as f:
+        config = json.load(f)
     n_layers = config.get("num_hidden_layers", 62)
     n_experts = config.get("num_local_experts", 256)
 
@@ -270,14 +271,21 @@ try:
     # Write index
     index = {"metadata": {"format": "jangtq", "total_size": sum(v.nbytes for v in shard_tensors.values())},
              "weight_map": shard_map}
-    json.dump(index, open(OUT / "model.safetensors.index.json", "w"), indent=2)
+    # M125 (iter 48): use a context manager so the write is flushed + closed
+    # deterministically. Prior `json.dump(..., open(p, "w"))` relied on CPython
+    # refcount-GC to close the file promptly — if the converter crashed or
+    # was backgrounded between the dump and GC, a partial JSON write could
+    # land on disk and brick the model.
+    with open(OUT / "model.safetensors.index.json", "w") as f:
+        json.dump(index, f, indent=2)
 
     # Write config
     config.pop("quantization_config", None)
     config["quantization"] = {"group_size": 64, "bits": EXPERT_BITS}
     config["weight_format"] = "mxtq"
     config["mxtq_bits"] = EXPERT_BITS
-    json.dump(config, open(OUT / "config.json", "w"), indent=2)
+    with open(OUT / "config.json", "w") as f:
+        json.dump(config, f, indent=2)
 
     # Write jang_config
     jang_config = {
@@ -316,7 +324,8 @@ try:
               "silver/bronze. Add the family to jang_tools/capabilities.py::FAMILY_MAP.",
               flush=True)
 
-    json.dump(jang_config, open(OUT / "jang_config.json", "w"), indent=2)
+    with open(OUT / "jang_config.json", "w") as f:
+        json.dump(jang_config, f, indent=2)
 
     # Validate the final jang_config — catch schema drift / typos / missing keys.
     from jang_tools.capabilities import verify_directory
@@ -347,10 +356,12 @@ try:
     _tok_cfg = OUT / "tokenizer_config.json"
     if _tok_cfg.exists():
         try:
-            _tc = json.load(open(_tok_cfg))
+            with open(_tok_cfg) as f:
+                _tc = json.load(f)
             if _tc.get("tokenizer_class") == "TokenizersBackend":
                 _tc["tokenizer_class"] = "GPT2Tokenizer"
-                json.dump(_tc, open(_tok_cfg, "w"), indent=2)
+                with open(_tok_cfg, "w") as f:
+                    json.dump(_tc, f, indent=2)
                 print("  [osaurus-fix] tokenizer_class: TokenizersBackend → GPT2Tokenizer", flush=True)
         except Exception as _e:
             print(f"  [osaurus-fix] skipped: {_e}", flush=True)

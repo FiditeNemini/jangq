@@ -48,7 +48,9 @@ def _scan_tq_tensors(model_dir: Path) -> list[tuple[str, list[int]]]:
     out = []
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
-        index = json.load(open(index_path))
+        # M125 (iter 48): context-manage the read so the fd closes promptly.
+        with open(index_path) as fh:
+            index = json.load(fh)
         weight_map = index["weight_map"]
         # Group by shard for I/O efficiency.
         by_shard: dict[str, list[str]] = {}
@@ -86,7 +88,8 @@ def _read_tq_bits(model_dir: Path, packed_key: str) -> int:
     bits_key = packed_key[: -len(".tq_packed")] + ".tq_bits"
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
-        index = json.load(open(index_path))
+        with open(index_path) as fh:
+            index = json.load(fh)
         fname = index["weight_map"].get(bits_key)
         if fname is None:
             return 0
@@ -111,7 +114,8 @@ def main() -> None:
     jang_config_path = model_dir / "jang_config.json"
     if not jang_config_path.exists():
         sys.exit(f"FATAL: missing {jang_config_path} — not a JANGTQ artifact?")
-    jang_cfg = json.load(open(jang_config_path))
+    with open(jang_config_path) as fh:
+        jang_cfg = json.load(fh)
     seed = int(jang_cfg.get("mxtq_seed", 42))
     print(f"  seed: {seed}")
 
