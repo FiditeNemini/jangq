@@ -105,6 +105,19 @@ ALLOWED_FIXTURES: set[tuple[str, str]] = {
     ("ralph_runner/AUDIT_CHECKLIST.md", "HF legacy (huggingface_*)"),
     ("ralph_runner/INVESTIGATION_LOG.md", "HF token (hf_*)"),
     ("ralph_runner/INVESTIGATION_LOG.md", "HF legacy (huggingface_*)"),
+    # iter-130 M193 redaction unit tests use literal fake HF/HF-legacy/
+    # OpenAI/Bearer/query-string values to exercise redact_for_log.
+    # Clearly-fake (all A-Z + 1234567890 pattern).
+    ("jang-server/tests/test_runtime_log_redaction.py", "HF token (hf_*)"),
+    ("jang-server/tests/test_runtime_log_redaction.py", "HF legacy (huggingface_*)"),
+    ("jang-server/tests/test_runtime_log_redaction.py", "OpenAI key (sk-*)"),
+    # iter-132 M195 DB backfill tests seed temp-DB rows with fake tokens
+    # to verify the backfill redacts them.
+    ("jang-server/tests/test_db_backfill_redaction.py", "HF token (hf_*)"),
+    # iter-133 M196 Swift DiagnosticsBundleTests added OpenAI parity
+    # fixtures — same clearly-fake pattern as the existing HF fixtures
+    # already allowlisted above.
+    ("JANGStudio/Tests/JANGStudioTests/DiagnosticsBundleTests.swift", "OpenAI key (sk-*)"),
 }
 
 
