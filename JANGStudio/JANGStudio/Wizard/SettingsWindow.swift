@@ -416,6 +416,15 @@ private struct UpdatesTab: View {
                 Text("JANG Studio v1.0 ships with manual updates. Automatic updates via Sparkle are planned for v1.1.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                // M176b (iter 110): per-affordance "Not yet implemented"
+                // marker to match iter-108 M62's pattern. The v1.0/v1.1
+                // caption above explains the section; this label makes
+                // the toggle's status visible at its own attention site.
+                // Persisted value stays for when Sparkle lands in v1.1.
+                Label("Not yet implemented — awaits Sparkle integration in v1.1.",
+                      systemImage: "info.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             Section {
                 Button {

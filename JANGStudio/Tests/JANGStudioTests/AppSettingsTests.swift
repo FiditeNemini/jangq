@@ -438,6 +438,22 @@ final class AppSettingsTests: XCTestCase {
 
     // MARK: - Iter 108 M62: remaining inert settings labeled "not yet implemented"
 
+    func test_autoCheckForUpdates_has_not_yet_implemented_label() throws {
+        // M176b (iter 110): autoCheckForUpdates toggle persists but Sparkle
+        // auto-updater ships in v1.1. Per iter-108 M62's pattern, the
+        // toggle gets its own "Not yet implemented" label citing Sparkle
+        // as the blocker — so the toggle's inert-today status is visible
+        // at its attention site, not just in the section caption.
+        let srcURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard/SettingsWindow.swift")
+        let src = try String(contentsOf: srcURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("Sparkle integration") && src.contains("Not yet implemented"),
+            "autoCheckForUpdates toggle must carry the M62-style Not-yet-implemented label citing Sparkle (M176b iter 110)"
+        )
+    }
+
     func test_inert_settings_have_not_yet_implemented_labels() throws {
         // iter-14 M62 wired 9 of 12 UI-lie settings to their actual consumers.
         // Three remained inert: logVerbosity (needs wide JANG_LOG_LEVEL

@@ -4792,3 +4792,48 @@ The three dispositions give a template for triaging open-observation items in th
 - **NEW**: audit the 57 Button declarations for ones that silently no-op or have misleading labels (iter-108 M62-class but in non-Settings views).
 
 **Next iteration should pick:** Smelt/dflash invariant sweep, OR another cheap UI affordance sweep, OR M80 audit baseline.
+
+---
+
+## 2026-04-20 iteration 110 — M176b autoCheckForUpdates consistency gap (iter-108 M62 extension)
+
+**Angle:** Iter-109 forecast: "audit the 57 Button declarations for ones that silently no-op or have misleading labels." Picked the densest surface (SettingsWindow with 13 buttons + several toggles) to sweep.
+
+**Deep trace walkthrough:**
+1. **Grep'd Button declarations in SettingsWindow** — 13 hits. Triaged each:
+   - Choose…/Clear pairs (8) — immediately update settings; wired. ✓
+   - "Reset to defaults" (1) — calls settings.reset(); wired. ✓
+   - "Open logs directory" (1) — openLogsDirectory() + iter-80 M157 fallback; wired. ✓
+   - "Copy system info" (1) — copySystemInfo() writes non-sensitive stats to clipboard; wired. ✓
+   - "Check for updates (browser)" (1) — opens GitHub releases URL; wired. ✓
+   - "View release notes" (1) — opens GitHub releases/latest URL; wired. ✓
+2. **Swept the Toggles in the same file** (iter-108 closed 3 known-inert ones). Found one I missed:
+   - `autoCheckForUpdates` at line 415: persists user's choice, but Sparkle integration isn't wired (v1.0 manual updates only).
+3. **Checked existing signaling:** section caption reads "JANG Studio v1.0 ships with manual updates. Automatic updates via Sparkle are planned for v1.1." — tells user the WHY, but at the section level.
+4. **Debated whether this counts as a M62-class lie.** The caption IS informative. But users typically scan toggle labels without reading section captions. The toggle itself ("Automatically check for updates") implies "this works when on." Mixed signal.
+5. **Fix:** added an inline `Label("Not yet implemented — awaits Sparkle integration in v1.1.")` directly under the toggle, matching iter-108's pattern. Persisted value stays for when v1.1 lands.
+6. **Test pin:** source-inspection for the Sparkle citation + "Not yet implemented" literal in AppSettingsTests.
+
+**Meta-lesson — section-level captions don't replace per-affordance labels.** Users scanning a Settings panel read the toggle/button labels. Section captions are often skipped (especially in dense panels). When an affordance is inert, mark the AFFORDANCE, not only the section. Corollary: iter-108's "close M62" was incomplete — the UI-lie sweep needed a second pass for toggles whose status was only in section captions. Rule for future sweeps: check caption-covered affordances individually, not just section footers.
+
+**Meta-lesson — closures are worth sweeping periodically.** Iter-108 declared M62 closed. Iter-110 (two iters later) found a sibling that shipped with only a section caption. The explicit label is a stricter interpretation of iter-108's rule. Future sweeps (iter-111+) should revisit "closed" items periodically — sometimes their closure reveals a related instance that was ambient rather than explicit.
+
+**Items touched:**
+- M176b [x] — autoCheckForUpdates toggle now carries an inline per-affordance label. 1 new test.
+
+**Commit:** (this iteration)
+
+**Verification:** 33 AppSettingsTests pass (was 32, +1). Other suites unchanged.
+
+**Closed-status tally:** 129 (iter 109) + M176b = 130 items touched, all closed. Zero known bugs as of iter-110 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: sweep the remaining 44 Button declarations across step files + adoption sheets for similar caption-only status signaling.
+- **NEW**: Smelt/dflash invariant sweep per iter-106 template.
+
+**Next iteration should pick:** continue the Button/Toggle affordance sweep across the remaining wizard surfaces (step files, adoption sheets), OR pivot to Smelt/dflash.
