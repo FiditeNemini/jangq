@@ -4337,3 +4337,46 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: rapid-click debouncing on "Choose Folder…".
 
 **Next iteration should pick:** cross-boundary formula audit (extends iter-99's meta-lesson — find other places Swift ⇄ Python formulas could drift), OR another cheap M-item close.
+
+---
+
+## 2026-04-20 iteration 100 — M174 diskSizeSanityCheck dtype fix (iter-99 meta-lesson executed)
+
+**Angle:** Iter-99 M173 forecast: "audit other formulas for similar hardcoded assumptions." FIRST candidate checked: `PostConvertVerifier.diskSizeSanityCheck` (iter-40 M116). Iter-99's fix took ~30 min end-to-end; this iter took ~10 min because the helper and pattern were already in place — exactly the compound-interest meta-lesson iter-99 codified.
+
+**Deep trace walkthrough:**
+1. **Grep'd for `/ 16.0` and `* 16.0` across the Swift app.** Two hits: `PreflightRunner.estimateOutputBytes:48` (fixed iter-99) and `PostConvertVerifier.diskSizeSanityCheck:185` (the M174 target).
+2. **Confirmed the bug is the same class.** Same hardcoded BF16 assumption. For FP8 source: `expected = source × bits / 16` gives half-truth → ratio comes out 2× → tripping the ratio>2.0 "bloat" warn.
+3. **Computed a concrete trigger example:** 340 GB FP8 source (≈ DeepSeek V3.0 scale) → JANG_4K convert → actual output ~178 GB. Pre-M174: expected = 85 GB → ratio = 2.09 → WARN ("disk=178.00 GB, expected≈85.00 GB, ratio=2.09×"). User sees post-convert warning on a correctly-sized output.
+4. **Applied the fix reusing M173's helper.** `PreflightRunner.sourceBytesPerWeight(_:)` already mapped SourceDtype → Int. Added `sourceDtype: SourceDtype = .unknown` parameter to `diskSizeSanityCheck`. Formula becomes `expectedBytes = srcBytes × avgBits / (8 × bytesPerWeight)` — same shape as iter-99's fix. Caller in `run()` now passes `plan.detected?.dtype ?? .unknown`.
+5. **Default parameter preserves backwards compat.** Existing test callers that don't pass dtype get `.unknown` → `sourceBytesPerWeight` returns 2 → formula equivalent to pre-M174 behavior. Test `test_diskSizeSanity_default_dtype_param_is_bf16` pins this contract.
+6. **TDD:** wrote 3 tests first (FP8 / BF16 explicit / default). Red phase: compile errors from the unknown parameter. Fix applied. Green: 17/17 PostConvertVerifierTests pass (+3). No regression on PreflightRunnerTests (24/24) or AppSettingsTests (28/28).
+
+**Meta-lesson — iter-99's compound-interest prediction was RIGHT.** Iter-99 ended with "next iter should execute cross-boundary formula audit; fix will be faster because the pattern is known." Iter-100 delivered: ~10 min fix vs iter-99's ~30 min. The helper + pattern from the first fix made the second fix trivial. Rule confirmed: when refactoring one bug class, ALWAYS grep for other instances before ending the iter — subsequent fixes are 3× faster.
+
+**Meta-lesson — shared helpers are drift preventers, not just DRY win.** Before M173, two separate files each had their own hardcoded `/16.0`. Both rotted together when FP8 arrived. After M174, both call `PreflightRunner.sourceBytesPerWeight(_:)`. Future dtype additions (e.g., FP4 on Blackwell) only need to update the helper; all callers automatically pick up the new case. Extract shared math IMMEDIATELY on the second copy, not on the third or fourth.
+
+**Meta-lesson — "cross-boundary" includes within-language cross-file drift.** Iter-99 framed cross-boundary as Swift⇄Python. M174 shows it also applies Swift-file⇄Swift-file. A class of formula that shows up in 2+ places is a drift risk regardless of language boundary. Grep for the specific numeric constant (the `/16.0` pattern) to find all instances.
+
+**Items touched:**
+- M174 [x] — PostConvertVerifier.diskSizeSanityCheck now source-dtype-aware. Reuses PreflightRunner.sourceBytesPerWeight helper. 3 new regression tests. All existing tests unchanged.
+
+**Commit:** (this iteration)
+
+**Verification:** 17 PostConvertVerifierTests pass (was 14, +3). 24 PreflightRunner + 28 AppSettings unchanged.
+
+**Closed-status tally:** 116 (iter 99) + M174 = 117 items touched, all closed. Zero known bugs as of iter-100 end.
+
+**100 iters milestone reflection:** Started at iter-1 (M01) with a single audit item. Closed M01-M174 through 100 iters. Of those, ~60 were bugs found by deep-tracing (subprocess orphans, pipe deadlocks, silent coercions, stale state, etc.); ~30 were contract / documentation items verified; ~30 were meta-lesson codifications saved to long-term memory as feedback_*.md files (pipe-drain pattern, view-lifecycle cancel, error remediation, cross-boundary formulas). Memory files ensure the patterns survive across sessions and future codebases. The Ralph loop's "constantly make up new questions" framing drove audit angles I wouldn't have picked otherwise (window-close orphans, symlink support, token-leak surfaces, FP8 dtype hardcoding).
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: audit allocate.py for similar dtype-dependent math.
+- **NEW**: the 1.05 overhead constant — same for JANGTQ? Check.
+- **NEW**: grep for other hardcoded ratios / divisors / multipliers across Swift + Python.
+- **NEW**: M65 + M63 observation-only docs.
+
+**Next iteration should pick:** continue the cross-boundary formula sweep (allocate.py), OR review remaining M-items for another cheap close.

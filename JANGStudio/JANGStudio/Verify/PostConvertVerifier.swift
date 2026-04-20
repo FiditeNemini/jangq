@@ -138,6 +138,7 @@ struct PostConvertVerifier {
         checks.append(Self.diskSizeSanityCheck(
             outputDir: out,
             sourceBytes: plan.detected?.totalBytes ?? 0,
+            sourceDtype: plan.detected?.dtype ?? .unknown,
             jangCfg: jangCfg))
 
         return checks
@@ -154,6 +155,7 @@ struct PostConvertVerifier {
     static func diskSizeSanityCheck(
         outputDir: URL,
         sourceBytes: Int64,
+        sourceDtype: SourceDtype = .unknown,
         jangCfg: [String: Any]
     ) -> VerifyCheck {
         // Sum *.safetensors bytes in the output. Skip imatrix (iter 38 M114:
@@ -182,7 +184,16 @@ struct PostConvertVerifier {
                          hint: "couldn't compute estimate (missing source size or avg bits)")
         }
 
-        let expectedBytes = Double(sourceBytes) * avgBits / 16.0
+        // M174 (iter 100): cross-boundary formula audit per iter-99 M173's
+        // meta-lesson. Same `/ 16.0` hardcoding as the preflight estimator
+        // — assumes BF16 source. For FP8 source the "expected" came out
+        // HALF the truth → ratio was 2× → falsely warned that correctly-
+        // sized FP8-converted outputs were "bloated." Reuse the
+        // `PreflightRunner.sourceBytesPerWeight(_:)` helper so both formulas
+        // stay aligned; drift between them would re-introduce the class of
+        // bug.
+        let bytesPerWeight = Double(PreflightRunner.sourceBytesPerWeight(sourceDtype))
+        let expectedBytes = Double(sourceBytes) * avgBits / (8.0 * bytesPerWeight)
         let ratio = Double(diskBytes) / expectedBytes
         let diskGB = Double(diskBytes) / 1_000_000_000
         let expectedGB = expectedBytes / 1_000_000_000

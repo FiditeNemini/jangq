@@ -137,6 +137,55 @@ final class PostConvertVerifierTests: XCTestCase {
         XCTAssertTrue(check.hint?.contains("couldn't compute") ?? false)
     }
 
+    // MARK: - Iter 100 M174: diskSizeSanity must honor source dtype (FP8 / BF16)
+    //
+    // Same BF16-hardcoding bug iter-99 M173 fixed in
+    // PreflightRunner.estimateOutputBytes. The sanity check uses the
+    // same formula — 340 GB FP8 → JANG_4K produces ~178 GB output, but
+    // pre-M174 `expected = source × bits / 16` gives 85 GB → ratio 2.09×
+    // → false "bloat" warn on a correctly-sized output. User sees a
+    // warning, worries, potentially re-runs convert for nothing.
+
+    func test_diskSizeSanity_fp8_source_uses_8bit_divisor() throws {
+        // 340 GB FP8 source × 4 bits = 170 GB expected. Disk 178 GB → ratio 1.05×.
+        let dir = try sizeSanityDir("fp8-4bit")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 178_000_000_000)
+        let check = PostConvertVerifier.diskSizeSanityCheck(
+            outputDir: dir,
+            sourceBytes: 340_000_000_000,
+            sourceDtype: .fp8,
+            jangCfg: ["quantization": ["actual_bits_per_weight": 4.0]])
+        XCTAssertEqual(check.status, .pass, check.hint ?? "")
+    }
+
+    func test_diskSizeSanity_bf16_source_preserves_pre_M174_behavior() throws {
+        // Regression guard: BF16 source still uses /16 divisor. 1 GB × 4 bits = 256 MB.
+        let dir = try sizeSanityDir("bf16-regression")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 250_000_000)
+        let check = PostConvertVerifier.diskSizeSanityCheck(
+            outputDir: dir,
+            sourceBytes: 1_000_000_000,
+            sourceDtype: .bf16,
+            jangCfg: ["quantization": ["actual_bits_per_weight": 4.0]])
+        XCTAssertEqual(check.status, .pass, check.hint ?? "")
+    }
+
+    func test_diskSizeSanity_default_dtype_param_is_bf16() throws {
+        // Backwards compat: callers that don't pass sourceDtype (pre-M174
+        // signature) must get the BF16-assuming behavior. Avoids breaking
+        // any existing test that passes {sourceBytes, jangCfg} only.
+        let dir = try sizeSanityDir("default-dtype")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 250_000_000)
+        let check = PostConvertVerifier.diskSizeSanityCheck(
+            outputDir: dir,
+            sourceBytes: 1_000_000_000,
+            jangCfg: ["quantization": ["actual_bits_per_weight": 4.0]])
+        XCTAssertEqual(check.status, .pass, "default dtype must give same answer as bf16 explicit")
+    }
+
     func test_diskSizeSanity_accepts_v1_bitsField_fallback() throws {
         // Some older jang_config.json used "actual_bits" (no _per_weight suffix).
         // Helper must accept both so v1 outputs don't get falsely warned.
