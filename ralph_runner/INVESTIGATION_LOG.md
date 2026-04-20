@@ -4666,3 +4666,42 @@ The test shape is identical across the three: taxonomy docstring, coarse count, 
 - **NEW**: M67 + M68 + M69 Ralph runner lock-file edges — long-open observations that could get closed.
 
 **Next iteration should pick:** sweep Smelt / dflash / other Python subprojects for the anti-pattern, OR M67/M68/M69 observation-docs close.
+
+---
+
+## 2026-04-20 iteration 107 — M67 + M68 + M69 closures: ralph lock-file observation triple
+
+**Angle:** Iter-106 forecast: close M67/M68/M69 as observations. Each has a different disposition — M67 is verified-correct-by-design with a now-added test; M68 + M69 are pathological scenarios that can't become tests today.
+
+**Deep trace walkthrough:**
+1. **M67 — "reset doesn't remove stale lock":** inspected `cmd_reset` and `acquire_lock`. `cmd_reset` calls `acquire_lock` which ALREADY handles same-host+dead-PID reclaim (runner.py:228+). The observation noted "untested" — not "broken." Added `test_cmd_reset_recovers_from_stale_lock_with_dead_pid` writing a lock payload with PID=999999 (dead), asserting reset succeeds + cleans state + releases lock. Test passes. **Correct-by-design + now-tested.**
+2. **M68 — "PID reuse pathological":** genuine edge case requiring (a) crashed ralph, (b) same-PID recycled fast, (c) reused-PID process also looks ralph-like. macOS PID space makes this rare; JANG Studio doesn't run under launchd/systemd at dev time. Cannot become a test without running in a PID-recycle simulator. Documented in checklist with revisit trigger: "if users report BLOCKED by lock held by <pid> with no actual ralph running."
+3. **M69 — "NFS non-atomic O_EXCL":** kernel-level constraint. User-space can't fix; documented constraint. Today's default `RALPH_STATE_PATH` lives on local FS. Cannot become a test without an NFS mount in CI. Documented with revisit trigger: "cross-machine shared state." Workaround sketch (startup statfs check) captured for future implementer.
+
+**Meta-lesson — three dispositions for observation closures.** This iter demonstrates the full range:
+  1. **Verified-correct-by-design + added test** (M67) — the observation was "untested," not "wrong." Adding the test closes by proof.
+  2. **Pathological-can't-test + revisit trigger** (M68) — the scenario is real but reproducing it requires conditions outside CI. Document the trigger for future-me to watch for.
+  3. **Constraint-not-bug + workaround sketch** (M69) — the "bug" is a kernel-level fact; JANG Studio's response is a deployment constraint, not a code fix. Document + sketch the future workaround for when someone actually hits it.
+The three dispositions give a template for triaging open-observation items in the checklist. Future observation-sweep iters can categorize each item into one of these three then close appropriately.
+
+**Items touched:**
+- M67 [x] — verified + tested. 1 new ralph_runner test.
+- M68 [x] — documented pathology + revisit trigger.
+- M69 [x] — documented constraint + workaround sketch.
+
+**Commit:** (this iteration)
+
+**Verification:** 76 ralph_runner tests pass (was 75, +1). Other suites unchanged.
+
+**Closed-status tally:** 124 (iter 106) + M67 + M68 + M69 = 127 items touched, all closed. Zero known bugs as of iter-107 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: M80 audit baseline-comparison infrastructure (a4/a5 register-but-no-threshold — observation from iter-15).
+- **NEW**: M62 remaining 3 inert settings (logVerbosity / preAllocateRam / preAllocateRamGb) — observation close.
+- **NEW**: sweep Python projects outside jang_tools + ralph_runner for the dual-invariant pattern.
+
+**Next iteration should pick:** M62 remaining-inert-settings close OR M80 audit baseline observation OR fresh audit angle.

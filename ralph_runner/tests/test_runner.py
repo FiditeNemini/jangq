@@ -342,6 +342,36 @@ def test_cmd_reset_refuses_when_lock_held(state_path, tmp_path, monkeypatch, cap
     assert state_path.exists(), "reset must NOT delete state.json when blocked"
 
 
+def test_cmd_reset_recovers_from_stale_lock_with_dead_pid(state_path, tmp_path, monkeypatch, capsys):
+    """M67 (iter 14 observation, closed iter 107): if --next crashed and left
+    a stale lock file (same host, dead PID), --reset must successfully
+    acquire the lock via acquire_lock's stale-PID reclaim path, clear
+    state, and exit cleanly. Pre-M67 this was untested — we relied on
+    acquire_lock's stale-PID detection working without an integration test."""
+    lock = tmp_path / "ralph.lock"
+    monkeypatch.setattr(runner, "LOCK_PATH", lock)
+
+    # Simulate a stale lock from a crashed --next: same host, a PID that
+    # definitely doesn't exist anymore. Use PID=999999 which is far above
+    # the typical macOS/Linux PID max; _pid_alive will return False.
+    stale_holder = {
+        "pid": 999_999,
+        "host": os.uname().nodename,
+        "started_at": "2026-04-18T03:00:00",
+    }
+    lock.write_text(json.dumps(stale_holder))
+    state_path.write_text(json.dumps({"combos": {"a": {"status": "running"}}}))
+
+    rc = runner.cmd_reset()
+    assert rc == 0, "cmd_reset must recover from stale-PID lock"
+    captured = capsys.readouterr()
+    assert "BLOCKED" not in captured.out, "stale lock must not block reset"
+    assert "state reset" in captured.out
+    assert not state_path.exists(), "state.json should be cleared after successful reset"
+    # Lock was released after reset — file should be gone.
+    assert not lock.exists(), "lock file must be released after cmd_reset completes"
+
+
 def test_cmd_reset_clears_tmp_shrapnel(state_path, tmp_path, monkeypatch):
     """Successful reset cleans up any stranded state.json.tmp.* files left
     by a crashed save_state."""
