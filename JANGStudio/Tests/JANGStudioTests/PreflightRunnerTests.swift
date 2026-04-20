@@ -218,6 +218,53 @@ final class PreflightRunnerTests: XCTestCase {
             "Without a detected source size, the estimator must return 0 so preflight doesn't falsely fail.")
     }
 
+    // MARK: - Iter 101 M05: diskSpace disambiguates "no estimate" from "enough room"
+
+    func test_diskSpace_pre_inspection_warns_about_uncheckable_state() {
+        // Plan with output set but no detected source → estimator returns 0.
+        // Pre-M05 this produced `.pass` which visually matched a real passing
+        // check. M05 changes to `.warn` with "(no estimate yet)" hint so the
+        // user knows the system didn't actually verify sufficient space.
+        let src = tmp.appendingPathComponent("src-uninspected")
+        try? FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try? #"{"model_type":"llama"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = tmp.appendingPathComponent("out-uninspected")
+        plan.profile = "JANG_4K"
+        // detected stays nil → totalBytes unknown → estimator returns 0
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen, profiles: .frozen)
+        guard let disk = checks.first(where: { $0.id == .diskSpace }) else {
+            XCTFail("no diskSpace check in preflight output")
+            return
+        }
+        XCTAssertEqual(disk.status, .warn,
+            "pre-inspection diskSpace must warn, not silently pass — user needs to see 'no estimate' state")
+        XCTAssertTrue(disk.hint?.contains("no estimate") == true,
+            "warn hint must explain WHY the check is uncheckable. Got: \(disk.hint ?? "nil")")
+    }
+
+    func test_diskSpace_post_inspection_with_room_still_passes() {
+        // Regression guard: with a real detected source size + sufficient free
+        // space, the check must still produce `.pass` (M05 only changed the
+        // uncheckable branch).
+        let src = tmp.appendingPathComponent("src-with-shards")
+        try? FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try? #"{"model_type":"llama"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = tmp.appendingPathComponent("out-with-shards")
+        plan.profile = "JANG_4K"
+        // Tiny model — estimate will be comfortably under free space
+        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 10_000_000, shardCount: 1)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen, profiles: .frozen)
+        let disk = checks.first(where: { $0.id == .diskSpace })
+        XCTAssertEqual(disk?.status, .pass,
+            "with a real estimate + enough free space, diskSpace must still pass (regression guard)")
+    }
+
     // MARK: - Iter 99 M173: estimate honors source dtype (FP8 / BF16 / FP32)
 
     func test_estimateOutputBytes_fp8_source_uses_8bit_divisor() {

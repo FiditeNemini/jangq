@@ -172,8 +172,18 @@ struct PreflightRunner {
         let parent = dst.deletingLastPathComponent()
         let rv = try? parent.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         let free = Int64(rv?.volumeAvailableCapacityForImportantUsage ?? 0)
+        // M05 (iter 101): pre-M05, when `estimated <= 0` (source not yet
+        // inspected, or unknown profile blocking the estimator), this branch
+        // returned `.pass` with a plain "X GB free" hint — same UI state as
+        // a real positive check. User couldn't tell whether the system had
+        // actually verified sufficient space vs. simply couldn't compute an
+        // estimate yet. Now returns `.warn` with an explicit "(no estimate)"
+        // marker so the UX makes the uncheckable state visible. The gate
+        // stays functional (warn doesn't block preflight like fail would)
+        // but the user knows they should come back after Profile is picked.
         if estimated <= 0 {
-            return .init(id: .diskSpace, title: "Free disk space", status: .pass, hint: "\(free / 1_000_000_000) GB free")
+            return .init(id: .diskSpace, title: "Free disk space", status: .warn,
+                         hint: "\(free / 1_000_000_000) GB free (no estimate yet — pick source + profile for a real check)")
         }
         let ok = free >= estimated
         return .init(id: .diskSpace, title: "Free disk space",

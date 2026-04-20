@@ -185,7 +185,12 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
 - [ ] **M02** — Error path: user picks a folder that LOOKS model-shaped but is actually a different HF repo clone (e.g., a dataset with config.json). Verify inspect-source + recommend don't hard-crash.
 - [ ] **M03** — Drag-and-drop folder onto Step 1 — spec (design addendum Part 5) promises this; implementation uses only NSOpenPanel. Missing feature.
 - [ ] **M04** — Recents list for source dirs — missing. If user cancels mid-convert and wants to retry, they re-pick from scratch.
-- [ ] **M05** — PreflightRunner size estimate when `detected.totalBytes == 0` — current fallback returns pass with free-GB hint, but does the UI make clear that "no estimate" ≠ "safe"?
+- [x] **M05** — PreflightRunner size estimate when `detected.totalBytes == 0` — current fallback returns pass with free-GB hint, but does the UI make clear that "no estimate" ≠ "safe"?
+      **Close (iter 101):** pre-M05 the uncheckable branch returned `.pass` with `"X GB free"` — visually identical to a real positive check. User couldn't tell whether the system had actually verified sufficient space or simply couldn't compute an estimate yet (pre-inspection, unknown profile). Changed to `.warn` with `"X GB free (no estimate yet — pick source + profile for a real check)"`. Warn doesn't block preflight like fail would, but makes the uncheckable state UI-visible so the user knows to return to the check after picking source + profile.
+      **Tests (+2) in PreflightRunnerTests.swift:**
+      - `test_diskSpace_pre_inspection_warns_about_uncheckable_state` — plan with source + output + profile but no detected size → asserts `.warn` + `"no estimate"` in hint.
+      - `test_diskSpace_post_inspection_with_room_still_passes` — regression guard: with a real estimate + sufficient free space, still `.pass`.
+      **Evidence:** `JANGStudio/JANGStudio/Verify/PreflightRunner.swift:170-188`. 26 PreflightRunnerTests pass (was 24, +2).
 - [ ] **M06** — Conflict detection: if `config.json.model_type = minimax_m2` but `tokenizer_config.json.tokenizer_class = Qwen2Tokenizer`, does the app detect the conflict? Probably silent today.
 - [ ] **M07** — Nested model_type: all known patterns are `text_config.model_type`. Verify no real HF multimodal uses `llm_config.model_type` or similar non-standard keys. Current code only falls back to `text_config`.
 - [ ] **M08** — Model directory that's a symlink or on a read-only volume — does the rsync / copy during convert survive? What error does the user see?

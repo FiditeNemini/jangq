@@ -4380,3 +4380,44 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: M65 + M63 observation-only docs.
 
 **Next iteration should pick:** continue the cross-boundary formula sweep (allocate.py), OR review remaining M-items for another cheap close.
+
+---
+
+## 2026-04-20 iteration 101 — M05 closure: diskSpace disambiguate "no estimate" from "enough room"
+
+**Angle:** Iter-100 forecast listed the cross-boundary sweep continuation + "review remaining M-items." Tried the cross-boundary sweep on `_estimate_params_billion` and `allocate.py` first — findings were minor (GQA over-estimate ~1.3× on dense attention formula, independent `avg_bits_approx = comp + 0.1` formula in allocate.py that doesn't cross Swift). Diminishing returns, so pivoted to M05 — concrete UX fix.
+
+**Deep trace walkthrough:**
+1. **Traced `PreflightRunner.diskSpace` (lines 170-180).** When `estimated <= 0` (pre-inspection OR unknown profile blocks the estimator), returns `.pass` with `"X GB free"` hint.
+2. **Simulated the user flow:** user opens the wizard fresh. Source step: picks a folder → detection runs (~5s). Profile step: Preflight section shows "Free disk space ✓ 200 GB free". Looks like a green check. User hits "Start Conversion." Reality: during the ~5s detection window OR if profile is unknown, the check is actually ambiguous — system didn't verify anything.
+3. **Confirmed the ambiguity is user-visible.** The UI shows the same green ✓ regardless of whether the gate actually ran its math or short-circuited. The "X GB free" hint gives a number that LOOKS like a meaningful check result.
+4. **Decided on `.warn` instead of `.fail`:** blocking preflight would be user-hostile (detection takes 5s; the user shouldn't be stuck). `.warn` is the right level — visible distinction, not a blocker, self-healing once inspection completes + profile picked.
+5. **Fix:** single-branch edit. Added "(no estimate yet — pick source + profile for a real check)" to the hint, changed status from `.pass` to `.warn`. Inline rationale comment explaining why.
+6. **Tests:** two new tests covering the uncheckable branch + regression guard for the real-check branch. TDD green-first because the change is trivial; the functional shape of the test is the primary value.
+
+**Meta-lesson — cross-boundary sweeps have diminishing returns after the first 2-3 hits.** Iter-99 + iter-100 both yielded high-value fixes (M173 + M174). Iter-101's attempt to extend to `_estimate_params_billion` found only minor issues (GQA over-count, MoE-shared-expert under-count) that are within the ratio thresholds. Rule: when a sweep pattern stops yielding user-visible bugs, pivot to a different audit angle. Don't chase incremental correctness below the threshold of user-observable impact.
+
+**Meta-lesson — ambiguous "pass" states are a UX anti-pattern.** A check that passes because it can't evaluate is different from a check that passes because it evaluated positively — but users can't distinguish them visually if they use the same color/icon. Three-state UX (pass / warn / fail) gives room to make the distinction; two-state (pass/fail) can't. Rule: whenever a gate has an "uncheckable" short-circuit, the UI state for that branch must be visually distinct from a real positive check. Applies broadly beyond this specific gate.
+
+**Meta-lesson — checklist-item closures don't need to find new bugs.** M05 was flagged as an observation in iter-14. Iter-101 closes it with a small UX polish. Not every iter needs to find a gnarly new bug — closing existing open items with cheap fixes keeps the checklist current and prevents the backlog from rotting.
+
+**Items touched:**
+- M05 [x] — diskSpace warn-with-explanation for uncheckable pre-inspection state. 2 new regression tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 26 PreflightRunnerTests pass (was 24, +2). PostConvertVerifier 17, AppSettings 28 unchanged.
+
+**Closed-status tally:** 117 (iter 100) + M05 = 118 items touched, all closed. Zero known bugs as of iter-101 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: M65 / M63 observation-only documentation close.
+- **NEW**: M108 try? sweep spot-check (~27 remaining sites, periodic review).
+- **NEW**: audit other 3-state UX checks for the same ambiguous-pass pattern M05 fixed.
+- **NEW**: allocate.py independent estimator vs main predict() — drift risk.
+
+**Next iteration should pick:** close M63/M65 observation-only items together in one small doc iter, OR audit other 3-state UX checks for the M05 ambiguous-pass pattern.
