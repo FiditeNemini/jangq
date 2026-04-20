@@ -5618,3 +5618,52 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW:** apply M190 structural-slicing pattern to other moving-line allowlists. grep tests/ for `range(...)` in allowlist context.
 
 **Next iteration should pick:** query-param auth audit (security continuation, naturally extends M191's CORS thinking), OR extend rate-limit to /retry+/admin/purge (simpler closed-form fix), OR runtime-log secrets audit.
+
+---
+
+## 2026-04-20 iteration 129 — M192 jang-server query-param auth restricted to GET + docs hygiene sweep
+
+**Angle:** iter-128 forecast top-priority: query-param auth (`?api_key=<token>`) leaks tokens into access logs, browser history, proxy logs, and terminal history. Natural security continuation of M191's CORS work (both are "audit the auth posture" findings).
+
+**Deep trace walkthrough:**
+1. **Mapped the leak vectors.** (a) uvicorn + nginx log full URL at INFO (query string included by default); (b) browsers record URL in history store including query strings; (c) Cloudflare / other CDNs log full request URL; (d) curl puts the full URL in .bash_history. Auth-in-URL is the single most common "legit accidental token leak" source in Python web apps.
+2. **Considered removing query-param auth entirely.** Blocked by: browsers' EventSource API has no way to set custom headers. If we kill query-param auth, any SSE browser client (like iter-100-era JANGStudio sidebar tail-logs view) breaks. SSE is the legit exception that prevents a clean rip-out.
+3. **Picked the method-gated design.** Query-param auth allowed ONLY on GET requests. POST/DELETE/PATCH without Bearer header → empty token → 401. Covers the worst cases (write methods carrying tokens in URLs) while preserving the narrow legit SSE use case.
+4. **Audited API.md** to see if the docs described the new posture. Found three independent issues:
+   - Stale endpoint list (post-M179 every GET requires auth; docs still listed them as "Unprotected" from pre-M179).
+   - `hf_MGS...` partial-token fragment in the HF_UPLOAD_TOKEN default column. This is the literal prefix of the iter-116-leaked token (`hf_MGSmwyHPzKFd...`). Repo-wide M182 sweep requires 20+ char matches so 3-char fragments slip through — scanner could correlate against a leak database.
+   - Query-param auth listed as equal-status with Bearer (no security annotation).
+   Fixed all three in one pass.
+5. **Wrote 6 pin tests** including docstring pins + docs pins. The docstring pins are important because without them, a future well-meaning refactor could simplify the GET branch out of existence and silently break browser SSE. The docs test (`test_docs_api_md_has_no_token_fragment`) is a stricter scanner than M182 (2+ chars vs 20+) because docs are for humans and don't need illustrative shapes.
+6. **Ran suite.** 46/46 pass (was 40, +6). No regressions.
+
+**Meta-lesson — auth-in-URL is the highest-probability token-leak vector in web APIs.** Every `curl http://api/endpoint?api_key=ABC` commits the key to shell history. Every browser nav records the URL including query strings. Every proxy in front logs it at access-log level. Even with TLS encrypting the URL in transit, the server and intermediate proxies still log it in plaintext at rest. **Rule: prefer Authorization header exclusively. Query-param auth is a narrow compat concession — restrict by HTTP method or endpoint path, never allow on write methods (POST/PUT/DELETE/PATCH).**
+
+**Meta-lesson — docs hygiene is part of the security audit surface.** Pre-M192 API.md had three independently-bad issues (stale endpoint list, token fragment, equal-status auth methods). A code-only audit catches none of them. **Rule: when auditing security posture, include the docs in the diff. Stale docs mislead client authors; fragments narrow attacker searches; feature-equality listing encourages less-safe paths.** Doc-scope tests (2-char token prefix check, "GET-only" annotation pin) are cheap high-value layers.
+
+**Meta-lesson — document the narrow legit exception so future refactors don't kill it.** Without the "EventSource/SSE compatibility" carve-out explicitly documented in check_auth's docstring, a future audit could see the GET branch as dead-weight and remove it. The docstring + the docstring-pin test together make the rationale survive refactors. **Rule: when a security restriction has a narrow legit exception, document its rationale in the code where it's applied, AND add a test that pins the documentation. The test turns the rationale into a hard requirement for any future edit.** Inverse of the usual "tests shouldn't pin comments" principle — for security carve-outs, the comment IS load-bearing.
+
+**Meta-lesson — layered invariants with different thresholds.** M182 repo-wide sweep uses 20+ char regex to avoid false positives on illustrative `hf_abc` shapes in code. M192 docs test uses 2+ char regex because docs are for humans and shouldn't contain illustrative token shapes (just placeholders like `(empty)` or `<your_hf_token>`). Different contexts deserve different strictness. **Rule: when the same pattern applies at different layers, scope the strictness to each layer's tolerance. Code can carry illustrative examples; user-facing docs cannot.**
+
+**Items touched:**
+- M192 [x] — query-param auth restricted to GET. API.md docs hygiene sweep: endpoint list, token fragment, method annotation. 6 new regression tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 46 jang-server tests pass (was 40, +6).
+
+**Closed-status tally:** 145 (iter 128) + M192 = 146 items touched, all closed. Zero known bugs as of iter-129 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (high priority — security):** runtime-log secrets audit. grep server.py's `log.info/warning/error/debug` calls for token/secret shapes. iter-118 M183 covers SOURCE; this covers RUNTIME (log lines at format-time). Especially: does `log.info(f"submitted job {payload}")` ever include the Authorization header or query_params dict?
+- **NEW:** extend the rate-limit dependency to /retry + /admin/purge (carried from iter-127 — /retry can spawn subprocess work = real DoS vector).
+- **NEW:** apply M190 structural-slicing pattern to other moving-line allowlists in tests/.
+- **NEW:** audit jang-server's 401 / 403 / 500 response bodies for info leaks (path fragments, env hints, Python tracebacks).
+- **NEW:** audit jang-server's background task cleanup on process shutdown — does `finally` run for SSE connections on SIGTERM? Orphaned connections would re-leak via FD exhaustion on restart.
+
+**Next iteration should pick:** runtime-log secrets audit (natural M192 follow-on — covers the SECOND-most-common token leak vector after URLs), OR extend rate-limit to /retry+/admin/purge (quick win), OR audit error-response info leaks.

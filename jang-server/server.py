@@ -640,16 +640,37 @@ def _job_to_dict(job: Job) -> dict:
 # ---------------------------------------------------------------------------
 
 async def check_auth(request: Request):
-    """API key check. Skip if JANG_API_KEYS is empty."""
+    """API key check. Skip if JANG_API_KEYS is empty.
+
+    M192 (iter 129): query-param auth (`?api_key=<key>`) is restricted
+    to GET requests only. Tokens in POST/DELETE URLs leak into (1)
+    server access logs, (2) browser history, (3) proxy logs, (4)
+    terminal history (`curl` commands in .bash_history). For non-GET
+    requests the Authorization header is now the only accepted path.
+    Query-param auth on GET is retained as a compatibility concession
+    for browsers' EventSource API (can't set custom headers on SSE
+    connections) — operators using SDKs or CLIs should migrate to
+    `Authorization: Bearer <key>` even on GETs.
+    """
     if not API_KEYS:
         return
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:]
-    else:
+    elif request.method == "GET":
+        # SSE EventSource compatibility only. Log at DEBUG-equivalent
+        # (not WARNING) because legit SSE browser clients have no
+        # alternative and don't want to spam operator logs.
         token = request.query_params.get("api_key", "")
+    else:
+        token = ""
     if token not in API_KEYS:
-        raise HTTPException(401, "Invalid or missing API key")
+        raise HTTPException(
+            401,
+            "Invalid or missing API key. Use `Authorization: Bearer <key>` "
+            "(query-param `?api_key=<key>` is accepted only on GET requests "
+            "for EventSource/SSE compatibility).",
+        )
 
 
 # ---------------------------------------------------------------------------
