@@ -601,6 +601,17 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `test_recommend_dtype_below_512_stays_auto` (regression guard): 256-expert must stay on auto dtype — don't over-force bfloat16 on smaller MoEs.
       **Evidence:** `jang-tools/jang_tools/recommend.py:313-332`. 305 Python tests pass (was 302, +3). Swift 136 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M132 (peer-helper sweep: JANGTQ converter unknown-profile handling)** — Iter 53's meta-lesson about "decision-overlap zones" (same question asked in multiple places, drifted implementations) applied to the two JANGTQ converters. `convert_minimax_jangtq.py:47-48` and `convert_qwen35_jangtq.py:99` both take a `PROFILE` string and map to `EXPERT_BITS` via a nearly-identical dict. **Divergent error handling:**
+      - MiniMax: `if _PROFILE_NORM not in _PROFILE_BITS: raise ValueError(...)`. Unknown profile → loud failure.
+      - Qwen35: `EXPERT_BITS = _EXPERT_BITS_BY_PROFILE.get(_PROFILE_NORM, 2)`. Unknown profile → **silently defaults to 2-bit.** Output labeled with whatever garbage profile the user typed, but actually 2-bit content. No warning.
+      **Impact:** A user typing `--profile JANGTQ44` (meant JANGTQ4) for Qwen3.6 gets a 2-bit conversion labeled JANGTQ44 in jang_config with no error. Model size ≈ 2-bit model; user expected 4-bit quality; runtime output degraded; no diagnostic pointing at the typo.
+      **Fix (iter 54):** Mirror MiniMax's guard into Qwen35. Explicit `if _PROFILE_NORM not in _EXPERT_BITS_BY_PROFILE: raise ValueError(...)`. Same error message shape.
+      **Tests (+3) in `tests/test_jangtq_converter_profile_parity.py`:** uses source-inspection (both converters do heavy MLX work at module load — can't import in-process cheaply). Three pins:
+      - Both converters must contain `raise ValueError` in the profile-bits block.
+      - Neither converter may use `dict.get(_PROFILE_NORM, <int>)` silent-fallback pattern (regex-blocked in source).
+      - Both converters' `JANGTQ*` dict keys must match — prevents divergence (e.g., one converter adding a new legacy alias without the other).
+      **Evidence:** `jang-tools/jang_tools/convert_qwen35_jangtq.py:92-105`. 308 Python tests pass (was 305, +3). Swift 136 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

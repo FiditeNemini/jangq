@@ -2170,3 +2170,44 @@ Pivoted to re-audit M121. Iter 45 closed the text path but the VL path is a SEPA
 - **NEW**: peer-helper sweep on Swift wizard step files — Source/Architecture/Profile/Method/Publish/Verify Step transitions.
 
 **Next iteration should pick:** M132 hadamard brittleness (tight scope, directly continues iter-53's "decision-overlap zones" meta-lesson) OR Swift wizard step peer-helper sweep (new territory).
+
+## 2026-04-20 iteration 54 — M132 JANGTQ converter unknown-profile handling parity
+
+**Angle:** Iter 53's meta-lesson: "find decision-overlap zones — same question asked in multiple places, drifted implementations." Iter 53 fixed one in `_recommend_dtype`. Iter 54 extends. Started by investigating `_recommend_hadamard`'s hardcoded profile list (iter 53's forecast M132 candidate) — concluded the list is currently exhaustive and the decision is also gated per-tensor in convert.py (`if hadamard and bits >= 3:`), so the double-check is belt-and-suspenders, not a bug.
+
+Pivoted to a sharper candidate. Grepped for other hardcoded profile → bits mappings. Found **two**: `convert_minimax_jangtq.py:41-45` (`_PROFILE_BITS`) and `convert_qwen35_jangtq.py:92-96` (`_EXPERT_BITS_BY_PROFILE`). Same data, same role. Diff'd the lookup + error path:
+
+**Deep trace walkthrough:**
+1. MiniMax (convert_minimax_jangtq.py:47-48): `if _PROFILE_NORM not in _PROFILE_BITS: raise ValueError(f"unknown profile {PROFILE!r}; expected one of {sorted(...)}")`. Correct.
+2. Qwen35 (convert_qwen35_jangtq.py:99): `EXPERT_BITS = _EXPERT_BITS_BY_PROFILE.get(_PROFILE_NORM, 2)`. Silent fallback to 2.
+3. **Failure scenario:** User runs `python -m jang_tools convert_qwen35_jangtq --profile JANGTQ44 …` (typo). Qwen converter's `.get(_, 2)` returns 2. `EXPERT_BITS = 2`. `PROFILE = f"JANGTQ{EXPERT_BITS}" = "JANGTQ2"`. So the user SEES it corrected to JANGTQ2 at the print statements — but only IF they're watching console. Actually wait, re-reading, `PROFILE = f"JANGTQ{EXPERT_BITS}"` at line 100 canonicalizes. So JANGTQ44 → JANGTQ2 (silently!). No error. The output lands with `profile: JANGTQ2` in jang_config, which is internally consistent but NOT what the user asked for. The user thought they said "4-bit" (their typo was 44); got 2-bit output.
+4. **Why peers drifted:** both converters were written in series; Qwen35 came first (per git history), MiniMax came later and added the `raise` guard. The Qwen35 converter was never updated to match. Classic "new work catches a bug the old work has."
+5. **Fix is mechanical:** mirror MiniMax's raise-guard. One-line semantic change, same error message shape.
+6. **Test strategy via source inspection, not import:** the converters have module-level MLX operations that run on import. Importing them in unit tests would need full MLX setup. Instead, read the .py files as text and grep for the code-shape invariants:
+   - Both must contain `raise ValueError` in the profile-bits block.
+   - Neither may use `dict.get(_PROFILE_NORM, <int>)` silent-fallback pattern (regex-blocked).
+   - Both converters' `JANGTQ*` keys must match (prevents future divergence).
+   This is the same source-inspection pattern as iter-46 M122's "no assert on size constants" regression guard. Works well for code-shape invariants that don't fit cleanly into runtime tests.
+
+**Meta-lesson reinforced.** "New work catches a bug the old work has" is a common source of peer-helper drift. When adding a second implementation of a pattern, it's natural to do it better (the author has more context). But without going back to backport the improvement to the first implementation, divergence accumulates. Pattern: whenever you author a 2nd peer, grep for the 1st peer and retrofit the improvement.
+
+**Items touched:**
+- M132 [x] — Qwen35 JANGTQ converter now rejects unknown profiles.
+
+**Commit:** (this iteration)
+
+**Verification:** 308 jang-tools tests pass (was 305, +3 for converter parity suite). Swift 136 + ralph 73 unchanged.
+
+**Closed-status tally:** 66 (iter 53) + M132 = 67 closed / 100 total = 67.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation — needs live test)
+- **NEW**: peer-helper sweep on Swift Wizard steps (source/architecture/profile/method/publish/verify — 6 step files with similar structures).
+- **NEW**: peer-helper sweep on `estimate_model.py` vs `recommend._estimate_params_billion` (both compute param counts from config — same decision-overlap class).
+- **NEW**: grep-audit class — methods that take a `profile` string parameter in both Swift and Python. Any missing validation?
+
+**Next iteration should pick:** `estimate_model.py` vs `_estimate_params_billion` peer-helper (same pattern as iter 54, different module — likely finds asymmetry given how often we're finding them) OR Swift Wizard step sweep (new territory).

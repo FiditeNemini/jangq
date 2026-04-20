@@ -96,7 +96,17 @@ try:
     }
     # Case-insensitive lookup; canonicalize to JANGTQ{N}.
     _PROFILE_NORM = PROFILE.upper()
-    EXPERT_BITS = _EXPERT_BITS_BY_PROFILE.get(_PROFILE_NORM, 2)
+    # M132 (iter 54): peer-helper parity with convert_minimax_jangtq.py:47-48.
+    # The MiniMax converter raises ValueError for unknown profiles; this one
+    # used to SILENTLY fall back to 2-bit on any unrecognized name — so a
+    # typo like "JANGTQ44" (meant JANGTQ4) would produce a 2-bit conversion
+    # with a 4-in-its-name label in jang_config. No error, no warning, just
+    # a quality regression mislabeled as something higher.
+    if _PROFILE_NORM not in _EXPERT_BITS_BY_PROFILE:
+        raise ValueError(
+            f"unknown profile {PROFILE!r}; expected one of {sorted(_EXPERT_BITS_BY_PROFILE)}"
+        )
+    EXPERT_BITS = _EXPERT_BITS_BY_PROFILE[_PROFILE_NORM]
     PROFILE = f"JANGTQ{EXPERT_BITS}"
 
 
