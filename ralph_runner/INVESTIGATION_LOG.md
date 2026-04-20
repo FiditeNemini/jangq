@@ -2384,3 +2384,49 @@ Pivoted to a sharper candidate. Grepped for other hardcoded profile → bits map
 - **NEW**: peer-helper sweep on Python `publish.py` vs `convert.py` (both spawn subprocesses + handle HF API).
 
 **Next iteration should pick:** `.task` modifier audit OR peer-helper sweep on publish/convert. Both are natural extensions.
+
+## 2026-04-20 iteration 59 — M137 Publish race: late-Cancel on completed upload shows false "cancelled"
+
+**Angle:** Iter 58 audited `Task { }` sites. Iter 59 started with the complement — `.task` modifier audit — to see if there are other Task discipline bugs. 7 `.task` sites, none with runtime bugs (all are auto-cancelled by view lifecycle or self-guarded). But while inspecting PublishToHuggingFaceSheet for its `.task`, I noticed `runPublish()`'s cancel logic had a subtle timing race.
+
+**Deep trace walkthrough:**
+1. **Current code (pre-iter-59):**
+   ```swift
+   do {
+       for try await event in publishWithProgress(...) { apply(event) }
+       if wasCancelled { errorMessage = "Upload cancelled..." }
+       else            { publishResult = ...; token = "" }
+   } catch {
+       if !(error is CancellationError) { errorMessage = error.localizedDescription }
+   }
+   ```
+2. **Race scenario:** User clicks Publish → upload starts, takes 30s. At 29.999s the final chunk uploads successfully, HF returns success, Python emits final event. Swift's `for try await` loop consumes that event, apply() runs, loop condition evaluates — stream is exhausted, loop exits normally. Meanwhile user, impatient or second-guessing, hits Cancel right as that final event landed. Button handler runs concurrently: `wasCancelled = true; publishTask?.cancel()`. By the time cancel() propagates to the Task, it's already past the for-await and executing the `if wasCancelled` check. `wasCancelled == true` → shows "Upload cancelled" error. But the HF repo ACTUALLY HAS THE FILES. User sees an error, thinks upload failed, tries to delete the HF repo and re-upload. Wasted bandwidth + confusion.
+3. **Why the pre-fix code was subtly wrong:** it conflated user INTENT (`wasCancelled` button click) with ACTUAL cancellation outcome. The authoritative "did we stop before the work finished" signal is `CancellationError` thrown by the await. That throw only happens when the task was cancelled AND the continuation hadn't yet resumed with the final value.
+4. **Timing breakdown:**
+   - Case A (cancel wins): stream throws CancellationError → catch branch → errorMessage shown. User sees "cancelled". ✓
+   - Case B (natural completion, no cancel ever pressed): loop exits, wasCancelled=false, success branch. ✓
+   - Case C (late cancel): loop exits naturally, wasCancelled=true (set by button but too late), success-branch's `if wasCancelled` check fires error banner. ✗
+5. **Fix: always treat natural-exit as success.** Move the success path OUT of the `if wasCancelled` condition. Use `catch is CancellationError` specifically to catch pre-completion cancels.
+6. **UX refinement:** when `wasCancelled == true` on the success path, append a note to progressLog: "Cancel click landed after the final upload event — HF repo is complete." So the user who hit Cancel sees WHY they got success anyway.
+
+**Meta-lesson — distinguish user INTENT from system OUTCOME.** The `wasCancelled` flag captures button-click intent. `CancellationError` captures whether cancellation actually stopped the work. Using intent as the outcome signal introduces races. General rule: when an async operation can complete BEFORE a cancel request lands, the cancel request is "late" — trust the operation's outcome, not the user's intent.
+
+**Items touched:**
+- M137 [x] — Publish success/cancel logic refactored to use CancellationError as authoritative signal.
+
+**Commit:** (this iteration)
+
+**Verification:** 145 Swift tests pass (was 144, +1 for M137 source-inspection). Python 310 + ralph 73 unchanged.
+
+**Closed-status tally:** 71 (iter 58) + M137 = 72 closed / 100 total = 72.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (same domain as M137 — adjacent)
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW grep-audit class**: intent-flag-vs-outcome mismatches — Swift flags like `wasCancelled`, `isCancelled`, `shouldStop` used as outcome signals instead of checking async error kinds. Natural continuation of iter 59's meta-lesson.
+- **NEW**: peer-helper sweep on Python publish.py vs convert.py (from iter 57 forecast; still pending).
+
+**Next iteration should pick:** intent-flag grep-audit (directly applies this iter's meta-lesson to find more instances) OR publish/convert peer-helper sweep.

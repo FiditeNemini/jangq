@@ -173,6 +173,48 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M137 (iter 59): Publish sheet race — late-Cancel shouldn't show
+    // "cancelled" on an already-completed upload.
+    //
+    // Pre-iter-59: runPublish() checked `if wasCancelled { error } else
+    // { success }` AFTER the for-await loop exited naturally. If the user
+    // clicked Cancel microseconds after the final upload event landed,
+    // wasCancelled got set to true, loop exited normally, user saw
+    // "Upload cancelled" despite the HF repo having the complete files.
+    // Post-iter-59: CancellationError catch is the authoritative cancelled
+    // branch. Natural loop exit is always treated as success.
+
+    func test_publishSheet_treats_natural_completion_as_success() throws {
+        // Reach into the sheet source file (peer to the step files).
+        let parent = Self.stepsRoot.deletingLastPathComponent()
+        let url = parent.appendingPathComponent("PublishToHuggingFaceSheet.swift")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        // After the for-await loop, the code must NOT branch on
+        // `if wasCancelled` before setting publishResult. The
+        // authoritative cancel signal is `catch is CancellationError`.
+        XCTAssertTrue(
+            src.contains("catch is CancellationError"),
+            """
+            PublishToHuggingFaceSheet.runPublish must catch CancellationError
+            specifically to signal user-initiated cancel. Without this, a
+            late-cancel click (post-completion) would set wasCancelled=true
+            and the user would see "cancelled" despite the HF repo having
+            the files. See M137 in iter 59.
+            """
+        )
+        // Verify the buggy pre-iter-59 pattern is gone: there must NOT be
+        // an `if wasCancelled {` immediately followed by errorMessage =
+        // "Upload cancelled" inside the do-block (pre-for-await-loop-exit
+        // natural branch).
+        let hasBuggyPattern = src.contains(#"if wasCancelled {"#) &&
+            src.range(of: #"if wasCancelled \{\s*\n\s*//[^\n]*\n\s*errorMessage"#,
+                      options: .regularExpression) != nil
+        XCTAssertFalse(
+            hasBuggyPattern,
+            "pre-iter-59 pattern `if wasCancelled { errorMessage = ... }` on the natural-completion path re-introduced."
+        )
+    }
+
     func test_sourceStep_guards_mutations_with_isCancelled() throws {
         let src = try stepSource("SourceStep.swift")
         // detectAndRecommend must have `guard !Task.isCancelled else { return }`

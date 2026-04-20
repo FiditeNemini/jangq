@@ -266,33 +266,43 @@ struct PublishToHuggingFaceSheet: View {
                 isPrivate: isPrivate, token: token) {
                 apply(event: event)
             }
+            // M137 (iter 59): reaching here means the stream completed
+            // without throwing — upload succeeded on the HF side. Even if
+            // `wasCancelled == true` (user pressed Cancel very late, after
+            // the final chunk was acknowledged), the repo now HAS the
+            // files. Showing "Upload cancelled" would be a false negative
+            // that makes the user think they need to re-upload.
+            //
+            // The pre-iter-59 check `if wasCancelled { error } else { success }`
+            // had a real race: click Cancel at the same microsecond as the
+            // final event lands → loop exits normally → wasCancelled=true
+            // from the button handler → user sees "Upload cancelled" despite
+            // the upload having completed. CancellationError dispatch is the
+            // authoritative "we stopped before the work finished" signal.
+            publishResult = PublishResult(
+                dryRun: false,
+                repo: repoName,
+                url: "https://huggingface.co/\(repoName)",
+                commitUrl: "https://huggingface.co/\(repoName)",
+                filesCount: nil,
+                totalSizeBytes: Int(progressBytes?.total ?? 0))
+            // M15 (iter 17): wipe the token from @State after a successful
+            // publish. If the user leaves this sheet open on their screen,
+            // a passerby can't see / copy the token from the SecureField's
+            // buffer. On failure we KEEP the token — the user needs to retry
+            // and retyping it is worse UX than a ~30-second exposure window.
+            token = ""
             if wasCancelled {
-                // M96 (iter 30): user-initiated cancel. Don't claim success.
-                errorMessage = "Upload cancelled. The HuggingFace repo may contain partial files — delete or overwrite before retrying."
-            } else {
-                // Stream finished without throwing — upload succeeded. The Python
-                // side printed the final PublishResult JSON to stdout; in the
-                // streaming path we reconstruct it from what we know.
-                publishResult = PublishResult(
-                    dryRun: false,
-                    repo: repoName,
-                    url: "https://huggingface.co/\(repoName)",
-                    commitUrl: "https://huggingface.co/\(repoName)",
-                    filesCount: nil,
-                    totalSizeBytes: Int(progressBytes?.total ?? 0))
-                // M15 (iter 17): wipe the token from @State after a successful
-                // publish. If the user leaves this sheet open on their screen,
-                // a passerby can't see / copy the token from the SecureField's
-                // buffer. On failure we KEEP the token — the user needs to retry
-                // and retyping it is worse UX than a ~30-second exposure window.
-                token = ""
+                // Document the race outcome in the progress log so the user
+                // who hit Cancel understands the upload beat them.
+                progressLog.append("[note] Cancel click landed after the final upload event — HF repo is complete.")
             }
+        } catch is CancellationError {
+            // M137: user-initiated cancel that landed before the stream
+            // completed. This is the authoritative "cancelled" branch.
+            errorMessage = "Upload cancelled. The HuggingFace repo may contain partial files — delete or overwrite before retrying."
         } catch {
-            // Swallow CancellationError silently — surfaced via wasCancelled
-            // branch above. Other errors propagate as before.
-            if !(error is CancellationError) {
-                errorMessage = error.localizedDescription
-            }
+            errorMessage = error.localizedDescription
         }
         isPublishing = false
     }

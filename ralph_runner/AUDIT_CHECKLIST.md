@@ -660,6 +660,22 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Audit class result (8-iter series M135+M136):** 2 real bugs in 17 `Task { … }` sites. Pattern documented for future iters: grep `Task\s*\{`, triage each for (a) handle storage when re-entrant, (b) trigger-gated by state that outlives the task, (c) self-guard inside the called function.
       **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/RunStep.swift:95-117`. 144 Swift tests pass (was 143, +1). Python 310 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M137 (Publish sheet race: late-Cancel click on completed upload falsely shows "cancelled")** — Iter 58's `.task` audit was clean for runtime bugs but inspecting PublishToHuggingFaceSheet's cancel path surfaced a timing race. `runPublish()` was:
+      ```swift
+      do {
+          for try await event in publishWithProgress(...) { apply(event) }
+          if wasCancelled { errorMessage = "Upload cancelled..." }
+          else            { publishResult = ...; token = "" }
+      } catch {
+          if !(error is CancellationError) { errorMessage = ... }
+      }
+      ```
+      **Race:** user clicks Cancel AT THE SAME MICROSECOND the final upload event lands. `wasCancelled = true` from the button handler. For-await loop exits normally (natural completion). `if wasCancelled` branch fires, shows "Upload cancelled" despite the HF repo having the complete files. User thinks they need to re-upload.
+      **Why the pre-fix code was subtly wrong:** it used `wasCancelled` (a button-intent flag) as the authoritative "did we stop early" signal. The authoritative signal is `CancellationError` thrown by the for-await loop — that ONLY fires when the task was cancelled BEFORE the work finished.
+      **Fix (iter 59):** Move the success path out of the `if wasCancelled` branch — natural loop exit is always success. Use `catch is CancellationError` specifically for user-initiated cancels. The `wasCancelled` flag is now used only for a progress-log note on the success path ("Cancel click landed after the final upload event — HF repo is complete") so the user who hit Cancel understands why they see success.
+      **Tests (+1) in `WizardStepContinueGateTests.swift`:** `test_publishSheet_treats_natural_completion_as_success` — source-inspection pin verifying `catch is CancellationError` is present AND the old `if wasCancelled { errorMessage = ... }` pattern (inside the do-block natural path) is gone.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/PublishToHuggingFaceSheet.swift:263-302`. 145 Swift tests pass (was 144, +1 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button
