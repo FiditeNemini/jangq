@@ -1,0 +1,222 @@
+// JANGStudio/JANGStudio/Models/AppSettings.swift
+import Foundation
+import Observation
+
+enum LogVerbosity: String, Codable, CaseIterable, Identifiable {
+    case normal, verbose, debug
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .normal: return "Normal"
+        case .verbose: return "Verbose"
+        case .debug: return "Debug"
+        }
+    }
+}
+
+enum UpdateChannel: String, Codable, CaseIterable, Identifiable {
+    case stable, beta
+    var id: String { rawValue }
+    var displayName: String { rawValue.capitalized }
+}
+
+/// All user-configurable settings. Persisted to UserDefaults under "JANGStudioSettings".
+/// Every value has a sensible default and can be reset via `reset()`.
+@Observable
+@MainActor
+final class AppSettings {
+    // MARK: - General
+    var defaultOutputParentPath: String = ""   // empty = use source's parent
+    var defaultProfile: String = "JANG_4K"
+    var defaultFamily: String = "jang"
+    var defaultMethod: String = "mse"
+    var defaultHadamardEnabled: Bool = false
+    var defaultCalibrationSamples: Int = 256
+    var outputNamingTemplate: String = "{basename}-{profile}"
+    var autoDeletePartialOnCancel: Bool = false
+    var revealInFinderOnFinish: Bool = true
+
+    // MARK: - Advanced
+    var pythonOverridePath: String = ""   // empty = use bundled
+    var customJangToolsPath: String = ""  // empty = use bundled jang_tools
+    var logVerbosity: LogVerbosity = .normal
+    var jsonlLogRetentionLines: Int = 10_000
+    var logFileOutputDir: String = ""     // empty = ~/Library/Logs/JANGStudio
+    var tickThrottleMs: Int = 100
+    var maxBundleSizeWarningMb: Int = 450
+
+    // MARK: - Performance
+    var mlxThreadCount: Int = 0            // 0 = auto (system cpu count)
+    var metalPipelineCacheEnabled: Bool = true
+    var preAllocateRam: Bool = false
+    var preAllocateRamGb: Int = 4
+    var convertConcurrency: Int = 1
+
+    // MARK: - Diagnostics
+    var copyDiagnosticsAlwaysVisible: Bool = true
+    var anonymizePathsInDiagnostics: Bool = false
+    var githubIssuesUrl: String = "https://github.com/jjang-ai/jangq/issues"
+    var autoOpenIssueTrackerOnCrash: Bool = false
+
+    // MARK: - Updates
+    var updateChannel: UpdateChannel = .stable
+    var autoCheckForUpdates: Bool = true
+
+    private static let defaultsKey = "JANGStudioSettings"
+
+    init() {
+        load()
+    }
+
+    /// Reset every field to its initial default.
+    func reset() {
+        defaultOutputParentPath = ""
+        defaultProfile = "JANG_4K"
+        defaultFamily = "jang"
+        defaultMethod = "mse"
+        defaultHadamardEnabled = false
+        defaultCalibrationSamples = 256
+        outputNamingTemplate = "{basename}-{profile}"
+        autoDeletePartialOnCancel = false
+        revealInFinderOnFinish = true
+        pythonOverridePath = ""
+        customJangToolsPath = ""
+        logVerbosity = .normal
+        jsonlLogRetentionLines = 10_000
+        logFileOutputDir = ""
+        tickThrottleMs = 100
+        maxBundleSizeWarningMb = 450
+        mlxThreadCount = 0
+        metalPipelineCacheEnabled = true
+        preAllocateRam = false
+        preAllocateRamGb = 4
+        convertConcurrency = 1
+        copyDiagnosticsAlwaysVisible = true
+        anonymizePathsInDiagnostics = false
+        githubIssuesUrl = "https://github.com/jjang-ai/jangq/issues"
+        autoOpenIssueTrackerOnCrash = false
+        updateChannel = .stable
+        autoCheckForUpdates = true
+        persist()
+    }
+
+    /// Expand the output naming template with actual values.
+    /// Supported tokens: {basename}, {profile}, {family}, {date}, {time}, {user}
+    func renderOutputName(basename: String, profile: String, family: String) -> String {
+        let date = ISO8601DateFormatter().string(from: Date()).prefix(10)
+        let time = ISO8601DateFormatter().string(from: Date()).suffix(8).prefix(5)
+        let user = ProcessInfo.processInfo.environment["USER"] ?? "user"
+        return outputNamingTemplate
+            .replacingOccurrences(of: "{basename}", with: basename)
+            .replacingOccurrences(of: "{profile}", with: profile)
+            .replacingOccurrences(of: "{family}", with: family)
+            .replacingOccurrences(of: "{date}", with: String(date))
+            .replacingOccurrences(of: "{time}", with: String(time))
+            .replacingOccurrences(of: "{user}", with: user)
+    }
+
+    func persist() {
+        let snapshot = Snapshot(from: self)
+        if let data = try? JSONEncoder().encode(snapshot) {
+            UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+        }
+    }
+
+    private func load() {
+        guard let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
+              let s = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+        s.apply(to: self)
+    }
+}
+
+// MARK: - Snapshot for UserDefaults persistence
+
+private struct Snapshot: Codable {
+    var defaultOutputParentPath: String
+    var defaultProfile: String
+    var defaultFamily: String
+    var defaultMethod: String
+    var defaultHadamardEnabled: Bool
+    var defaultCalibrationSamples: Int
+    var outputNamingTemplate: String
+    var autoDeletePartialOnCancel: Bool
+    var revealInFinderOnFinish: Bool
+    var pythonOverridePath: String
+    var customJangToolsPath: String
+    var logVerbosity: String
+    var jsonlLogRetentionLines: Int
+    var logFileOutputDir: String
+    var tickThrottleMs: Int
+    var maxBundleSizeWarningMb: Int
+    var mlxThreadCount: Int
+    var metalPipelineCacheEnabled: Bool
+    var preAllocateRam: Bool
+    var preAllocateRamGb: Int
+    var convertConcurrency: Int
+    var copyDiagnosticsAlwaysVisible: Bool
+    var anonymizePathsInDiagnostics: Bool
+    var githubIssuesUrl: String
+    var autoOpenIssueTrackerOnCrash: Bool
+    var updateChannel: String
+    var autoCheckForUpdates: Bool
+
+    @MainActor init(from s: AppSettings) {
+        defaultOutputParentPath = s.defaultOutputParentPath
+        defaultProfile = s.defaultProfile
+        defaultFamily = s.defaultFamily
+        defaultMethod = s.defaultMethod
+        defaultHadamardEnabled = s.defaultHadamardEnabled
+        defaultCalibrationSamples = s.defaultCalibrationSamples
+        outputNamingTemplate = s.outputNamingTemplate
+        autoDeletePartialOnCancel = s.autoDeletePartialOnCancel
+        revealInFinderOnFinish = s.revealInFinderOnFinish
+        pythonOverridePath = s.pythonOverridePath
+        customJangToolsPath = s.customJangToolsPath
+        logVerbosity = s.logVerbosity.rawValue
+        jsonlLogRetentionLines = s.jsonlLogRetentionLines
+        logFileOutputDir = s.logFileOutputDir
+        tickThrottleMs = s.tickThrottleMs
+        maxBundleSizeWarningMb = s.maxBundleSizeWarningMb
+        mlxThreadCount = s.mlxThreadCount
+        metalPipelineCacheEnabled = s.metalPipelineCacheEnabled
+        preAllocateRam = s.preAllocateRam
+        preAllocateRamGb = s.preAllocateRamGb
+        convertConcurrency = s.convertConcurrency
+        copyDiagnosticsAlwaysVisible = s.copyDiagnosticsAlwaysVisible
+        anonymizePathsInDiagnostics = s.anonymizePathsInDiagnostics
+        githubIssuesUrl = s.githubIssuesUrl
+        autoOpenIssueTrackerOnCrash = s.autoOpenIssueTrackerOnCrash
+        updateChannel = s.updateChannel.rawValue
+        autoCheckForUpdates = s.autoCheckForUpdates
+    }
+
+    @MainActor func apply(to s: AppSettings) {
+        s.defaultOutputParentPath = defaultOutputParentPath
+        s.defaultProfile = defaultProfile
+        s.defaultFamily = defaultFamily
+        s.defaultMethod = defaultMethod
+        s.defaultHadamardEnabled = defaultHadamardEnabled
+        s.defaultCalibrationSamples = defaultCalibrationSamples
+        s.outputNamingTemplate = outputNamingTemplate
+        s.autoDeletePartialOnCancel = autoDeletePartialOnCancel
+        s.revealInFinderOnFinish = revealInFinderOnFinish
+        s.pythonOverridePath = pythonOverridePath
+        s.customJangToolsPath = customJangToolsPath
+        s.logVerbosity = LogVerbosity(rawValue: logVerbosity) ?? .normal
+        s.jsonlLogRetentionLines = jsonlLogRetentionLines
+        s.logFileOutputDir = logFileOutputDir
+        s.tickThrottleMs = tickThrottleMs
+        s.maxBundleSizeWarningMb = maxBundleSizeWarningMb
+        s.mlxThreadCount = mlxThreadCount
+        s.metalPipelineCacheEnabled = metalPipelineCacheEnabled
+        s.preAllocateRam = preAllocateRam
+        s.preAllocateRamGb = preAllocateRamGb
+        s.convertConcurrency = convertConcurrency
+        s.copyDiagnosticsAlwaysVisible = copyDiagnosticsAlwaysVisible
+        s.anonymizePathsInDiagnostics = anonymizePathsInDiagnostics
+        s.githubIssuesUrl = githubIssuesUrl
+        s.autoOpenIssueTrackerOnCrash = autoOpenIssueTrackerOnCrash
+        s.updateChannel = UpdateChannel(rawValue: updateChannel) ?? .stable
+        s.autoCheckForUpdates = autoCheckForUpdates
+    }
+}
