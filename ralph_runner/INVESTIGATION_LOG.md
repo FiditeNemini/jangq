@@ -2522,3 +2522,47 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 - peer-helper on VerifyStep's post-convert checks vs convert.py's own self-verification.
 
 **Next iteration should pick:** preflight-audit extension (continuation of this iter's finding) OR VerifyStep/convert self-check peer-helper sweep.
+
+## 2026-04-20 iteration 62 — M140 preflight-side mirror of M131 bf16-for-512-experts
+
+**Angle:** Iter 61's forecast: "preflight-audit extension — enumerate what could pass preflight but cause damage at convert time." Started by re-reading every preflight check systematically.
+
+**Deep trace walkthrough:**
+1. **10 preflight checks enumerated:** sourceReadable, configValid, outputUsable (iter-61 hardened), diskSpace, ramAdequate, jangtqArchSupported, jangtqSourceDtype, bf16For512Experts, hadamardVsLowBits, bundledPythonHealthy.
+2. **Triage each for foot-gun potential:**
+   - `sourceReadable`: standard isReadableFile. OK.
+   - `configValid`: parses config.json — good.
+   - `outputUsable`: iter-61 hardened.
+   - `diskSpace`: **inert — called with estimated=0, always returns .pass**. Noted as future M-item (need profile-aware size estimator passed in).
+   - `ramAdequate`: uses `srcBytes * 1.5` heuristic. OK-ish.
+   - `jangtqArchSupported`: checks whitelist membership. OK.
+   - `jangtqSourceDtype`: requires bf16 or fp8 for jangtq. OK.
+   - **`bf16For512Experts`: hardcoded-list bug, symmetric to M131 on Python side.**
+   - `hadamardVsLowBits`: `plan.profile.contains("_2")` — brittle to new profile names. Noted as future cleanup.
+   - `bundledPythonHealthy`: runs BundleResolver.healthCheck. OK.
+3. **Picked the bf16For512Experts bug** — highest-confidence, clear cross-boundary asymmetry with M131 (iter 53).
+4. **Confirm scenario:** user downloads a hypothetical future "MyCustomMoE-512E" model with `model_type: mymoe` + `num_experts: 512`. They force fp16 in Settings because they only have float16-capable hardware. Preflight check runs: `types.contains("mymoe")` is false (frozen list has only minimax_m2/glm_moe_dsa). Guard returns `.pass` early. User never sees the "bfloat16 strongly recommended" warning. Convert proceeds with fp16 → float16 overflow on shared expert down_proj (per project_bfloat16_fix.md / feedback_bfloat16_fix.md) → NaN tensors written to disk → model broken + no diagnostic.
+5. **Fix: add `dynamic512 = numExperts >= 512` and OR it with the named-list check.** Same logic as iter-53's M131 on the Python side. Mirrors exactly so the two gates stay aligned.
+6. **Hint clarity:** when the dynamic path fires, the hint shows "N experts" rather than model_type. User can tell which heuristic caught them: "unknown family but 512 experts" is actionable.
+
+**Meta-lesson: cross-boundary decision-overlap.** iter-47 through iter-60 established "peer helpers in the same module drift." Iter 62 extends: **peer checks on OPPOSITE sides of the Swift⇄Python boundary also drift.** The same user-facing policy gate exists in two places (recommend.py + preflight.swift) with the same signature (is-this-a-512+-expert-MoE?). When one side is fixed dynamically, the other must be fixed too. Future audits should explicitly pair Python and Swift gates that enforce the same invariant.
+
+**Items touched:**
+- M140 [x] — PreflightRunner.bf16For512Experts extends hardcoded whitelist with dynamic numExperts >= 512.
+
+**Commit:** (this iteration)
+
+**Verification:** 152 Swift tests pass (was 149, +3 for M140 dynamic-check pins). Python 310 + ralph 73 unchanged.
+
+**Closed-status tally:** 74 (iter 61) + M140 = 75 closed / 100 total = 75.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW M141 candidate**: diskSpace preflight check is inert (always passes when `estimated=0` is the hardcoded arg). User's actually-full-disk scenario not caught. Need profile-aware size estimator passed from caller; moderate scope (touches ProfilesService, PreflightRunner, ProfileStep wiring).
+- **NEW M142 candidate**: `hadamardVsLowBits` uses `plan.profile.contains("_2")` — brittle to future profiles. Same class as iter-54 M132 (JANGTQ converters' profile-name parsing).
+
+**Next iteration should pick:** M141 (diskSpace actually gate) OR M142 (hadamard brittleness cleanup). M141 has higher user impact; M142 is a smaller scope continuation.

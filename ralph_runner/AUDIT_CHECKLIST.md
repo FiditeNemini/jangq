@@ -714,6 +714,21 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `test_siblingPrefixPathsDoNotTrigger`: regression guard — src=/tmp/abc, dst=/tmp/abcd → pass (sibling with shared prefix must not trip the nested check).
       **Evidence:** `JANGStudio/JANGStudio/Verify/PreflightRunner.swift:44-76`. 149 Swift tests pass (was 146, +3 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M140 (preflight-side mirror of M131: bf16-for-512-experts hardcoded whitelist)** — Iter 61's meta-lesson "preflight is the user-facing safety boundary; enumerate foot-guns" applied. Reading `PreflightRunner.bf16For512Experts` revealed the exact Python-side bug M131 fixed, present here on the Swift side:
+      ```swift
+      guard types.contains(mt) else {
+          return .pass    // ← no warning for any dynamic 512-expert MoE
+      }
+      ```
+      `types = capabilities.knownExpert512Types` is the hardcoded `["minimax_m2", "glm_moe_dsa"]` list from capabilities_cli.py's frozen defaults. A future 512-expert qwen3_5_moe variant (or any custom MoE with 512 experts not on the list) would pass preflight even when the user forced fp16 — exact float16 overflow risk the warning exists to catch. **Cross-boundary asymmetry with M131:** recommend.py on the Python side now dynamically promotes to bfloat16 for any 512+ expert count. Preflight on the Swift side still used the hardcoded list.
+      **Fix (iter 62):** mirror iter-53's fix. Add `dynamic512 = (plan.detected?.numExperts ?? 0) >= 512` and change the guard to `types.contains(mt) || dynamic512`. Hint includes the dynamic expert count when that path fired so the user understands which heuristic triggered the warning.
+      **Tests (+3):**
+      - `test_bf16Warning_fires_on_dynamic_512_experts`: 512-expert qwen3_5_moe (NOT in whitelist) with user-forced fp16 → warn with "512 experts" in hint. Pre-fix passed silently.
+      - `test_bf16Warning_still_fires_for_named_whitelist_types`: regression guard — minimax_m2 with fp16 must still warn via the named-list path.
+      - `test_bf16Warning_skips_small_moe`: 256-expert qwen3_5_moe must stay .pass — don't over-warn on smaller MoEs.
+      **Meta-observation:** the sibling bug on both sides of the boundary (Python recommend.py + Swift preflight) means decision-overlap zones can span the Swift⇄Python boundary too. Future peer-helper audits should look for the same hardcoded-list-vs-dynamic-check patterns on BOTH sides when the user-facing gate is split across the boundary.
+      **Evidence:** `JANGStudio/JANGStudio/Verify/PreflightRunner.swift:124-149`. 152 Swift tests pass (was 149, +3 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

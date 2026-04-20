@@ -123,12 +123,26 @@ struct PreflightRunner {
 
     private static func bf16For512Experts(plan: ConversionPlan, types: [String]) -> PreflightCheck {
         let mt = plan.detected?.modelType ?? ""
-        guard types.contains(mt) else {
+        // M140 (iter 62): preflight-side of the M131 fix. Iter 53 made
+        // `_recommend_dtype` (Python) dynamically promote any MoE with
+        // `expert_count >= 512` to bfloat16 instead of relying on a
+        // hardcoded `{minimax_m2, glm_moe_dsa}` name list. The preflight
+        // check here had the same decision-overlap bug — it only flagged
+        // types in `knownExpert512Types` (a hardcoded list in
+        // capabilities_cli.py). A future 512+ expert family (e.g., a
+        // future Qwen / DeepSeek variant) would skip this warning despite
+        // needing bfloat16 for the same float16-overflow reason.
+        //
+        // Fix: check BOTH the named-family list AND the dynamic expert
+        // count. Mirrors the Python-side recommend.py fix exactly.
+        let dynamic512 = (plan.detected?.numExperts ?? 0) >= 512
+        guard types.contains(mt) || dynamic512 else {
             return .init(id: .bf16For512Experts, title: "BF16 forced for 512+ expert model", status: .pass, hint: nil)
         }
         if plan.overrides.forceDtype == .fp16 {
+            let expertStr = dynamic512 ? "\(plan.detected?.numExperts ?? 0) experts" : mt
             return .init(id: .bf16For512Experts, title: "BF16 forced for 512+ expert model", status: .warn,
-                         hint: "\(mt) has 512+ experts — bfloat16 strongly recommended over float16 to avoid overflow")
+                         hint: "\(expertStr) — bfloat16 strongly recommended over float16 to avoid overflow")
         }
         return .init(id: .bf16For512Experts, title: "BF16 forced for 512+ expert model", status: .pass, hint: nil)
     }
