@@ -218,6 +218,51 @@ final class PreflightRunnerTests: XCTestCase {
             "Without a detected source size, the estimator must return 0 so preflight doesn't falsely fail.")
     }
 
+    // MARK: - Iter 102 M175: ramAdequate sibling of M05 (ambiguous-pass sweep)
+
+    func test_ramAdequate_pre_inspection_warns_about_uncheckable_state() {
+        // Pre-M175 this returned .pass with nil hint when totalBytes was
+        // unknown — user saw ✓ but the check hadn't actually evaluated.
+        // OOM mid-convert is arguably worse than disk-full since the OS
+        // may kill the subprocess before it can surface a clean error.
+        let src = tmp.appendingPathComponent("src-ram-uninspected")
+        try? FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try? #"{"model_type":"llama"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = tmp.appendingPathComponent("out-ram-uninspected")
+        plan.profile = "JANG_4K"
+        // detected stays nil → totalBytes unknown
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen, profiles: .frozen)
+        guard let ram = checks.first(where: { $0.id == .ramAdequate }) else {
+            XCTFail("no ramAdequate check in preflight output")
+            return
+        }
+        XCTAssertEqual(ram.status, .warn,
+            "pre-inspection ramAdequate must warn, not silently pass (M175)")
+        XCTAssertTrue(ram.hint?.contains("no estimate") == true,
+            "warn hint must explain the uncheckable state. Got: \(ram.hint ?? "nil")")
+    }
+
+    func test_ramAdequate_post_inspection_with_room_still_passes() {
+        // Regression guard for the real-check branch.
+        let src = tmp.appendingPathComponent("src-ram-ok")
+        try? FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try? #"{"model_type":"llama"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = tmp.appendingPathComponent("out-ram-ok")
+        plan.profile = "JANG_4K"
+        // 10 MB source → needed ~15 MB → any Mac has this much RAM
+        plan.detected = .init(modelType: "llama", isMoE: false, numExperts: 0,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 10_000_000, shardCount: 1)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen, profiles: .frozen)
+        let ram = checks.first(where: { $0.id == .ramAdequate })
+        XCTAssertEqual(ram?.status, .pass,
+            "post-inspection with ample RAM must still pass (regression guard)")
+    }
+
     // MARK: - Iter 101 M05: diskSpace disambiguates "no estimate" from "enough room"
 
     func test_diskSpace_pre_inspection_warns_about_uncheckable_state() {

@@ -125,16 +125,21 @@ final class PostConvertVerifierTests: XCTestCase {
         XCTAssertEqual(check.status, .pass, "imatrix must NOT count toward disk ratio: \(check.hint ?? "")")
     }
 
-    func test_diskSizeSanity_missing_source_passes_with_hint() throws {
-        // No source bytes + no avg bits → can't compute expected. Pass
-        // (not a failure — just no data to check).
+    func test_diskSizeSanity_missing_source_warns_with_hint() throws {
+        // M175 (iter 102): pre-M175 this returned .pass with "couldn't
+        // compute" hint — same visual state as a real pass, user couldn't
+        // tell the audit hadn't run. Now .warn with an explicit "skipped"
+        // marker. Updated from the pre-iter-102 test name to match.
         let dir = try sizeSanityDir("missing")
         defer { try? FileManager.default.removeItem(at: dir) }
         try plantShard(in: dir, name: "model-00001-of-00001.safetensors", bytes: 100_000_000)
         let check = PostConvertVerifier.diskSizeSanityCheck(
             outputDir: dir, sourceBytes: 0, jangCfg: [:])
-        XCTAssertEqual(check.status, .pass)
+        XCTAssertEqual(check.status, .warn,
+            "Missing inputs must surface as warn (not silent pass) so user sees the audit was skipped — M175")
         XCTAssertTrue(check.hint?.contains("couldn't compute") ?? false)
+        XCTAssertTrue(check.hint?.contains("skipped") ?? false,
+            "warn hint must mark the audit as skipped, not merely missing")
     }
 
     // MARK: - Iter 100 M174: diskSizeSanity must honor source dtype (FP8 / BF16)

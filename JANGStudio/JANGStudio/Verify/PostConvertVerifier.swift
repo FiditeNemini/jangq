@@ -176,12 +176,18 @@ struct PostConvertVerifier {
             ?? (quant["actual_bits"] as? Double)
             ?? 0.0
 
-        // Missing data → n/a-equivalent pass with a hint noting we couldn't check.
-        // Diagnosing requires at least source-size AND avg-bits.
+        // M175 (iter 102): pre-M175 "missing data" → `.pass` with a hint
+        // noting we couldn't check. Same ambiguous-pass anti-pattern M05
+        // / M175 sweep closed elsewhere — UX-wise identical to a real
+        // pass. Since this is a post-convert verifier (not a preflight
+        // gate), the user has already converted when this fires; they
+        // want to know whether the output is correctly-sized. A silent
+        // pass on missing inputs hides the fact that THIS audit couldn't
+        // happen. Promote to `.warn` so it's visually distinct.
         if sourceBytes <= 0 || avgBits <= 0 {
             return .init(id: .diskSizeSanity, title: "Disk size within expected range",
-                         status: .pass, required: false,
-                         hint: "couldn't compute estimate (missing source size or avg bits)")
+                         status: .warn, required: false,
+                         hint: "couldn't compute estimate (missing source size or avg bits — this audit skipped, not run)")
         }
 
         // M174 (iter 100): cross-boundary formula audit per iter-99 M173's

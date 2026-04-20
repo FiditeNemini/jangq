@@ -4421,3 +4421,56 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: allocate.py independent estimator vs main predict() — drift risk.
 
 **Next iteration should pick:** close M63/M65 observation-only items together in one small doc iter, OR audit other 3-state UX checks for the M05 ambiguous-pass pattern.
+
+---
+
+## 2026-04-20 iteration 102 — M175 ambiguous-pass sibling sweep (iter-101 M05 generalization)
+
+**Angle:** Iter-101 M05 closed the first instance of the "uncheckable branch silently passes" anti-pattern. Iter-102 sweeps for siblings.
+
+**Deep trace walkthrough:**
+1. **Grep'd `status:\s*\.pass` across `JANGStudio/JANGStudio/Verify/`.** 12 hits. Triaged each:
+   - `configJSONValid` final pass — real positive result ✓
+   - `outputUsable` final pass — real positive result ✓
+   - `ramAdequate` pre-inspection pass (line 197) — **ambiguous-pass, fix target**
+   - `jangtqArchSupported` pass when family != .jangtq — N/A-for-this-plan, correct visual (nothing to worry about)
+   - `jangtqSourceDtype` pass when family != .jangtq — same N/A case
+   - `bf16For512Experts` pass when no 512+ expert — same N/A
+   - `hadamardVsLowBits` — let me check later, probably similar
+   - `diskSizeSanityCheck` "couldn't compute" (line 183) — **ambiguous-pass, fix target**
+2. **Classified the triaged `.pass` states into three categories:**
+   - **Real positive** — check evaluated, result is good. Keep `.pass`.
+   - **N/A-for-this-plan** — check doesn't apply (JANGTQ rules on a JANG plan). Keep `.pass` — user should see "no problem here."
+   - **Couldn't evaluate** — check wanted to run but lacked inputs. **Change to `.warn`** so the user sees the distinction.
+3. **Fixed the two real ambiguous-pass cases:**
+   - `ramAdequate`: pre-inspection `.pass` + nil hint → `.warn` + `"X GB installed (no estimate yet — pick source for a real check)"`. RAM OOM mid-convert is especially bad because the OS may SIGKILL before a clean error emerges — user deserves upfront warning that the check hasn't run.
+   - `diskSizeSanityCheck`: "couldn't compute" `.pass` → `.warn` + `"(this audit skipped, not run)"`. Post-convert context — the user converted successfully, now sees an audit result; the warn-state makes visible that the size audit couldn't run while the rest of the verify succeeded.
+4. **Tests:** +2 Preflight (uncheckable + regression), and renamed/strengthened the existing PostConvertVerifier `_passes_with_hint` test to `_warns_with_hint`. No test-count net gain on PostConvertVerifier since the existing test was updated.
+
+**Meta-lesson — sibling sweep pays compound interest (iter-99/100 and iter-101/102 both demonstrated this).** Iter-101 established the ambiguous-pass pattern; iter-102 swept for siblings in ~10 min. The fix pattern was known, so execution was mechanical. **Rule confirmed (second time now):** after fixing a class of bug, IMMEDIATELY grep for sibling instances in the same iter OR queue one for the immediate next iter. Don't let the sweep drift; every iter without the sweep is another iter where a future user hits an unfixed sibling.
+
+**Meta-lesson — three-bucket taxonomy for `.pass` states.** Not all passes are equal:
+  1. **Positive evaluation** — the check ran and the answer is good. `.pass` is honest.
+  2. **N/A-for-this-plan** — the check doesn't apply (e.g., JANGTQ rules on a JANG plan). `.pass` is fine, user reads it as "no problem."
+  3. **Couldn't evaluate** — the check wanted to run but lacked inputs. `.warn` is required; `.pass` lies.
+  When adding a new check with multiple short-circuit branches, explicitly assign each branch to one of these three buckets and verify the status choice matches. Codify this by naming the three cases in the comment above each `.pass` return so future maintainers see the intent.
+
+**Items touched:**
+- M175 [x] — ramAdequate + diskSizeSanity "couldn't evaluate" branches now `.warn` with explicit "uncheckable" / "skipped" markers. 2 new Preflight tests + 1 renamed PostConvertVerifier test.
+
+**Commit:** (this iteration)
+
+**Verification:** 28 PreflightRunnerTests pass (was 26, +2). 17 PostConvertVerifierTests pass (count unchanged; one renamed + strengthened).
+
+**Closed-status tally:** 118 (iter 101) + M175 = 119 items touched, all closed. Zero known bugs as of iter-102 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: `hadamardVsLowBits` final `.pass` at line 270 — check if it has the same ambiguous-pass on missing profiles data. Probably not but worth verifying.
+- **NEW**: M63 + M65 observation-only docs close.
+- **NEW**: sweep Python-side for the same anti-pattern — does `jang_tools` have any "silently pass on missing input" checks?
+
+**Next iteration should pick:** audit `hadamardVsLowBits` for the ambiguous-pass pattern (small, concrete follow-up), OR close M63/M65 as observation-only, OR move to a completely different audit angle.

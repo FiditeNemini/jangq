@@ -193,8 +193,16 @@ struct PreflightRunner {
 
     private static func ramAdequate(plan: ConversionPlan) -> PreflightCheck {
         let ram = Int64(ProcessInfo.processInfo.physicalMemory)
+        // M175 (iter 102): sibling of M05 — pre-M175 this returned
+        // `.pass` with `nil` hint when totalBytes was unknown (pre-
+        // inspection). Same ambiguous-pass anti-pattern M05 closed on
+        // diskSpace. RAM OOM mid-convert is even worse than disk-full
+        // (convert may get killed by OS instead of surfacing a
+        // readable error). Promote to `.warn` with an "uncheckable"
+        // hint so the user knows to re-check after inspection lands.
         guard let srcBytes = plan.detected?.totalBytes, srcBytes > 0 else {
-            return .init(id: .ramAdequate, title: "RAM adequate", status: .pass, hint: nil)
+            return .init(id: .ramAdequate, title: "RAM adequate", status: .warn,
+                         hint: "\(ram / 1_000_000_000) GB installed (no estimate yet — pick source for a real check)")
         }
         let needed = Int64(Double(srcBytes) * 1.5)
         let ok = ram >= needed
