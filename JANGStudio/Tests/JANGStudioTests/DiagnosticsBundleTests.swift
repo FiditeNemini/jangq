@@ -59,6 +59,36 @@ final class DiagnosticsBundleTests: XCTestCase {
         XCTAssertEqual(scrubbed, "var hf_short = thing")
     }
 
+    // MARK: - Iter 88 M165: URL-embedded token edge cases
+
+    func test_scrub_token_in_url_query_string() {
+        // HF client retries can log the full request URL including a token
+        // query parameter. `&`, `=`, `?` aren't in the token char class
+        // `[A-Za-z0-9_.-]`, so the greedy match stops cleanly at the
+        // separator — redacting the token but preserving surrounding URL
+        // structure. Pins this behavior so a future regex tweak can't
+        // accidentally eat the `&key=` tail.
+        let input = "GET https://hf.co/api/models?token=hf_abcdefghijklmnopqrstuvwxyz1234&revision=main"
+        let scrubbed = DiagnosticsBundle.scrubSensitive(input)
+        XCTAssertFalse(scrubbed.contains("hf_abcdefghijklmnopqrstuvwxyz1234"),
+            "token body must be redacted")
+        XCTAssertTrue(scrubbed.contains("&revision=main"),
+            "URL tail after the token must be preserved — the scrub should not eat past the token's char class")
+        XCTAssertTrue(scrubbed.contains("<redacted>"),
+            "replacement marker must appear in place of the token")
+    }
+
+    func test_scrub_token_adjacent_to_json_delimiter() {
+        // Tokens in JSON debug output: "token":"hf_…". The closing `"`
+        // isn't in the class so match stops there. Guards against any
+        // future "swallow the JSON delimiter" regex bug.
+        let input = #"{"token":"hf_abcdefghijklmnopqrstuvwxyz1234","model":"qwen"}"#
+        let scrubbed = DiagnosticsBundle.scrubSensitive(input)
+        XCTAssertFalse(scrubbed.contains("hf_abcdefghijklmnopqrstuvwxyz1234"))
+        XCTAssertTrue(scrubbed.contains(#""model":"qwen""#),
+            "JSON fields after the redacted token must remain intact")
+    }
+
     @MainActor
     func test_write_scrubs_tokens_in_log_and_events() throws {
         let plan = ConversionPlan()

@@ -3725,3 +3725,65 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: ASCII-only spot-check for HFRepoValidator (Cyrillic / accented chars should fail — do they?).
 
 **Next iteration should pick:** rapid-click / button-disabled-during-work audit (small scope, high signal on UX bugs), OR Diagnostics token-leak spot-check (security-adjacent, high signal if there's a gap).
+
+---
+
+## 2026-04-20 iteration 88 — M165 Diagnostics token-leak verification audit (no-bug confirmation + 2 edge-case pins)
+
+**Angle:** Iter-87 forecast option 1: Diagnostics token-leak spot-check. Picked because security-adjacent surfaces warrant periodic verification even when no specific trigger suggests a bug.
+
+**Deep trace walkthrough:**
+1. **Mapped all disk-write and clipboard paths** that could carry log/stderr data:
+   - `DiagnosticsBundle.write` + `writeAsync` — runLines + eventLines → `scrubSensitive` → write to workDir → ditto-zip. ✓ covered.
+   - `TestInferenceViewModel.exportTranscript` — serializes messages as JSON, NO scrub. But user-initiated for their own use (Save Transcript → NSSavePanel), not a bug-report export surface. Lower severity, out of scope for the leak-to-diagnostics audit.
+   - `SettingsWindow.copySystemInfo` — clipboard with only macOS version / RAM / CPU / app version / settings-set flag. No log data. Safe.
+   - `VerifyStep.copyPath` — clipboard with output folder path only. No log data. Safe.
+   - `UsageExamplesSheet.saveToFile` + NSPasteboard.setString — snippet text only. No log data. Safe.
+   - `ModelCardService.writeReadme` — model card markdown. Pulls from jang_config metadata. No stderr/logs. Safe.
+   - `RunStep.logs` → Copy Diagnostics button → DiagnosticsBundle.writeAsync → scrubs. ✓ covered.
+   - `PublishToHuggingFaceSheet.progressLog` — @State var, but grep shows NO UI ELEMENT displays it. Dead write, no leak possible.
+
+2. **Cross-referenced the scrub regex against HF token formats:**
+   - `hf_[A-Za-z0-9_-]{20,}` — current format (all tokens issued since ~2023).
+   - `huggingface_[A-Za-z0-9_-]{20,}` — older format.
+   - `(?i)authorization:\s*bearer\s+[A-Za-z0-9_.-]{20,}` — HTTPX debug-log shape.
+   - `(?i)\bbearer\s+[A-Za-z0-9_.-]{20,}` — generic fallback.
+   Four patterns cover the realistic leak paths.
+
+3. **Traced the greedy-regex stop behavior for URL and JSON contexts:**
+   - URL-query-string: `?token=hf_abc123&revision=main`. The `&` is not in `[A-Za-z0-9_-]`, so match stops at `&`. Token body is redacted; `&revision=main` preserved.
+   - JSON: `"token":"hf_abc123"`. The `"` is not in the class; match stops at `"`. Token body redacted; JSON structure preserved.
+   Both safe. Added regression pins to lock behavior in.
+
+4. **Verified iter-6 M41 publish-error scrub is still layer-2 defense.** `_streamPublish`'s catch-branch calls `lastErrTail.replacingOccurrences(of: token, with: "<redacted>")` BEFORE throwing `cliError`. So `.localizedDescription` shown in `errorMessage` never contains the raw token. DiagnosticsBundle.scrubSensitive is layer-1 (regex-based) defense; M41 is layer-2 (exact-match). Belt-and-suspenders.
+
+5. **Result: zero new bugs.** The diagnostic/token-scrub surface is comprehensive and well-tested. Added 2 regression pins for URL-query and JSON-delimiter edge cases noticed during the trace.
+
+**Meta-lesson — audit-verification iters that find NO bug are first-class work.** The Ralph loop premise is "constantly make up new questions." Some of those questions reveal bugs; some confirm existing coverage is correct. Both outcomes are valuable. A no-bug audit with accompanying regression pins:
+  (a) Documents that the surface was traced end-to-end — future audits can see the iter-88 log entry and know this ground is covered.
+  (b) Adds edge-case tests that lock the CURRENT behavior in place — a future change that weakens coverage now fails a test.
+  (c) Builds confidence in the stability direction. After 88 iters, hitting a "no new bug" audit is a good signal.
+**Codebase-wide rule for future work:** when probing a new audit angle, proceed through the full deep-trace even if the early inspection suggests no bug. The trace itself is valuable as documentation, and edge-case pins often emerge from the process even when the main path is clean.
+
+**Meta-lesson — PublishToHuggingFaceSheet's progressLog is dead storage.** Line 25 declares `@State private var progressLog: [String] = []`, lines 316, 332, 337 append to it, but no UI element reads it. This is probably vestigial from an earlier design that had a log-pane in the publish sheet. Could be cleaned up — removing the dead state + appends — but it's NOT a bug. Flagging for a future tidy-up iter (cleanup task, not audit-critical).
+
+**Items touched:**
+- M165 [x] — Diagnostics token-leak audit: verified 4 HF-token scrub patterns cover all realistic leak paths; verified no disk-write/clipboard path bypasses scrubSensitive for bug-report data; added 2 regression pins for URL-query-string and JSON-delimiter edge cases.
+
+**Commit:** (this iteration)
+
+**Verification:** 15 DiagnosticsBundleTests pass (was 13, +2). Python 348 + ralph 73 unchanged.
+
+**Closed-status tally:** 104 (iter 87) + M165 = 105 items touched, all closed. Zero known bugs as of iter-88 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: PublishToHuggingFaceSheet's dead progressLog cleanup (vestigial state, not a bug but worth tidying).
+- **NEW**: symlink handling in SourceDetector for HF-cache snapshot layouts.
+- **NEW**: rapid-click debouncing on "Choose Folder…" during in-flight detection (UX polish, iter-57 M135 + iter-84 M161 already handle the data safety).
+- **NEW**: NSOpenPanel cancel-path hygiene (pickFolder, pickOutput).
+
+**Next iteration should pick:** symlink-handling audit (HF cache snapshot layouts with symlinked `.safetensors`) OR rapid-click debouncing for Choose Folder button — both are fresh ground.
