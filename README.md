@@ -11,7 +11,15 @@
 ---
 
 <p align="center">
-  <a href="JANGStudio/README.md"><b>JANG Studio</b></a> — native macOS wizard for converting HuggingFace models to JANG and JANGTQ formats. Five-step flow with live logs, preflight gate, and 12-row post-convert verifier. Ships as a signed DMG.
+  <a href="README-USER.md"><b>JANG Studio</b></a> — native macOS wizard for converting HuggingFace models to JANG and JANGTQ formats. Five-step flow with live logs, 10-row preflight gate, 12-row post-convert verifier, in-app chat preview, and one-click HuggingFace publishing. Ships as a signed DMG.
+</p>
+
+<p align="center">
+  <a href="README-USER.md"><img src="docs/screenshots/step3-profile.png" alt="JANG Studio" width="720"></a>
+</p>
+
+<p align="center">
+  See the <a href="README-USER.md">full user guide</a> for install + wizard walkthrough + CLI usage + Swift integration.
 </p>
 
 ---

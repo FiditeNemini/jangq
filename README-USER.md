@@ -2,8 +2,7 @@
 
 **Convert HuggingFace models to JANG — a mixed-precision quantization format for Apple Silicon — with a five-step wizard, live chat preview, and one-click publishing to HuggingFace.**
 
-<!-- TODO: add hero screenshot of the wizard here once captured -->
-<!-- ![hero](docs/screenshots/hero.png) -->
+![JANG Studio — Step 3](docs/screenshots/step3-profile.png)
 
 ## What is JANG?
 
@@ -22,8 +21,7 @@ JANG (Jang Adaptive N-bit Grading) is a mixed-precision quantization format for 
 
 ### Option 1 — download the signed DMG (recommended)
 
-<!-- TODO: add real release link once CI tags v1.0.0 -->
-Download the latest `JANGStudio.dmg` from [Releases](https://github.com/jjang-ai/jangq/releases), drag `JANG Studio.app` into `/Applications`.
+Download the latest `JANGStudio.dmg` from [Releases](https://github.com/jjang-ai/jangq/releases) (first signed DMG lands with tag `jang-studio-v1.0.0`), drag `JANG Studio.app` into `/Applications`.
 
 **System requirements:**
 - macOS 15 (Sequoia) or later
@@ -51,7 +49,7 @@ open build/Build/Products/Release/JANGStudio.app
 
 ## Using the app
 
-<!-- Screenshots captured by Eric on YYYY-MM-DD — replace TODOs with real paths -->
+Screenshots below show the wizard in its empty state (before picking a model). Once you choose a folder, every subsequent step fills in automatically based on what JANG Studio detects.
 
 ### Step 1 — Source Model
 
@@ -101,21 +99,27 @@ Pick a **JANG** profile (works on every architecture) or **JANGTQ** profile (Qwe
 Start button stays disabled until all required checks are green.
 
 ### Step 4 — Run
-<!-- TODO screenshot: Step 4 running conversion, phase progress bar + fine tensor progress + live logs -->
-Live macro + fine progress bars. Streaming log view. Cancel mid-run; partial output stays for inspection.
+
+Live macro progress bar (`[N/5] phase`), fine per-tensor bar, streaming log view, ETA display, and peak RAM monitor. Cancel sends SIGTERM (then SIGKILL after 3s); partial output stays on disk for inspection unless you have auto-delete enabled in Settings.
 
 ### Step 5 — Verify & Adopt
-<!-- TODO screenshot: Step 5 verifier checklist green + adoption action row -->
-12-row checklist proves every config file, tokenizer, chat template, and shard landed. Then the adoption action bar:
 
-- **Test Inference** — chat with the model inside the app
-- **View Usage Examples** — copy Python/Swift/Server/HuggingFace snippets tailored to your model's capabilities
-- **Generate Model Card** — HF-compatible card auto-written
-- **Publish to HuggingFace** — dry-run preview + one-click upload
+12-row verifier checklist runs automatically — proves every config file, tokenizer, chat template (inline / `.jinja` / `.json`), shard index, VL preprocessor, MiniMax custom `.py` files, and generation metadata landed correctly. Then the adoption action bar lights up:
+
+- **Test Inference** — chat with the model inside the app (temperature / max-tokens settings, image/video drop zones for VL models, live tok/s + peak RAM)
+- **View Usage Examples** — copy Python / Swift / Server / HuggingFace snippets tailored to your model's capabilities (tool-calling, reasoning, VL, video are detected and the snippets change accordingly)
+- **Generate Model Card** — HF-compatible `README.md` with license, base model, quantization_config, quick-start snippet
+- **Publish to HuggingFace** — dry-run preview (file count + total size) + one-click upload with your HF token
 
 ### Settings (⌘,)
-<!-- TODO screenshot: Settings window with 5 tabs -->
-Five tabs: General (defaults, naming template), Advanced (Python override, logs, throttling), Performance (thread count, Metal cache), Diagnostics (anonymize, auto-open issues), Updates.
+
+Five tabs, 27 persisted preferences, zero hardcoded values in the app:
+
+- **General** — default output parent folder, default profile, default family, default method, default Hadamard, calibration sample count, output naming template (`{basename}` `{profile}` `{family}` `{date}` `{time}` `{user}`), auto-delete partial output, reveal in Finder on finish
+- **Advanced** — Python override path, custom jang-tools path, log verbosity (Normal/Verbose/Debug), JSONL log retention lines, log file output dir, tick throttle ms, bundle size warning MB
+- **Performance** — MLX thread count, Metal pipeline cache, pre-allocate RAM, concurrent conversions
+- **Diagnostics** — always-show "Copy Diagnostics" button, anonymize paths in diagnostics, GitHub issues URL, auto-open issue tracker on crash
+- **Updates** — update channel (stable/beta), auto-check, view release notes, about (version/build)
 
 ## Using the scripts directly (no app)
 
@@ -256,7 +260,7 @@ The app's **Publish to HF** button auto-generates a model card with:
 - Runnable code snippet for Python + Swift
 - Link back to JANG Studio
 
-Example published model: <!-- TODO: fill in one real example after first public upload -->
+Example published JANG models (for reference): browse the [JANGQ-AI HuggingFace org](https://huggingface.co/JANGQ-AI) for cards auto-generated by the same template the app uses.
 
 ## Getting help
 
