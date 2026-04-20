@@ -47,16 +47,63 @@ def _load_vlm(model_dir: Path):
     return load(str(model_dir))
 
 
-def _generate_text(model, tokenizer, prompt: str, max_tokens: int, temperature: float) -> dict:
-    """Generate via mlx_lm. Returns dict with text + timing."""
-    from mlx_lm import generate
-    t0 = time.time()
-    # mlx_lm.generate signature varies across versions; try both styles
+def _apply_chat_template_if_any(tokenizer, prompt: str) -> str | list[int]:
+    """Apply the tokenizer's chat template if it has one — otherwise return the
+    raw prompt string unchanged. Without this, Qwen/Llama/Gemma models see
+    "Hello" rather than "<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n"
+    and either loop forever or emit garbage.
+    """
+    # TokenizerWrapper (mlx_lm wraps HF tokenizers — chat_template attr lives on
+    # the inner HF tokenizer, not the wrapper).
+    inner = getattr(tokenizer, "tokenizer", tokenizer)
+    if not getattr(inner, "chat_template", None):
+        return prompt
     try:
-        text = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, verbose=False)
+        return inner.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        # Some templates require `enable_thinking` or other vars the user didn't
+        # supply. Fall back to raw prompt rather than crashing generation.
+        return prompt
+
+
+def _make_sampler(temperature: float):
+    """Return an mlx_lm sampler or None. temp<=0 → argmax (greedy), no sampler needed."""
+    if temperature <= 0.0:
+        return None
+    try:
+        from mlx_lm.sample_utils import make_sampler
+        return make_sampler(temp=temperature)
+    except Exception:
+        return None
+
+
+def _generate_text(model, tokenizer, prompt: str, max_tokens: int, temperature: float) -> dict:
+    """Generate via mlx_lm. Returns dict with text + timing.
+
+    Applies the tokenizer's chat template when available and wires temperature
+    through mlx_lm's sampler API. Prior to M29, both were silently ignored:
+    temperature slider was a UI lie, and chat models ran with no chat template
+    causing infinite loops / garbage output.
+    """
+    from mlx_lm import generate
+    templated = _apply_chat_template_if_any(tokenizer, prompt)
+    sampler = _make_sampler(temperature)
+
+    t0 = time.time()
+    kwargs: dict[str, Any] = {"prompt": templated, "max_tokens": max_tokens, "verbose": False}
+    if sampler is not None:
+        kwargs["sampler"] = sampler
+    try:
+        text = generate(model, tokenizer, **kwargs)
     except TypeError:
-        # older mlx-lm may not accept verbose kwarg
-        text = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens)
+        # Older mlx-lm may not accept verbose OR sampler kwarg; retry without.
+        kwargs.pop("verbose", None)
+        kwargs.pop("sampler", None)
+        text = generate(model, tokenizer, **kwargs)
     elapsed = time.time() - t0
     # Count tokens in response for tok/s
     try:
