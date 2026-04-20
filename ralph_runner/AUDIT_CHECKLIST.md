@@ -192,12 +192,23 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
 - [ ] **M09** — User picks the SAME folder as their output → Preflight catches this (`outputUsable` row). But what if user picks output as a subfolder of source? Still bad, not caught today.
 - [ ] **M10** — Settings pane → change `pythonOverridePath` → pick a folder → verify `BundleResolver.pythonExecutable` reads the new value. Does it require an app restart?
 - [ ] **M11** — User changes output naming template mid-flow (Step 3 already open, switches profile, does output dir name update?). Test that the auto-computed output path re-renders on profile change.
-- [ ] **M12** — Step 4 Cancel → Retry: does the runner actor reset? Does previous subprocess's zombied state interfere?
-- [ ] **M13** — Step 4 Cancel → immediately re-open the Run step via sidebar. Is stale log visible? Does the run try to restart?
-- [ ] **M14** — Double-click "Start Conversion": two overlapping runs? The button should disable on first click.
+- [x] **M12** — Step 4 Cancel → Retry: previously Cancel flipped `plan.run` to `.succeeded` (major bug — user saw "Continue → Verify" after cancelling). Retry did reconstruct PythonRunner cleanly, but the UI state was lying about success.
+      **Fix:** track `cancelRequested` @State in RunStep; after the for-await loop exits without throw, branch on it — set `.cancelled` vs `.succeeded`. Old SIGKILL-after-3s Task captures `proc` strongly so even if user hits Retry immediately, the zombie timer targets the correct process (no PID-reuse risk).
+      **Evidence:** `RunStep.swift:75-95` (start method), `RunStep.swift:42-56` (cancelled UI branch). 65 XCTest still pass.
+      **Commit:** (this iteration)
+- [x] **M13** — Stale log visibility when navigating back to Run step: SwiftUI `@State` preserves the `logs` array across navigation; new start() does `logs.removeAll()` at top. User navigating back mid-run sees current live log. User navigating back to a finished run (succeeded/failed/cancelled) sees the historical log — correct behavior.
+      **Evidence:** `RunStep.swift:78` (`logs.removeAll()` at start), `RunStep.swift:72` (onAppear guard via `guard coord.plan.run != .running else { return }`).
+- [x] **M14** — Double-click Start Conversion: `start()` first-line guard `guard coord.plan.run != .running else { return }` rejects re-entry. First call sets `.running` before any async work; second-click call returns immediately. Cancel button now additionally `.disabled(cancelRequested)` to prevent double-cancel.
+      **Evidence:** `RunStep.swift:20` cancel disabled-state; `RunStep.swift:75` start re-entry guard.
 - [ ] **M15** — macstudio has `dealignai` HF account. Swift publish dialog sends token — does it clear the token field after upload, or does it stay in memory? (security)
 - [ ] **M16** — Diagnostics zip: does it include HF tokens if they're in stderr? Should scrub `--token ...` from logs before archiving.
 - [ ] **M17** — TestInferenceSheet temperature slider: min=0.0, max=2.0 — what happens at exactly 0.0? (greedy decode) What about float precision edge cases?
+- [ ] **M18** — Cancel during HF model download on macstudio: Ralph runner calls `snapshot_download(repo_id)` — cancellation here requires SIGTERM on the whole python3 subprocess. Does it clean up partial safetensors? HF's lock files?
+- [ ] **M19** — TestInferenceSheet Cancel during generate: `InferenceRunner.cancel()` is actor-isolated but `generate()` is also actor-isolated and blocked on `proc.waitUntilExit()`. Does cancel() ever get to run? Suspected same actor-deadlock pattern we hit in PythonRunner. Verify.
+- [ ] **M20** — StepCancel → Convert another: `reset()` in VerifyStep creates a new `ConversionPlan()` but the old PythonRunner in Step 4 may still have a SIGKILL-after-3s Task pending. Does orphaned task leak memory or fire an unnecessary kill?
+- [ ] **M21** — App quit while convert is running: macOS sends TerminationRequest to the app, which dies — does the bundled Python subprocess get SIGTERM via process group, or does it orphan and keep running? (Likely orphans — bundled python under app has no formal tie to the parent once Process.run() returns.)
+- [ ] **M22** — Copy Diagnostics while convert is still running (via the "always-visible" setting): does DiagnosticsBundle.write race with `logs.append` on the @State array? SwiftUI probably serializes but confirm.
+- [ ] **M23** — After cancel, the "Delete partial output" button appears. If user clicked it when outputURL is NIL or already removed, it silently no-ops. Should surface success/fail.
 
 ---
 

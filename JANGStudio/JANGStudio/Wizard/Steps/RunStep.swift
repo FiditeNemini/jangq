@@ -8,6 +8,7 @@ struct RunStep: View {
     @State private var logs: [String] = []
     @State private var runner: PythonRunner?
     @State private var startedAt: Date?
+    @State private var cancelRequested: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -15,7 +16,11 @@ struct RunStep: View {
                 Text("Phase \(phase.n)/\(phase.total) · \(phase.name)").font(.headline)
                 Spacer()
                 if coord.plan.run == .running {
-                    Button("Cancel", role: .destructive) { Task { await runner?.cancel() } }
+                    Button("Cancel", role: .destructive) {
+                        cancelRequested = true
+                        Task { await runner?.cancel() }
+                    }
+                    .disabled(cancelRequested)
                 }
             }
             ProgressView(value: Double(phase.n), total: Double(phase.total))
@@ -36,9 +41,22 @@ struct RunStep: View {
             if coord.plan.run == .succeeded {
                 Button("Continue → Verify") { coord.active = .verify }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+            } else if coord.plan.run == .cancelled {
+                Label("Cancelled — partial output left on disk at output folder.", systemImage: "stop.circle.fill")
+                    .foregroundStyle(.orange)
+                HStack {
+                    Button("Retry") { cancelRequested = false; Task { await start() } }
+                        .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    Button("Delete partial output", role: .destructive) {
+                        if let out = coord.plan.outputURL {
+                            try? FileManager.default.removeItem(at: out)
+                        }
+                    }
+                    .disabled(coord.plan.outputURL == nil)
+                }
             } else if coord.plan.run == .failed {
                 Label("Conversion failed — see log", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
-                Button("Retry") { Task { await start() } }
+                Button("Retry") { cancelRequested = false; Task { await start() } }
                 Button("Copy Diagnostics") {
                     let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
                     let events = logs.filter { $0.hasPrefix("{") }
@@ -56,6 +74,7 @@ struct RunStep: View {
     private func start() async {
         guard coord.plan.run != .running else { return }
         coord.plan.run = .running
+        cancelRequested = false
         logs.removeAll()
         startedAt = Date()
         let args = buildArgs()
@@ -65,7 +84,13 @@ struct RunStep: View {
             for try await ev in r.run() {
                 await MainActor.run { apply(ev) }
             }
-            await MainActor.run { coord.plan.run = .succeeded }
+            // Stream finished without throwing — distinguish cancel vs natural success.
+            await MainActor.run {
+                coord.plan.run = cancelRequested ? .cancelled : .succeeded
+                if cancelRequested {
+                    logs.append("[cancelled] SIGTERM acknowledged, process exited")
+                }
+            }
         } catch {
             await MainActor.run {
                 coord.plan.run = .failed
