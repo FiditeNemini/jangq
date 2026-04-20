@@ -418,6 +418,63 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(s2.defaultHFOrg, "dealignai", "third mutation must persist")
     }
 
+    // MARK: - Iter 103 M65: AppSettings mutation is SettingsWindow-only (grep invariant)
+
+    func test_appSettings_mutations_are_settingsWindow_only() throws {
+        // M65 (iter 14 observation): the observeAndPersist auto-persist Task
+        // is bound to the Settings sheet's .task. If anything OUTSIDE the
+        // Settings sheet mutates settings programmatically (future crash
+        // reporter toggling autoOpenIssueTrackerOnCrash, telemetry sampler,
+        // etc.), the mutation wouldn't trigger persistence until the user
+        // opens Settings again — lost change.
+        //
+        // Iter-103 grep confirms: today, ALL `settings.<prop> = …` sites live
+        // in SettingsWindow.swift. This test pins that invariant so any
+        // future addition (e.g. a background sync that mutates a setting)
+        // fails here and forces the engineer to either (a) move the mutation
+        // into SettingsWindow's reach or (b) rewire auto-persist to cover
+        // the new site.
+        //
+        // We walk the Swift sources (excluding SettingsWindow.swift) and
+        // assert no line matches `settings\.<identifier>\s*=`. Environment-
+        // injected `settings` reads (e.g. `settings.foo` as RHS) are fine;
+        // only WRITES trigger the M65 hypothetical.
+
+        let wizardDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio")
+
+        let enumerator = FileManager.default.enumerator(atPath: wizardDir.path)
+        var offenders: [(file: String, line: Int, text: String)] = []
+        while let rel = enumerator?.nextObject() as? String {
+            guard rel.hasSuffix(".swift") else { continue }
+            // Skip SettingsWindow (the allowed mutation site) and the
+            // AppSettings.swift file itself (self-mutation is expected).
+            if rel.hasSuffix("Wizard/SettingsWindow.swift") { continue }
+            if rel.hasSuffix("Models/AppSettings.swift") { continue }
+            let path = wizardDir.appendingPathComponent(rel).path
+            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            for (i, rawLine) in content.components(separatedBy: "\n").enumerated() {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                if line.hasPrefix("//") { continue }
+                if line.hasPrefix("///") { continue }
+                // Match `settings.<ident> =` but NOT `settings.foo ==` or
+                // `_ = settings.foo` or closure-param `settings = ...`
+                // (that last one would be a new @State which is rare).
+                if let range = line.range(of: #"\bsettings\.[A-Za-z_][A-Za-z0-9_]*\s*=[^=]"#,
+                                          options: .regularExpression) {
+                    // Skip Picker/Binding get/set — those are reads.
+                    let snippet = String(line[range])
+                    if snippet.contains(",") || snippet.contains("get:") { continue }
+                    offenders.append((file: rel, line: i + 1, text: line))
+                }
+            }
+        }
+        XCTAssertTrue(offenders.isEmpty,
+            "M65 invariant violated — settings mutated outside SettingsWindow:\n" +
+            offenders.map { "  \($0.file):\($0.line) — \($0.text)" }.joined(separator: "\n"))
+    }
+
     func test_snapshot_apply_still_coerces_invalid_values_to_defaults() {
         // Functional test: behavior is preserved — an invalid rawValue still
         // results in the default being applied. The M66 fix ADDS logging

@@ -4474,3 +4474,47 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: sweep Python-side for the same anti-pattern — does `jang_tools` have any "silently pass on missing input" checks?
 
 **Next iteration should pick:** audit `hadamardVsLowBits` for the ambiguous-pass pattern (small, concrete follow-up), OR close M63/M65 as observation-only, OR move to a completely different audit angle.
+
+---
+
+## 2026-04-20 iteration 103 — M65 + M63 closures (observations → testable invariant where possible)
+
+**Angle:** Iter-102 forecast option 1 was `hadamardVsLowBits` verification. Quick check confirmed that site is correctly handled — unknown profile → fallback 99 → is2bit=false → pass, and earlier gates catch unknown profiles before this one runs. No ambiguous-pass bug. Pivoted to iter-102's option 2: close M63 + M65 observation-only items.
+
+**Deep trace walkthrough:**
+1. **`hadamardVsLowBits` audit (disposition: no bug):** at line 273, `compress ?? 99` fallback means unknown profile → treat as 99 bits → is2bit=false → pass. For a truly unknown profile (user typo), the avgBits lookup in `estimateOutputBytes` returns 0 first, tripping other gates earlier. Hadamard fallback is tertiary; not user-visible. Bucket 2 of the iter-102 taxonomy (N/A-for-this-plan).
+2. **Python-side sweep (disposition: no bug):** grep'd `return True` + `pass.*hint` in capabilities.py / validate paths. Python is CLI-driven — all SKIP/SKIP-reason paths print an explanatory message. The ambiguous-pass UX anti-pattern is Swift-UI-specific (shared color/icon for distinct meanings); Python's text output inherently distinguishes.
+3. **M65 trace:** iter-14 observation. "SettingsWindow auto-persist bound to Settings sheet .task — if user never opens Settings AND something programmatic mutates settings, the change is lost."
+   - Grep'd `settings\.\w+\s*=` across `JANGStudio/JANGStudio/` excluding SettingsWindow.swift. **ZERO hits.** Today, ALL settings writes happen inside the Settings sheet.
+   - M65's hypothetical ("future crash reporter, telemetry sampler") has no trigger today.
+   - **But I can lock in the invariant.** Wrote a walk-all-.swift-files grep test that fails if any non-comment line in a non-SettingsWindow file matches `settings.<ident> = `. Accounts for Picker/Binding get/set shapes to avoid false positives. Any future addition fails this test → engineer sees the M65 reasoning and decides how to handle persistence.
+4. **M63 trace:** iter-14 observation. "`persist()` on MainActor could block if UserDefaults is CloudKit-backed."
+   - Verified: `UserDefaults.standard` does NOT block on CloudKit sync. Sync happens via `NSUbiquitousKeyValueStore` which is a separate API JANG Studio doesn't use.
+   - M63's concern requires an explicit opt-in the project doesn't have.
+   - No test pin possible (nothing to test without the trigger). Documented in the checklist as "accepted as informational; revisit if a CloudKit suite is added."
+
+**Meta-lesson — testable invariants > observation comments.** M65 sat as an observation for 80+ iters because there was no trigger to fix. Iter-103 turns the hypothetical into a **grep invariant test** — "the rule 'all settings mutation lives in SettingsWindow' is now MACHINE-ENFORCED." A future PR that adds a crash-reporter toggling `autoOpenIssueTrackerOnCrash` from elsewhere fails this test and the engineer is pointed at M65's reasoning immediately. Turned a passive note into active protection.
+
+**Rule for future observation-only closures:** before closing as "observation, no action," try to express the invariant as a test. If the hypothetical COULD be caught by a grep/scan, write that test. The test becomes the documentation — lives next to the behavior it protects, runs on every CI, fails loudly if the hypothetical becomes real.
+
+**Meta-lesson — some observations legitimately can't become tests.** M63's CloudKit blocking concern requires an opt-in JANG Studio doesn't have. There's no way to pin "a future refactor shouldn't add this without also handling it async" in a test, short of banning all UserDefaults suite additions — which is overreach. Acceptable disposition: document in the checklist with clear "when to revisit" guidance. Different from M65 which DID have a testable invariant.
+
+**Items touched:**
+- M63 [x] — observation-only, documented (no UserDefaults-sync blocking today; revisit if CloudKit suite is added).
+- M65 [x] — observation turned into an enforced grep invariant via `test_appSettings_mutations_are_settingsWindow_only`. +1 regression test.
+
+**Commit:** (this iteration)
+
+**Verification:** 29 AppSettingsTests pass (was 28, +1). 28 Preflight + 17 PostConvertVerifier unchanged.
+
+**Closed-status tally:** 119 (iter 102) + M63 + M65 = 121 items touched, all closed. Zero known bugs as of iter-103 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- **NEW**: audit other observation-only items that COULD become grep invariants. Candidates: M108 (try? spot-check — could be a grep for specific anti-pattern), M113 (except Exception sites).
+- **NEW**: sweep remaining `- [ ]` M-items for ones that are actually closed or redundant.
+
+**Next iteration should pick:** M108 try? sweep as grep invariant (applies the iter-103 meta-lesson), OR audit a fresh surface.
