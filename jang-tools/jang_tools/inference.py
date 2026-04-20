@@ -36,10 +36,14 @@ def _load_llm(model_dir: Path):
 
 def _load_vlm(model_dir: Path):
     """Load a VL/video model via jang_tools.load_jangtq_vlm if JANGTQ, else via mlx_vlm."""
-    # Try the JANGTQ-VL loader first
+    # Try the JANGTQ-VL loader first. M45 (iter 20): the symbol is
+    # `load_jangtq_vlm_model`, not `load_jangtq_vlm` — the previous name
+    # was a latent ImportError swallowed by the `except Exception: pass`
+    # below, silently falling through to mlx_vlm which can't load actual
+    # JANGTQ-VL models correctly.
     try:
-        from jang_tools.load_jangtq_vlm import load_jangtq_vlm
-        return load_jangtq_vlm(str(model_dir))
+        from jang_tools.load_jangtq_vlm import load_jangtq_vlm_model
+        return load_jangtq_vlm_model(str(model_dir))
     except Exception:
         pass
     # Fallback: mlx_vlm direct

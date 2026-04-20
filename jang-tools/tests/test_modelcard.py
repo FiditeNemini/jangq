@@ -44,7 +44,14 @@ def test_card_has_usage_section(dense_model_dir):
     card = generate_card(dense_model_dir)
     assert "Quick start" in card
     assert "```python" in card
-    assert "load_model" in card
+    # M45 (iter 20): symbol is `load_jang_model`, not `load_model`. The
+    # `load_model` substring appears INSIDE `load_jang_model` so the old
+    # assertion was vacuously true — a pure import-name regression would
+    # never have been caught here. Assert the full correct symbol AND
+    # assert the bare `load_model(` call is NOT present.
+    assert "load_jang_model" in card
+    assert "load_model(" not in card, \
+        "card contains bare `load_model(` — would ImportError for adopters"
 
 
 def test_cli_json_output(dense_model_dir):

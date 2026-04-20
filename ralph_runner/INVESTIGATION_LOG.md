@@ -722,3 +722,42 @@ green/fail matrix has been lying.
 **Closed-status tally:** 32 (prior) + M42 = 33 closed / 71 total = 46% closure rate.
 
 **Next iteration should pick:** M43 (publish progress streaming) is the HIGHEST REMAINING ADOPTER-UX ITEM — users stare at a spinner for 30-minute uploads with zero feedback. Architecturally meatier (needs JSONL stream from Python + Swift parser) but high value. Alternatively M45 (modelcard per-arch coverage) is mid-size. Cat D memory cross-ref is 14 iters idle and would surface any drift between memory and the 10,000+ lines of code that landed since iter 5.
+
+---
+
+## 2026-04-20 iteration 20 — M45 modelcard per-arch coverage surfaces import bugs
+
+**Angle:** Close M45 from the Cat A adopter journey. M43 (progress streaming) architecturally meatier, deferred. M45 scope was "verify every supported family generates a working snippet" — which turned into "find out why the generated snippets never actually worked".
+
+**Deep trace walkthrough:**
+1. Read `modelcard.py`. `generate_card` calls `detect_capabilities` + `render_snippet(model_dir, "python")` to embed a Python example.
+2. Read `python-snippet.py.jinja`. Two branches: VL and non-VL.
+3. Non-VL line 18-21: `from jang_tools.loader import load_model\nmodel, tokenizer = load_model("{{ model_path }}")`. Checked actual symbols in `jang_tools.loader`: only `load_jang_model` and `load_jang_vlm_model` exist. **`load_model` does not exist in that module.** Every adopter following the snippet would see `ImportError: cannot import name 'load_model' from 'jang_tools.loader'`.
+4. Ran `python3 -c "from jang_tools.loader import load_model"` — confirmed ImportError.
+5. Read `test_examples.py::test_render_python_dense`. Line 69: `assert "from jang_tools.loader import load_model" in snippet`. **The test PINNED the wrong symbol.** Same for `test_cli_examples_json` line 111 and `test_modelcard.py::test_card_has_usage_section` line 47 (which asserts the substring `"load_model"` which is vacuously true because it appears inside `load_jang_model` — classic substring false-positive).
+6. Looked at VL branch. Line 2: `from jang_tools.load_jangtq_vlm import load_jangtq_vlm`. Actual symbol: `load_jangtq_vlm_model`. Same class of bug.
+7. Grepped for other consumers of the wrong VL symbol. Found `inference.py:41`: `from jang_tools.load_jangtq_vlm import load_jangtq_vlm`. This wasn't caught because the surrounding `try/except Exception: pass` silently swallowed the ImportError and fell through to `mlx_vlm.load` — which works on non-JANGTQ VL models but CANNOT load real JANGTQ-VL outputs correctly. **Silent degradation of VL inference** because the fallback looks like success.
+8. Checked audit.py — correctly uses `load_jangtq_vlm_model` (fixed in a prior commit per memory).
+9. **Why the tests didn't catch it:** `test_cli_python_snippet_compiles` uses `compile(snippet, ..., "exec")` which only validates syntax. Compile-only can't catch import-name typos — you'd need to actually import and call. `test_examples.py::test_render_python_dense` asserted the WRONG name, locking the bug in.
+
+**Fix stack:**
+- `python-snippet.py.jinja`: dense import `load_jang_model`; VL import `load_jangtq_vlm_model`. Call sites updated.
+- `inference.py`: VL dispatch uses `load_jangtq_vlm_model`. Comment left explaining the silent-fallback trap the old name was hiding.
+- `test_examples.py`: stale pins flipped. Added `load_model(` not-in-snippet guard to catch bare-call regressions. Added `test_python_snippet_imports_resolve_to_real_symbols` using `importlib.import_module` + `hasattr(mod, name)` — this IS what compile-only couldn't catch.
+- `test_modelcard.py`: `"load_model" in card` was vacuously true (substring of `load_jang_model`). Flipped to full-symbol assert plus `load_model(` bare-call absence.
+
+**Items touched:**
+- M45 [x] — two import-name bugs fixed + test pins corrected to assert correct symbols + runtime-hasattr test added so future renames break loudly.
+
+**Commit:** (this iteration)
+
+**Verification:** 232 jang-tools (was 231, +1 hasattr test). ralph_runner 68 + Swift 109 unchanged.
+
+**Closed-status tally:** 33 (prior) + M45 = 34 closed / 71 total = 48% closure rate. **Cat A adopter journey significantly drained.** Only M43 (publish progress streaming) remains in Cat A.
+
+**Meta-lesson:** "tests pin the wrong behavior" is a failure mode distinct from "code is buggy". A test asserting `assert X in snippet` where X is the wrong value PREVENTS the bug from being fixed via normal test-driven changes. The fix must update BOTH the code AND the test. Watch for:
+- Substring assertions where the substring appears inside the correct string (the `load_model` in `load_jang_model` case).
+- `compile()` validation treated as runtime-correctness (only catches SyntaxError, not ImportError).
+- `try/except Exception: pass` wrapping imports (silently converts ImportError to "feature unavailable").
+
+**Next iteration should pick:** M43 (publish progress streaming) — last Cat A item, biggest remaining adopter-UX win, but architecturally non-trivial. Or Cat D memory cross-ref second pass (14 iters idle). Or M48 (default repoName missing org prefix — small UX polish). Or investigate whether `audit.py:272` ok-note `"VL model loaded successfully via load_jangtq_vlm/mlx_vlm.load"` mentions the old wrong name in user-visible messages (likely just a misleading string).

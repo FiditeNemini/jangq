@@ -66,7 +66,11 @@ def test_detect_vl_capabilities(vl_model_dir):
 def test_render_python_dense(dense_model_dir):
     snippet = render_snippet(dense_model_dir, "python")
     # Should use dense loader
-    assert "from jang_tools.loader import load_model" in snippet
+    # M45 (iter 20): symbol must be `load_jang_model`, not `load_model` —
+    # the latter doesn't exist in jang_tools.loader and would ImportError
+    # for every adopter copying this snippet. Tests previously pinned the
+    # WRONG name, locking the bug in.
+    assert "from jang_tools.loader import load_jang_model" in snippet
     assert "apply_chat_template" in snippet
 
 
@@ -108,7 +112,10 @@ def test_cli_examples_json(dense_model_dir):
     assert r.returncode == 0, r.stderr
     data = json.loads(r.stdout)
     assert data["lang"] == "python"
-    assert "from jang_tools.loader import load_model" in data["snippet"]
+    # M45 pin: correct symbol is `load_jang_model`; `load_model` doesn't exist.
+    assert "from jang_tools.loader import load_jang_model" in data["snippet"]
+    assert "load_model(" not in data["snippet"], \
+        "'load_model(' would ImportError for adopters — must be load_jang_model"
 
 
 def test_cli_python_snippet_compiles(dense_model_dir):
@@ -121,3 +128,24 @@ def test_cli_python_snippet_compiles(dense_model_dir):
     snippet = json.loads(r.stdout)["snippet"]
     # Don't EXEC — just compile. We can't actually import mlx in test env
     compile(snippet, "<eval>", "exec")  # raises SyntaxError if broken
+
+
+def test_python_snippet_imports_resolve_to_real_symbols():
+    """M45 (iter 20): compile-only validation doesn't catch import-name typos.
+    The previous snippet said `from jang_tools.loader import load_model` —
+    compiled fine, but adopters hit `ImportError: cannot import name 'load_model'`
+    at runtime. Verify the symbols referenced in the Python snippet actually
+    exist in the modules they're imported from.
+    """
+    import importlib
+    # Non-VL template references:
+    mod = importlib.import_module("jang_tools.loader")
+    assert hasattr(mod, "load_jang_model"), \
+        "jang_tools.loader.load_jang_model missing — python snippet will ImportError"
+    # Negative: the buggy name must NOT exist OR at least not be what we use.
+    # (Being extra-safe: don't assert absence in case someone later adds an alias.)
+
+    # VL template references:
+    vl_mod = importlib.import_module("jang_tools.load_jangtq_vlm")
+    assert hasattr(vl_mod, "load_jangtq_vlm_model"), \
+        "jang_tools.load_jangtq_vlm.load_jangtq_vlm_model missing — VL snippet will ImportError"

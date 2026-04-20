@@ -1,9 +1,9 @@
 {% if is_vl or is_video_vl -%}
-from jang_tools.load_jangtq_vlm import load_jangtq_vlm
+from jang_tools.load_jangtq_vlm import load_jangtq_vlm_model
 from mlx_vlm import generate
 from PIL import Image
 
-model, processor = load_jangtq_vlm("{{ model_path }}")
+model, processor = load_jangtq_vlm_model("{{ model_path }}")
 {% if is_vl -%}
 image = Image.open("your-image.jpg")
 prompt = "Describe this image."
@@ -15,10 +15,10 @@ response = generate(model, processor, image=image, prompt=prompt, max_tokens=200
 {% endif -%}
 print(response)
 {% else -%}
-from jang_tools.loader import load_model
+from jang_tools.loader import load_jang_model
 from mlx_lm import generate
 
-model, tokenizer = load_model("{{ model_path }}")
+model, tokenizer = load_jang_model("{{ model_path }}")
 {% if has_chat_template -%}
 messages = [
     {"role": "system", "content": "You are a helpful assistant."},
