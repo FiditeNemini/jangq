@@ -36,6 +36,13 @@ final class AppSettings {
     var autoDeletePartialOnCancel: Bool = false
     var revealInFinderOnFinish: Bool = true
 
+    /// Default HuggingFace org/user for publish. Empty = user must type the
+    /// full `org/name` each time. When non-empty, PublishToHuggingFaceSheet
+    /// pre-fills the repo field with `{defaultHFOrg}/{modelBasename}`.
+    /// Introduced iter 25 (M48) — prior default was basename-only which
+    /// always failed HFRepoValidator ("must be org/model-name, one slash").
+    var defaultHFOrg: String = ""
+
     // MARK: - Advanced
     var pythonOverridePath: String = ""   // empty = use bundled
     var customJangToolsPath: String = ""  // empty = use bundled jang_tools
@@ -79,6 +86,7 @@ final class AppSettings {
         outputNamingTemplate = "{basename}-{profile}"
         autoDeletePartialOnCancel = false
         revealInFinderOnFinish = true
+        defaultHFOrg = ""
         pythonOverridePath = ""
         customJangToolsPath = ""
         logVerbosity = .normal
@@ -183,6 +191,7 @@ private struct Snapshot: Codable {
     var outputNamingTemplate: String
     var autoDeletePartialOnCancel: Bool
     var revealInFinderOnFinish: Bool
+    var defaultHFOrg: String = ""   // iter-25 field; default for pre-iter-25 snapshots
     var pythonOverridePath: String
     var customJangToolsPath: String
     var logVerbosity: String
@@ -212,6 +221,7 @@ private struct Snapshot: Codable {
         outputNamingTemplate = s.outputNamingTemplate
         autoDeletePartialOnCancel = s.autoDeletePartialOnCancel
         revealInFinderOnFinish = s.revealInFinderOnFinish
+        defaultHFOrg = s.defaultHFOrg
         pythonOverridePath = s.pythonOverridePath
         customJangToolsPath = s.customJangToolsPath
         logVerbosity = s.logVerbosity.rawValue
@@ -242,6 +252,7 @@ private struct Snapshot: Codable {
         s.outputNamingTemplate = outputNamingTemplate
         s.autoDeletePartialOnCancel = autoDeletePartialOnCancel
         s.revealInFinderOnFinish = revealInFinderOnFinish
+        s.defaultHFOrg = defaultHFOrg
         s.pythonOverridePath = pythonOverridePath
         s.customJangToolsPath = customJangToolsPath
         s.logVerbosity = LogVerbosity(rawValue: logVerbosity) ?? .normal

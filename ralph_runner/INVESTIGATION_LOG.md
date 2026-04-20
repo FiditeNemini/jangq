@@ -930,3 +930,43 @@ Sheet wiring: `isPublishing: Bool` → `progress: (done: Int64, total: Int64, la
 - Cat D third pass due around iter 27-29 per the 5-7 iter cadence
 - Unexplored audit categories: Cat F (spawned from iter 21 memory drift — might catch more drift on `project_bfloat16_fix.md`, `project_mistral4_architecture.md` M87, `project_cascade2.md`, etc.)
 - M77-adjacent: are there other places in the Swift wizard that treat chat_template.jinja as the only file form?
+
+---
+
+## 2026-04-20 iteration 25 — M48 defaultHFOrg Settings + sheet prefix
+
+**Angle:** Tiny UX polish that would have been caught by live use but is invisible on the test harness. M48 was spawned iter 7 alongside M46's validation — validation catches the bad default but the bad default is SHOWN on every sheet open. Complements iter-24's publish UX work by eliminating the "validation error on first click" friction.
+
+**Deep trace walkthrough:**
+1. Pre-iter-25 PublishToHuggingFaceSheet.init:
+   ```swift
+   self._repoName = State(initialValue: defaultRepoName.isEmpty
+                          ? modelPath.lastPathComponent
+                          : defaultRepoName)
+   ```
+   `modelPath.lastPathComponent` = `"MyModel-JANG_4K"`. M46 (iter 7) validation: "Repo id must be in the format 'org/model-name' (one forward slash)". Every first-click of the sheet lands the user on a validation error.
+2. **Design trade-offs considered:**
+   - Option A: store the user's HF org in AppSettings. User types it once in Settings; sheet prefixes automatically.
+   - Option B: infer org from the HF token via `/api/whoami-v2` call. More automatic but adds a network dependency + latency + auth failure mode.
+   - Option C: strip the validation entirely. Nope — M46 was added precisely because invalid repos burn 30+ seconds on HfHubHTTPError.
+   - **Chose A.** Simplest, zero network cost, user fully in control. Multi-org users can leave the field empty and type each time.
+3. **@State init issue caught during implementation:** Can't read `@Environment(AppSettings.self)` in the init — environment is only resolved in `body`. Solutions: pass settings through init (tight coupling from call site) OR defer the prefix to first-render via `.task`. Picked `.task` + an `orgPrefixApplied` guard so re-mounts don't double-prefix or stomp user edits.
+4. **Defensive `applyOrgPrefixIfNeeded()`:** no-ops in three cases — empty org, repo already contains `/`, repo differs from the basename default (user started typing). Last guard is the critical one: SwiftUI task could fire after a user has already edited the field; we must NOT stomp.
+5. **Snapshot migration:** `Snapshot.defaultHFOrg` has a Swift Codable default (`= ""`) so any pre-iter-25 UserDefaults snapshot decodes cleanly with an empty string. Regression test `test_pre_iter25_snapshot_defaults_hf_org_to_empty` pins this invariant.
+6. **SettingsWindow UI:** new "Publishing" section on the General tab (between Behavior and Reset). Caption: "Pre-fills the Publish sheet's repo field as {org}/{model-name}. Leave empty if you publish to multiple orgs." — guides the user through the tradeoff so it's not a surprise when they swap orgs.
+
+**Items touched:**
+- M48 [x] — default HF org persisted, UI wired, sheet prefix applies defensively.
+
+**Tests (4 new):** default is empty, roundtrip across process restart, reset clears it, pre-iter-25 snapshot (missing the field entirely) decodes with a defaulted empty value.
+
+**Commit:** (this iteration)
+
+**Verification:** 115 Swift tests (was 111, +4). jang-tools 245 + ralph_runner 68 unchanged.
+
+**Closed-status tally:** 38 (prior) + M48 = 39 closed / 74 total = 53% closure rate.
+
+**Adjacent issue spotted + DEFERRED:**
+- **M88 (new):** the sheet's init ALSO reads token from `ProcessInfo.environment` — but `.task`'s lifecycle differs from init's. Token init happens BEFORE settings are available; org prefix happens AFTER. If a future field needs BOTH at construction time, this pattern breaks. Worth a refactor pass to unify lifecycle but not urgent.
+
+**Next iteration should pick:** Cat D third pass (due iter 27-29 per cadence; can come early). Alternatively M87 Mistral 4 live validation (needs a real convert workflow). Alternatively do M88 adjacent — unify the sheet's init-vs-task field-lifecycle issue. Or investigate whether VerifyStep's adoption action row (iter 14's entry point to publish sheet) passes the right modelBasename through — a subtle off-by-one could mean the prefix runs against the wrong string.

@@ -3,6 +3,7 @@ import SwiftUI
 struct PublishToHuggingFaceSheet: View {
     let modelPath: URL
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppSettings.self) private var settings
 
     @State private var repoName: String = ""
     @State private var isPrivate: Bool = false
@@ -12,6 +13,7 @@ struct PublishToHuggingFaceSheet: View {
     @State private var dryRunResult: PublishResult?
     @State private var publishResult: PublishResult?
     @State private var errorMessage: String?
+    @State private var orgPrefixApplied: Bool = false   // M48: idempotent one-shot flag
 
     // M43 (iter 24): live progress from the streaming publish.
     // `progressPhase` = current 3-phase phase name (scan/upload/finalize).
@@ -41,6 +43,30 @@ struct PublishToHuggingFaceSheet: View {
             footer
         }
         .frame(minWidth: 640, minHeight: 460)
+        .task {
+            // M48 (iter 25): if the user has configured a default HF org in
+            // Settings, prefix it on the repoName so the field lands at
+            // `org/my-model-JANG_4K` instead of the always-invalid
+            // `my-model-JANG_4K`. Guard with `orgPrefixApplied` so clicking
+            // into the field and back out doesn't re-apply after the user
+            // has started editing.
+            guard !orgPrefixApplied else { return }
+            orgPrefixApplied = true
+            applyOrgPrefixIfNeeded()
+        }
+    }
+
+    /// Prefix the default HF org onto a basename-only repo field. No-ops when:
+    /// - settings.defaultHFOrg is empty (user hasn't configured an org yet)
+    /// - repoName already contains a `/` (user already entered an org)
+    /// - repoName doesn't match the basename-only default
+    private func applyOrgPrefixIfNeeded() {
+        let org = settings.defaultHFOrg.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !org.isEmpty else { return }
+        guard !repoName.contains("/") else { return }
+        // Only replace the basename default — don't stomp user-typed text.
+        guard repoName == modelPath.lastPathComponent else { return }
+        repoName = "\(org)/\(modelPath.lastPathComponent)"
     }
 
     private var header: some View {

@@ -96,6 +96,15 @@ private struct GeneralTab: View {
                 Toggle("Reveal in Finder on finish", isOn: $settings.revealInFinderOnFinish)
             }
 
+            Section("Publishing") {
+                TextField("Default HuggingFace org", text: $settings.defaultHFOrg)
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                Text("Pre-fills the Publish sheet's repo field as {org}/{model-name}. Leave empty if you publish to multiple orgs.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 HStack {
                     Spacer()
@@ -412,6 +421,7 @@ private func observeAndPersist(_ settings: AppSettings) async {
                 _ = settings.outputNamingTemplate
                 _ = settings.autoDeletePartialOnCancel
                 _ = settings.revealInFinderOnFinish
+                _ = settings.defaultHFOrg
                 _ = settings.pythonOverridePath
                 _ = settings.customJangToolsPath
                 _ = settings.logVerbosity

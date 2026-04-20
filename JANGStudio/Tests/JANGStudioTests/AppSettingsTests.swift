@@ -205,6 +205,75 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertNil(UserDefaults.standard.string(forKey: BundleResolver.customJangToolsPathDefaultsKey))
     }
 
+    // MARK: - Iter 25: M48 — defaultHFOrg persists + seeds Publish sheet
+
+    func test_default_hf_org_default_is_empty() {
+        let s = AppSettings()
+        XCTAssertEqual(s.defaultHFOrg, "",
+                       "default must be empty so we don't prefix a wrong org on users who haven't configured it")
+    }
+
+    func test_default_hf_org_persists_across_process() {
+        let s1 = AppSettings()
+        s1.defaultHFOrg = "dealignai"
+        s1.persist()
+        let s2 = AppSettings()
+        XCTAssertEqual(s2.defaultHFOrg, "dealignai")
+    }
+
+    func test_reset_clears_default_hf_org() {
+        let s = AppSettings()
+        s.defaultHFOrg = "dealignai"
+        s.reset()
+        XCTAssertEqual(s.defaultHFOrg, "")
+    }
+
+    func test_pre_iter25_snapshot_defaults_hf_org_to_empty() throws {
+        // Older snapshots persisted before iter 25 won't have a defaultHFOrg
+        // field. The JSON decoder must still accept them (field has a default)
+        // and apply the empty string. Without the Snapshot default, old
+        // UserDefaults would fail to decode after an app update.
+        let oldSnapshot = """
+        {
+            "defaultOutputParentPath": "",
+            "defaultProfile": "JANG_4K",
+            "defaultFamily": "jang",
+            "defaultMethod": "mse",
+            "defaultHadamardEnabled": false,
+            "defaultCalibrationSamples": 256,
+            "outputNamingTemplate": "{basename}-{profile}",
+            "autoDeletePartialOnCancel": false,
+            "revealInFinderOnFinish": true,
+            "pythonOverridePath": "",
+            "customJangToolsPath": "",
+            "logVerbosity": "normal",
+            "jsonlLogRetentionLines": 10000,
+            "logFileOutputDir": "",
+            "tickThrottleMs": 100,
+            "maxBundleSizeWarningMb": 450,
+            "mlxThreadCount": 0,
+            "metalPipelineCacheEnabled": true,
+            "preAllocateRam": false,
+            "preAllocateRamGb": 4,
+            "convertConcurrency": 1,
+            "copyDiagnosticsAlwaysVisible": true,
+            "anonymizePathsInDiagnostics": false,
+            "githubIssuesUrl": "https://github.com/jjang-ai/jangq/issues",
+            "autoOpenIssueTrackerOnCrash": false,
+            "updateChannel": "stable",
+            "autoCheckForUpdates": true
+        }
+        """.data(using: .utf8)!
+        UserDefaults.standard.set(oldSnapshot, forKey: "JANGStudioSettings")
+        // New AppSettings() calls load() which decodes the old snapshot.
+        let s = AppSettings()
+        // Other fields should round-trip unchanged.
+        XCTAssertEqual(s.defaultProfile, "JANG_4K")
+        // New field defaults to empty since the old snapshot didn't carry it.
+        XCTAssertEqual(s.defaultHFOrg, "",
+                       "pre-iter-25 UserDefaults snapshot must not fail to decode; defaultHFOrg should default to empty")
+    }
+
     func test_load_resyncs_env_passthrough_keys_on_fresh_process() {
         let s1 = AppSettings()
         s1.tickThrottleMs = 200
