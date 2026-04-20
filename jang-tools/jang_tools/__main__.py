@@ -272,6 +272,9 @@ def main():
     from .modelcard import register as _register_modelcard
     _register_modelcard(subparsers)
 
+    from .inference import register as _register_inference
+    _register_inference(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -284,7 +287,7 @@ def main():
         return
 
     suppress_banner = args.quiet_text or (
-        args.command in ("inspect-source", "examples", "modelcard")
+        args.command in ("inspect-source", "examples", "modelcard", "inference")
         and getattr(args, "json", False)
     )
     if not suppress_banner:
