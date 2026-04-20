@@ -54,7 +54,14 @@ final class ConversionPlan: Codable {
 
     init() {}
 
-    var isStep1Complete: Bool { sourceURL != nil && detected != nil }
+    /// Step 1 completes only when we've picked a folder AND detection found a
+    /// real model there — meaning at least one .safetensors shard is present.
+    /// A folder with just a config.json and nothing else is NOT a complete step 1;
+    /// surfacing this prevents silent progression when the user picks the wrong
+    /// folder (e.g., a parent directory, a docs folder, or a broken download).
+    var isStep1Complete: Bool {
+        sourceURL != nil && detected != nil && (detected?.shardCount ?? 0) > 0
+    }
     var isStep2Complete: Bool { isStep1Complete }          // step 2 only requires confirmation
     var isStep3Complete: Bool { isStep2Complete && outputURL != nil }
     var isStep4Complete: Bool { run == .succeeded }

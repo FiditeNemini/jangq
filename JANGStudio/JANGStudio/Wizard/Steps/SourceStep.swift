@@ -50,6 +50,15 @@ struct SourceStep: View {
                         Label("Vision (image)", systemImage: "eye")
                             .foregroundStyle(.blue)
                     }
+                    // No safetensors → hard-fail with a specific hint.
+                    if detected.shardCount == 0 {
+                        Label(
+                            "No .safetensors files found in this folder. You likely picked a parent folder, a docs folder, or a download that didn't complete. Pick the actual model directory.",
+                            systemImage: "xmark.octagon.fill"
+                        )
+                        .foregroundStyle(.red)
+                        .font(.callout)
+                    }
                 }
             }
 

@@ -173,6 +173,34 @@ The goal: every item reaches `[x]` with production-ready behavior. "Production" 
 
 ---
 
+## M. Deep-trace discoveries (spawned during Ralph iterations)
+
+Each item here was surfaced by a concrete trace, not speculation. Each traces back to the `INVESTIGATION_LOG.md` entry that found it.
+
+- [x] **M01** — Picking a folder with `config.json` but zero `.safetensors` silently passed Step 1 (Continue button active, user progressed to Architecture with empty detected).
+      **Trace:** user picks `/tmp/empty-cfg` → `inspect-source` succeeds with `shard_count=0` → `SourceDetector` builds `ArchitectureSummary(totalBytes=0, shardCount=0)` → `isStep1Complete` returned `true` because it only checked `detected != nil`.
+      **Fix:** gate `isStep1Complete` on `shardCount > 0`; show red "No .safetensors found" hint in Detected card.
+      **Evidence:** `ConversionPlan.swift:57-64`, `SourceStep.swift:80-88`. 65 XCTest still pass.
+      **Commit:** (this iteration)
+- [ ] **M02** — Error path: user picks a folder that LOOKS model-shaped but is actually a different HF repo clone (e.g., a dataset with config.json). Verify inspect-source + recommend don't hard-crash.
+- [ ] **M03** — Drag-and-drop folder onto Step 1 — spec (design addendum Part 5) promises this; implementation uses only NSOpenPanel. Missing feature.
+- [ ] **M04** — Recents list for source dirs — missing. If user cancels mid-convert and wants to retry, they re-pick from scratch.
+- [ ] **M05** — PreflightRunner size estimate when `detected.totalBytes == 0` — current fallback returns pass with free-GB hint, but does the UI make clear that "no estimate" ≠ "safe"?
+- [ ] **M06** — Conflict detection: if `config.json.model_type = minimax_m2` but `tokenizer_config.json.tokenizer_class = Qwen2Tokenizer`, does the app detect the conflict? Probably silent today.
+- [ ] **M07** — Nested model_type: all known patterns are `text_config.model_type`. Verify no real HF multimodal uses `llm_config.model_type` or similar non-standard keys. Current code only falls back to `text_config`.
+- [ ] **M08** — Model directory that's a symlink or on a read-only volume — does the rsync / copy during convert survive? What error does the user see?
+- [ ] **M09** — User picks the SAME folder as their output → Preflight catches this (`outputUsable` row). But what if user picks output as a subfolder of source? Still bad, not caught today.
+- [ ] **M10** — Settings pane → change `pythonOverridePath` → pick a folder → verify `BundleResolver.pythonExecutable` reads the new value. Does it require an app restart?
+- [ ] **M11** — User changes output naming template mid-flow (Step 3 already open, switches profile, does output dir name update?). Test that the auto-computed output path re-renders on profile change.
+- [ ] **M12** — Step 4 Cancel → Retry: does the runner actor reset? Does previous subprocess's zombied state interfere?
+- [ ] **M13** — Step 4 Cancel → immediately re-open the Run step via sidebar. Is stale log visible? Does the run try to restart?
+- [ ] **M14** — Double-click "Start Conversion": two overlapping runs? The button should disable on first click.
+- [ ] **M15** — macstudio has `dealignai` HF account. Swift publish dialog sends token — does it clear the token field after upload, or does it stay in memory? (security)
+- [ ] **M16** — Diagnostics zip: does it include HF tokens if they're in stderr? Should scrub `--token ...` from logs before archiving.
+- [ ] **M17** — TestInferenceSheet temperature slider: min=0.0, max=2.0 — what happens at exactly 0.0? (greedy decode) What about float precision edge cases?
+
+---
+
 ## K. Cross-cutting rules (never-forget)
 
 - [ ] **K01** — No AI attribution in any commit, README, or public material. Spot-check recent 20 commits.
