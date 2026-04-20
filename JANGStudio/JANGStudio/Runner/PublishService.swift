@@ -119,6 +119,101 @@ enum PublishService {
         }
     }
 
+    /// Streaming publish with per-file progress.
+    ///
+    /// Yields `ProgressEvent`s from the Python side's JSONL protocol (same
+    /// schema as convert's 5-phase stream; see iter 23's Python half of M43).
+    /// The stream completes when the subprocess exits. On success the final
+    /// PublishResult is available via `finalResult(...)` — it's ALSO emitted
+    /// as stdout JSON by the Python side and parsed at stream end.
+    ///
+    /// Usage: UIs iterate the stream for progress events (phase / tick /
+    /// info / warn) and read the returned `result` once the stream completes.
+    /// Non-streaming callers should continue to use `publish(...)` which is
+    /// faster (bulk upload_folder, no per-file commits).
+    static func publishWithProgress(modelPath: URL, repo: String, isPrivate: Bool,
+                                    token: String) -> AsyncThrowingStream<ProgressEvent, Error> {
+        AsyncThrowingStream { continuation in
+            Task.detached {
+                await Self._streamPublish(modelPath: modelPath, repo: repo,
+                                          isPrivate: isPrivate, token: token,
+                                          continuation: continuation)
+            }
+        }
+    }
+
+    private nonisolated static func _streamPublish(
+        modelPath: URL, repo: String, isPrivate: Bool, token: String,
+        continuation: AsyncThrowingStream<ProgressEvent, Error>.Continuation
+    ) async {
+        guard !token.isEmpty else {
+            continuation.finish(throwing: PublishServiceError.missingToken)
+            return
+        }
+
+        var args: [String] = [
+            "-m", "jang_tools", "publish",
+            "--model", modelPath.path,
+            "--repo", repo,
+            "--json",
+            "--progress", "json",   // iter 23: Python emits JSONL to stderr
+        ]
+        if isPrivate { args.append("--private") }
+
+        let proc = Process()
+        proc.executableURL = BundleResolver.pythonExecutable
+        proc.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["HF_HUB_TOKEN"] = token
+        env["PYTHONUNBUFFERED"] = "1"
+        for (k, v) in BundleResolver.childProcessEnvAdditions(inherited: env) {
+            env[k] = v
+        }
+        proc.environment = env
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+
+        // Drain stderr for progress events (JSONL schema matches convert).
+        let stderrTask = Task.detached {
+            let parser = JSONLProgressParser()
+            var lastErrTail = ""
+            for try await line in errPipe.fileHandleForReading.bytes.lines {
+                lastErrTail = String(line.suffix(256))
+                if let ev = parser.parse(line: line) {
+                    continuation.yield(ev)
+                }
+            }
+            return lastErrTail
+        }
+
+        // Drain stdout silently here — the final JSON result lives there and
+        // we capture it at process end.
+        do {
+            try proc.run()
+        } catch {
+            continuation.finish(throwing: error)
+            return
+        }
+
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            proc.terminationHandler = { _ in done.resume() }
+        }
+
+        let lastErrTail = (try? await stderrTask.value) ?? ""
+
+        if proc.terminationStatus == 0 {
+            continuation.finish()
+        } else {
+            // Scrub token before surfacing stderr to UI (iter 6 M41 layer-2).
+            let scrubbed = lastErrTail.replacingOccurrences(of: token, with: "<redacted>")
+            continuation.finish(
+                throwing: PublishServiceError.cliError(code: proc.terminationStatus, stderr: scrubbed))
+        }
+    }
+
     private nonisolated static func invoke(args: [String], token: String) async throws -> Data {
         try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global().async {

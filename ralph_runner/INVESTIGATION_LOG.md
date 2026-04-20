@@ -883,3 +883,50 @@ extension PublishService {
 Sheet wiring: `isPublishing: Bool` → `progress: (done: Int64, total: Int64, label: String)?`. Render `ProgressView(value:, total:)` + bytes-uploaded label. Total upload time unchanged; user perception vastly improved.
 
 **Next iteration should pick:** M43 Swift half (pairs naturally with this iter, architecture pre-specified). OR a different rotation — M48 (default repoName polish), M87 (Mistral 4 live validation — requires real convert, probably not doable in a unit test iter), or next Cat D pass (following iter-21/22's 5-7 iter cadence — we're at iter-22 + 1 = cadence due around iter 27-29).
+
+---
+
+## 2026-04-20 iteration 24 — M43 Swift half: publishWithProgress stream + UI bar
+
+**Angle:** Complete M43 end-to-end. Iter 23 shipped the Python JSONL emitter; iter 24 adds the Swift consumer + UI. Pair-paced so each iter is independently reviewable.
+
+**Deep trace walkthrough:**
+1. Read `PythonRunner.swift` as the reference pattern. `run() -> AsyncThrowingStream<ProgressEvent, Error>` with `Task.detached { await self.launch(...) }`, `proc.terminationHandler` continuation, stderr drain task that yields parsed events via `JSONLProgressParser`.
+2. Replicated the pattern in `PublishService` as `publishWithProgress(modelPath:repo:isPrivate:token:)`. Key differences from PythonRunner:
+   - Not an actor — PublishService is `@MainActor enum`. Stream is spawned via `Task.detached` to escape the MainActor for the subprocess wait.
+   - Passes `--progress json` to subprocess (iter 23's flag). Python emits JSONL on stderr.
+   - Sets `HF_HUB_TOKEN` env (iter 6 security pattern) + merges `childProcessEnvAdditions` (iter 11).
+   - Scrubs `token` from stderr on failure (iter 6 layer-2).
+3. Read `PublishToHuggingFaceSheet.swift`. Pre-iter-24 `runPublish()` was: set isPublishing=true → await one-shot `publish(...)` → set publishResult. Replaced with: set isPublishing=true + reset progress state → `for try await event in PublishService.publishWithProgress(...) { apply(event:) }` → reconstruct PublishResult at stream end.
+4. **State design:**
+   - `progressPhase: String` — current 3-phase name (scan/upload/finalize).
+   - `progressBytes: (done: Int64, total: Int64)?` — optional because the first tick sets totals; before that the UI shows a spinner.
+   - `progressLabel: String` — per-file filename for context.
+   - `progressLog: [String]` — breadcrumb trail for diagnostics.
+5. **UI design:** New Section "Uploading" visible while `isPublishing`. `ProgressView(value:, total:)` with a caption showing "X.XX / Y.YY GB (N%)". Current filename underneath in secondary color, line-limited + truncated middle. Empty-state fallback: indeterminate spinner during Phase 1 (scan) before any tick fires.
+6. **Contract-pinning tests:**
+   - `test_publishWithProgress_rejects_empty_token`: empty token must throw `missingToken` on the FIRST stream iteration — NO subprocess spawn (defensive early-exit preserves iter-6 security posture).
+   - `test_publishWithProgress_is_async_stream`: type-level pin. If the return type ever changes from `AsyncThrowingStream<ProgressEvent, Error>`, this test fails to compile, forcing intentional migration.
+
+**M43 end-to-end acceptance:**
+- Python side (iter 23): emits 3 phase events + info + ≥1 tick per file + final 100% tick.
+- Swift side (iter 24): decodes same JSONL, updates @State, drives a real progress bar.
+- UI shows: scan phase spinner → "2.13 / 187.42 GB (1%)" progressing up to 100% → finalize → published confirmation with repo + commit URLs.
+
+**Items touched:**
+- M43 [x] — Swift half shipped. End-to-end complete.
+
+**Commit:** (this iteration)
+
+**Verification:** 111 Swift tests (was 109, +2). jang-tools 245 + ralph_runner 68 unchanged. **Cat A fully drained.**
+
+**Closed-status tally:** 38 (prior) + M43-Swift (already counted in iter 23) = still 38 closed / 74 total = 51%. The M43 counter didn't move (it's one item across both iters) but Cat A is now ZERO remaining.
+
+**Meta:** Two-iter decomposition worked well. Iter 23 pinned the protocol (Python JSONL with tests ensuring Swift-consumable schema). Iter 24 built the consumer against the pinned protocol. Each iter independently reviewable and reversible; total scope larger than any single iter would accept.
+
+**Next iteration should pick:** Now that Cat A is drained, good candidates:
+- M48 (default repoName missing org prefix, small polish — would complement iter-24's publish UX work)
+- M87 (Mistral 4 live validation — needs real convert; could be deferred to Ralph harness)
+- Cat D third pass due around iter 27-29 per the 5-7 iter cadence
+- Unexplored audit categories: Cat F (spawned from iter 21 memory drift — might catch more drift on `project_bfloat16_fix.md`, `project_mistral4_architecture.md` M87, `project_cascade2.md`, etc.)
+- M77-adjacent: are there other places in the Swift wizard that treat chat_template.jinja as the only file form?

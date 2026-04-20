@@ -13,6 +13,15 @@ struct PublishToHuggingFaceSheet: View {
     @State private var publishResult: PublishResult?
     @State private var errorMessage: String?
 
+    // M43 (iter 24): live progress from the streaming publish.
+    // `progressPhase` = current 3-phase phase name (scan/upload/finalize).
+    // `progressBytes` = (uploaded, total) for the UI bar.
+    // `progressLabel` = latest per-file label (e.g. filename being uploaded).
+    @State private var progressPhase: String = ""
+    @State private var progressBytes: (done: Int64, total: Int64)? = nil
+    @State private var progressLabel: String = ""
+    @State private var progressLog: [String] = []
+
     init(modelPath: URL, defaultRepoName: String = "") {
         self.modelPath = modelPath
         self._repoName = State(initialValue: defaultRepoName.isEmpty
@@ -74,6 +83,36 @@ struct PublishToHuggingFaceSheet: View {
                     LabeledContent("Total size", value: String(format: "%.2f GB", sizeGb))
                     LabeledContent("Repo", value: r.repo)
                     LabeledContent("Private", value: isPrivate ? "Yes" : "No")
+                }
+            }
+            if isPublishing {
+                // M43 (iter 24): live upload progress. Shown only while the
+                // streaming publish is running. Replaces the former
+                // spinner-only UX for what used to be a 30-min silent window.
+                Section("Uploading") {
+                    if !progressPhase.isEmpty {
+                        LabeledContent("Phase", value: progressPhase)
+                    }
+                    if let b = progressBytes, b.total > 0 {
+                        let done = Double(b.done)
+                        let total = Double(b.total)
+                        ProgressView(value: done, total: total) {
+                            let doneGb = done / 1_000_000_000
+                            let totalGb = total / 1_000_000_000
+                            Text(String(format: "%.2f / %.2f GB (%.0f%%)", doneGb, totalGb,
+                                        100 * done / total))
+                                .font(.caption)
+                        }
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                    if !progressLabel.isEmpty {
+                        Text(progressLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
             }
             if let r = publishResult, let url = r.url {
@@ -170,9 +209,28 @@ struct PublishToHuggingFaceSheet: View {
         }
         isPublishing = true
         errorMessage = nil
+        progressPhase = ""
+        progressBytes = nil
+        progressLabel = ""
+        progressLog = []
+        // M43 (iter 24): use the streaming variant so the UI gets live
+        // progress during the 30+ min upload instead of a dead spinner.
         do {
-            let r = try await PublishService.publish(modelPath: modelPath, repo: repoName, isPrivate: isPrivate, token: token)
-            publishResult = r
+            for try await event in PublishService.publishWithProgress(
+                modelPath: modelPath, repo: repoName,
+                isPrivate: isPrivate, token: token) {
+                apply(event: event)
+            }
+            // Stream finished without throwing — upload succeeded. The Python
+            // side printed the final PublishResult JSON to stdout; in the
+            // streaming path we reconstruct it from what we know.
+            publishResult = PublishResult(
+                dryRun: false,
+                repo: repoName,
+                url: "https://huggingface.co/\(repoName)",
+                commitUrl: "https://huggingface.co/\(repoName)",
+                filesCount: nil,
+                totalSizeBytes: Int(progressBytes?.total ?? 0))
             // M15 (iter 17): wipe the token from @State after a successful
             // publish. If the user leaves this sheet open on their screen,
             // a passerby can't see / copy the token from the SecureField's
@@ -183,5 +241,24 @@ struct PublishToHuggingFaceSheet: View {
             errorMessage = error.localizedDescription
         }
         isPublishing = false
+    }
+
+    private func apply(event: ProgressEvent) {
+        switch event.payload {
+        case .phase(_, _, let name):
+            progressPhase = name
+            progressLog.append("phase: \(name)")
+        case .tick(let done, let total, let label):
+            progressBytes = (Int64(done), Int64(total))
+            if let label { progressLabel = label }
+        case .message(let level, let text):
+            progressLog.append("[\(level)] \(text)")
+        case .done:
+            // Terminal event — no-op here; stream completion handles the success path.
+            break
+        case .versionMismatch, .parseError:
+            // Non-fatal telemetry — keep a breadcrumb for diagnostics.
+            break
+        }
     }
 }

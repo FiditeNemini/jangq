@@ -128,4 +128,43 @@ final class AdoptionServicesTests: XCTestCase {
     func test_repo_validator_trims_whitespace() {
         XCTAssertNil(HFRepoValidator.validationError("  dealignai/MyModel  "))
     }
+
+    // MARK: - Iter 24: M43 — publishWithProgress stream
+
+    @MainActor
+    func test_publishWithProgress_rejects_empty_token() async {
+        // Stream variant mirrors the non-streaming missingToken contract.
+        // Empty token must throw PublishServiceError.missingToken on the
+        // FIRST iteration of the stream — no subprocess spawn at all.
+        let stream = PublishService.publishWithProgress(
+            modelPath: URL(fileURLWithPath: "/tmp"),
+            repo: "x/y", isPrivate: false, token: "")
+        do {
+            for try await _ in stream {
+                XCTFail("stream should have thrown before yielding any event")
+            }
+            XCTFail("stream completed without throwing — expected missingToken")
+        } catch let e as PublishServiceError {
+            switch e {
+            case .missingToken: break // expected
+            default: XCTFail("wrong PublishServiceError case \(e)")
+            }
+        } catch {
+            XCTFail("wrong error type \(error)")
+        }
+    }
+
+    @MainActor
+    func test_publishWithProgress_is_async_stream() {
+        // Type-level pin: the API returns AsyncThrowingStream<ProgressEvent, Error>
+        // — matches PythonRunner.run()'s shape, which is the invariant
+        // iter-24's UI wiring depends on. If the return type ever changes
+        // (e.g. to an actor-based alternative), this test will fail to
+        // compile — forcing an intentional migration.
+        let stream: AsyncThrowingStream<ProgressEvent, Error> =
+            PublishService.publishWithProgress(
+                modelPath: URL(fileURLWithPath: "/tmp"),
+                repo: "x/y", isPrivate: false, token: "tok")
+        _ = stream   // silence unused-warning
+    }
 }
