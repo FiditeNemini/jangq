@@ -4,12 +4,14 @@ import SwiftUI
 struct VerifyStep: View {
     @Bindable var coord: WizardCoordinator
     @Environment(CapabilitiesService.self) private var capsSvc
+    @Environment(AppSettings.self) private var settings
     @State private var checks: [VerifyCheck] = []
     @State private var busy = true
     @State private var showingInference = false
     @State private var showingExamples = false
     @State private var showingModelCard = false
     @State private var showingPublish = false
+    @State private var revealFiredOnce = false
 
     var body: some View {
         Form {
@@ -123,7 +125,18 @@ struct VerifyStep: View {
     private func refresh() async {
         busy = true
         let c = await PostConvertVerifier().run(plan: coord.plan, capabilities: capsSvc.capabilities)
-        await MainActor.run { checks = c; busy = false }
+        await MainActor.run {
+            checks = c
+            busy = false
+            // M62: auto-reveal the output in Finder once, on first successful
+            // finishable render. Respects Settings → General → Behavior →
+            // "Reveal in Finder on finish". Fires once per VerifyStep lifetime
+            // so re-opening the tab doesn't keep popping Finder.
+            if settings.revealInFinderOnFinish, !revealFiredOnce, finishable() {
+                revealFiredOnce = true
+                revealOutput()
+            }
+        }
     }
 
     private func finishable() -> Bool { !checks.contains { $0.required && $0.status == .fail } }
@@ -144,8 +157,15 @@ struct VerifyStep: View {
         }
     }
     private func reset() {
-        coord.plan = ConversionPlan()
+        // "Convert another" — clear state + re-apply user defaults so the
+        // fresh plan still reflects Settings → General → Defaults. Before M62
+        // this dropped back to hardcoded JANG_4K/jang/mse regardless of
+        // user settings.
+        let newPlan = ConversionPlan()
+        newPlan.applyDefaults(from: settings)
+        coord.plan = newPlan
         coord.active = .source
+        revealFiredOnce = false
     }
     private func finishApp() { NSApp.windows.first?.close() }
 }

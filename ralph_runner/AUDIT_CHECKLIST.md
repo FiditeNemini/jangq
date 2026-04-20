@@ -287,16 +287,28 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - 6 new tests (persist mirror, clear removes key, resolver reads UserDefaults, empty string ignored, load re-syncs on fresh process, reset clears leaf mirror).
       **Evidence:** 81 Swift tests pass (was 75).
       **Commit:** (this iteration)
-- [ ] **M62** — Remaining UI-lie settings still inert after M61 fix:
+- [ ] **M62** — Remaining UI-lie settings. **Iter 10 closed 6 of 9** (see M62 sub-items below); **3 still inert**:
+  - ~~`autoDeletePartialOnCancel` → should drive RunStep cancel handler~~ ✅ iter 10
+  - ~~`revealInFinderOnFinish` → should fire NSWorkspace.activateFileViewerSelecting~~ ✅ iter 10
+  - ~~`defaultProfile` / `defaultFamily` / `defaultMethod` / `defaultHadamardEnabled` → should seed ConversionPlan at wizard init~~ ✅ iter 10
   - `customJangToolsPath` → should set PYTHONPATH in PythonRunner env
   - `tickThrottleMs` → should be passed to Python via env var / CLI flag
   - `logVerbosity` → should set JANG_LOG_LEVEL env
   - `mlxThreadCount` → should set OMP_NUM_THREADS / MLX_THREADS env
   - `preAllocateRam*` → should set MLX_BUFFER_POOL_SIZE_GB env
-  - `autoDeletePartialOnCancel` → should drive RunStep cancel handler
-  - `revealInFinderOnFinish` → should fire NSWorkspace.activateFileViewerSelecting
-  - `defaultProfile` / `defaultFamily` / `defaultMethod` / `defaultHadamardEnabled` → should seed ConversionPlan at wizard init
   - `anonymizePathsInDiagnostics` → DiagnosticsBundle should obey
+- [x] **M62a** — `defaultProfile` / `defaultFamily` / `defaultMethod` / `defaultHadamardEnabled` were persisted but never read. Wizard always started at hardcoded `JANG_4K / jang / mse / false` regardless of user's saved defaults.
+      **Fix:** Added `ConversionPlan.applyDefaults(from: AppSettings)` (MainActor) that seeds profile/family/method/hadamard from settings. Empty profile is a no-op (corruption guard). Method strings "mse-all"/"mseall"/"mse_all" all map to `.mseAll`. Per-conversion STATE (sourceURL/detected/outputURL/run) is never touched — verified by test. Called from `WizardView.task` once on first entry + from `VerifyStep.reset()` ("Convert another") so the fresh plan still reflects user settings.
+      **Evidence:** `ConversionPlan.swift:57-88`, `WizardCoordinator.swift:36-68`, `VerifyStep.swift:158-168`. 5 new tests in `ConversionPlanTests` (accept normal, ignore empty, ignore unknown method, alias coverage, preserve per-conversion state).
+      **Commit:** (this iteration)
+- [x] **M62b** — `revealInFinderOnFinish` (default on) was inert. User had a successful 30-minute convert, needed to manually click "Reveal in Finder" to see the output.
+      **Fix:** `VerifyStep.refresh()` now fires `revealOutput()` once on the first finishable render when the setting is on. `@State private var revealFiredOnce` guards against re-fires when the user tabs back to Verify. `reset()` clears the guard so the next "Convert another" cycle re-fires cleanly.
+      **Evidence:** `VerifyStep.swift:16,124-136,167`.
+      **Commit:** (this iteration)
+- [x] **M62c** — `autoDeletePartialOnCancel` was inert. After cancel, partial output stayed on disk forever even with the setting on — user had to manually hunt for the output folder and rm it.
+      **Fix:** `RunStep.start()` cancellation branch checks `settings.autoDeletePartialOnCancel` and runs `FileManager.removeItem(at:)` with logged success/failure. Left the "Delete partial output" button intact for the opposite case (setting off, user cancels, then decides to delete manually).
+      **Evidence:** `RunStep.swift:6,92-107`.
+      **Commit:** (this iteration)
 - [ ] **M63** — `AppSettings.reset()` / `persist()` are synchronous `@MainActor` but the leaf-mirror writes happen inside them. If a write blocks (CloudKit-backed UserDefaults sync), the UI freezes. UserDefaults.standard is generally non-blocking but worth flagging.
 - [ ] **M64** — `observeAndPersist` in `SettingsWindow.swift` uses `withObservationTracking` inside a loop with `withCheckedContinuation`. Each mutation fires a continuation that persists ONCE. But if two fields are mutated in the same SwiftUI pass (e.g., resetting via the Reset button), does the loop fire TWICE or ONCE? The `CheckedContinuation` pattern may miss paired mutations. Verify.
 - [ ] **M65** — `SettingsWindow` auto-persist TASK is bound to the `.task { await observeAndPersist(settings) }` on the Settings body. If the user never OPENS Settings, the auto-persist never runs — which is fine (no changes to persist) UNLESS something else mutates settings programmatically (it doesn't today, but a future crash reporter that toggles `autoOpenIssueTrackerOnCrash` would lose the change).

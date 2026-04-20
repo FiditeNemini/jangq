@@ -33,6 +33,8 @@ final class WizardCoordinator {
 
 struct WizardView: View {
     @State private var coord = WizardCoordinator()
+    @Environment(AppSettings.self) private var settings
+    @State private var defaultsApplied = false
 
     var body: some View {
         NavigationSplitView {
@@ -57,6 +59,13 @@ struct WizardView: View {
             case .run:          RunStep(coord: coord)
             case .verify:       VerifyStep(coord: coord)
             }
+        }
+        .task {
+            // Apply settings-configured defaults once on first wizard entry.
+            // After reset() (VerifyStep → Convert another), we re-apply there.
+            guard !defaultsApplied else { return }
+            coord.plan.applyDefaults(from: settings)
+            defaultsApplied = true
         }
     }
 

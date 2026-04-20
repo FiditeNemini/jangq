@@ -3,6 +3,7 @@ import SwiftUI
 
 struct RunStep: View {
     @Bindable var coord: WizardCoordinator
+    @Environment(AppSettings.self) private var settings
     @State private var phase: (n: Int, total: Int, name: String) = (0, 5, "idle")
     @State private var tick: (done: Int, total: Int, label: String)? = nil
     @State private var logs: [String] = []
@@ -89,6 +90,16 @@ struct RunStep: View {
                 coord.plan.run = cancelRequested ? .cancelled : .succeeded
                 if cancelRequested {
                     logs.append("[cancelled] SIGTERM acknowledged, process exited")
+                    // M62: honor Settings → General → Behavior →
+                    // "Auto-delete partial output on cancel". Previously inert.
+                    if settings.autoDeletePartialOnCancel, let out = coord.plan.outputURL {
+                        do {
+                            try FileManager.default.removeItem(at: out)
+                            logs.append("[cancelled] deleted partial output at \(out.path) (auto-delete setting on)")
+                        } catch {
+                            logs.append("[cancelled] auto-delete failed: \(error.localizedDescription)")
+                        }
+                    }
                 }
             }
         } catch {

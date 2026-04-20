@@ -54,6 +54,36 @@ final class ConversionPlan: Codable {
 
     init() {}
 
+    /// Seed a fresh plan with the user's configured defaults. Only fields that
+    /// are safe to auto-populate at wizard entry get touched — specifically
+    /// the knobs that live in Settings → General → Defaults. `sourceURL`,
+    /// `detected`, `outputURL`, and `run` are intentionally untouched: those
+    /// are per-conversion state, not user defaults.
+    ///
+    /// Introduced iter 10 (M62 chain): previously `defaultProfile`,
+    /// `defaultFamily`, `defaultMethod`, `defaultHadamardEnabled` were
+    /// persisted but never read anywhere — the wizard always started on
+    /// `JANG_4K` / `jang` / `mse` / hadamard=false regardless of what the
+    /// user set in Settings.
+    @MainActor
+    func applyDefaults(from settings: AppSettings) {
+        // Profile: only apply if the settings value is non-empty — defends
+        // against first-launch or corrupted UserDefaults where profile is "".
+        if !settings.defaultProfile.isEmpty {
+            profile = settings.defaultProfile
+        }
+        if let fam = Family(rawValue: settings.defaultFamily) {
+            family = fam
+        }
+        switch settings.defaultMethod.lowercased() {
+        case "mse": method = .mse
+        case "rtn": method = .rtn
+        case "mse-all", "mseall", "mse_all": method = .mseAll
+        default: break   // unknown value → keep current default
+        }
+        hadamard = settings.defaultHadamardEnabled
+    }
+
     /// Step 1 completes only when we've picked a folder AND detection found a
     /// real model there — meaning at least one .safetensors shard is present.
     /// A folder with just a config.json and nothing else is NOT a complete step 1;

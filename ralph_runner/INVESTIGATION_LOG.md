@@ -303,3 +303,48 @@ Each entry records ONE deep trace. Created by iterations under the new Ralph pro
 **Closed-status tally:** 14 (prior) + M60 + M61 = 16 closed / 61 total = 26% closure rate.
 
 **Next iteration should pick:** Continue M62 chain by wiring up `revealInFinderOnFinish` (smallest inert field, fires once per convert — low risk, high user-visible polish). Or rotate to audit.py (765 lines, Cat K still has debt). Or rotate to M55 (multi-instance state.json race — complements iter 8 reliability work). 4 categories now have ≥1 iter; Cat E (spawned M-questions) still has lots of easy pickings (M02, M03, M07, M15, M16, M22, …).
+
+---
+
+## 2026-04-19 iteration 10 — continue M62 chain: wire 6 more settings
+
+**Angle:** Same Cat B trace as iter 9, but this iter tackles a batch of the cheapest-to-wire inert fields identified in M62. Target: every setting on the General tab (the ones a beginner would actually toggle) should DO SOMETHING.
+
+**Deep trace walkthrough:**
+1. Re-read `SettingsWindow.GeneralTab` (lines 33-119 of SettingsWindow.swift) to enumerate what's exposed to beginners:
+   - Output folder parent, default profile, default family, default method, default Hadamard (5 defaults)
+   - Calibration sample count (1)
+   - Output naming template (1, already works via renderOutputName)
+   - Auto-delete partial output on cancel (1)
+   - Reveal in Finder on finish (1)
+2. Of 8 settings on General, only `outputNamingTemplate` and (indirectly) `defaultOutputParentPath` are consumed anywhere. The other 6 are inert.
+3. **Fixes wire in three places:**
+   - **Wizard init:** `WizardView.task` runs once on first entry, calls `coord.plan.applyDefaults(from: settings)`. Guarded by `@State private var defaultsApplied` so navigation back to the wizard root doesn't re-apply (would clobber user overrides made mid-flight).
+   - **Convert another:** `VerifyStep.reset()` re-creates the plan AND re-applies defaults. Before this change, "Convert another" always dropped back to JANG_4K/jang/mse regardless of what the user had picked in Settings.
+   - **Reveal on finish:** `VerifyStep.refresh()` fires `revealOutput()` on the first finishable render with a `revealFiredOnce` @State guard. Cleared in `reset()` so each conversion cycle gets one auto-reveal.
+   - **Auto-delete on cancel:** `RunStep.start()` cancellation branch reads the setting and runs `FileManager.removeItem(at:)` with logged outcome.
+4. **Data integrity requirements for applyDefaults:**
+   - Empty string profile must be a no-op (first-launch UserDefaults state can have empty strings from Snapshot defaults; would otherwise blank the profile).
+   - Unknown method string must NOT coerce to a random enum; preserve current method. Defends against schema drift.
+   - Method aliases: "mse-all" / "mseall" / "mse_all" all map to `.mseAll` (enum case-name vs settings-string drift).
+   - Per-conversion STATE (sourceURL, detected, outputURL, run) must NEVER be touched — those aren't user defaults. Pinned by an explicit test.
+5. **Tests:** 5 new `ConversionPlanTests` cases:
+   - `test_applyDefaults_seeds_profile_family_method_hadamard` — happy path
+   - `test_applyDefaults_ignores_empty_profile` — corruption guard
+   - `test_applyDefaults_ignores_unknown_method` — schema drift guard
+   - `test_applyDefaults_accepts_mse_all_aliases` — case-alias coverage
+   - `test_applyDefaults_preserves_per_conversion_state` — defends against future bugs that accidentally extend applyDefaults to clobber in-flight state
+
+**Items touched:**
+- M62a [x] — defaultProfile/Family/Method/Hadamard now seed the wizard on entry AND after "Convert another"
+- M62b [x] — revealInFinderOnFinish auto-fires once per successful convert
+- M62c [x] — autoDeletePartialOnCancel deletes partial output on user cancel
+- M62 [partial] — 6 of 9 sub-items closed; 3 remain (customJangToolsPath, tickThrottleMs, logVerbosity + mlxThreadCount + preAllocateRam*, anonymizePathsInDiagnostics)
+
+**Commit:** (this iteration)
+
+**Verification:** 86/86 Swift tests pass (was 81). Python unchanged.
+
+**Closed-status tally:** 16 (prior) + M62a + M62b + M62c = 19 closed / 61 total = 31% closure rate.
+
+**Next iteration should pick:** The remaining M62 sub-items are either (a) purely env-var passthrough (tickThrottleMs, logVerbosity, mlxThreadCount, preAllocateRam) which could all land in a single patch to PythonRunner, or (b) a harder path anonymization rewrite of DiagnosticsBundle. Option (a) is the efficient batch. Or rotate to M55 (multi-instance state.json race — reliability complement to iter 8) which has been sitting idle since iter 8.
