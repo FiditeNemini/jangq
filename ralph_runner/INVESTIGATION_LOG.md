@@ -5986,3 +5986,54 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **NEW (data integrity):** audit the M195 DB backfill's idempotency claim with a chaos test — simulate a backfill interrupted mid-sweep, verify restart resumes cleanly.
 
 **Next iteration should pick:** rate-limit /retry + /admin/purge extension (simple + 8-iter backlog), OR invariant-coverage audit for JANGStudio main app (continues iter-135 meta-audit pattern), OR anti-regression invariant for `try? await` in main-app Button handlers (codifies iter-122 memory feedback).
+
+---
+
+## 2026-04-20 iteration 136 — M199 extend rate-limit to /retry + /admin/purge + /recommend (closes 8-iter backlog)
+
+**Angle:** iter-127 flagged "extend M187 rate limit to /retry + /admin/purge" → deferred 8 iters in the forecast pipeline → iter-135 promoted it to "long-deferred, just do it". Simple + finite-scope + overdue.
+
+**Deep trace walkthrough:**
+1. **Enumerated all endpoints with auth.** Grep'd for `Depends(check_rate_limit)` — only `/jobs` POST and `/estimate` POST had it (from iter-124 M187 baseline).
+2. **Classified each unprotected endpoint by cost-of-flooding:**
+   - POST `/jobs/{id}/retry` — **HIGH** — spawns full convert pipeline (subprocess + download + GPU work). Real DoS vector.
+   - POST `/admin/purge` — **MEDIUM** — DB sweep + delete work. Not catastrophic but cheap to extend.
+   - GET `/recommend/{model_id}` — **HIGH** — hits HF `api.model_info` on every call. Same HF-budget-exhaustion shape as /estimate.
+   - DELETE `/jobs/{id}` — **LOW** — just sets a threading.Event + DB row. Rate-limit would be noise.
+   - GET `/jobs`, GET `/jobs/{id}`, GET `/queue`, GET `/jobs/{id}/logs` — **LOW** — DB-only reads. M187 rationale: keep probe endpoints cheap.
+   - GET `/jobs/{id}/stream` — **ALREADY CAPPED** — M188 iter-125 has per-IP + global concurrent-stream caps (different semantic than per-request rate).
+   - GET `/health`, GET `/profiles` — **PUBLIC** — no rate-limit by design.
+3. **Applied rate-limit to HIGH + MEDIUM (3 endpoints).** Ordered `Depends(check_rate_limit)` BEFORE `Depends(check_auth)` — matches M187's original ordering so rate-limit fires even on failed-auth requests (defends against auth-brute-force flooding).
+4. **Extended `test_rate_limit_applied_to_high_cost_endpoints`.** Added the 3 new endpoints to the iteration list. Renamed failure-message attribution from `M187` to `M199` for the new cases.
+5. **Ran suite.** 69/69 pass (test count unchanged — existing test extended, not added).
+
+**Meta-lesson — finish small easy items before they pile up into "later" debt.** iter-124 M187's "add later" deferral became a 7-iter-long forecast item. The fix is 3 lines of Python + 1 test. Why did it sit for 8 iters? Because every iter had a higher-priority finding (real bugs). The deferral wasn't wrong — it was correctly ranked as lower-priority — but the ACCUMULATION became noise. **Rule: deferrals past 3 iters are a signal to promote-or-drop. Either the top-priority items aren't actually top (promote), or the deferred item isn't actually worth doing (drop). Don't leave items in the forecast bullet for ∞ iters.** Parallels iter-127 M190's 4-bump rule but on the axis of forecast-bullet staleness.
+
+**Meta-lesson — attribute regressions to the CURRENT iter's addition, not the historical baseline.** When extending `test_rate_limit_applied_to_high_cost_endpoints`, I renamed the failure-message prefix from `M187` to `M199` for the 3 new endpoints. Why: when `/retry` rate-limit regresses in iter-200, the test should point the debugger at iter-136 (M199) not iter-124 (M187). `git blame` is most useful when the blame points at the COMMIT-THAT-INTRODUCED-THE-PROPERTY, not the commit that introduced the general CLASS of property. **Rule: when extending an invariant to cover new cases, attribute the NEW cases to their introducing iter. Makes the failure message self-documenting for commit archaeology.**
+
+**Meta-lesson — document what's OUT of scope + why.** The audit entry's "intentionally left out" section prevents a future iter from mistakenly "fixing" the missing rate-limit on DELETE /jobs (cancel). A thorough auditor might see DELETE unprotected and add `Depends(check_rate_limit)` thinking they're closing a gap — when the rationale is "rate-limit noise > real protection here". **Rule: when making a scope decision that EXCLUDES something a future auditor would plausibly add, document the exclusion + rationale in the AUDIT_CHECKLIST entry.** Makes sin-by-commission (a later iter re-adding the protection) easier to diagnose than sin-by-omission (the original iter forgot).
+
+**Meta-lesson — ordering in dependency chain matters for security semantics.** `check_rate_limit` is placed BEFORE `check_auth` in the decorator's dependencies list. Reason: rate-limit applies even to UNAUTHENTICATED requests — this defends against auth-brute-force flooding (attacker tries 1000 random tokens, all fail auth, all should still count against the rate budget). Swapped order (auth-then-rate) would let brute-force attempts pass the rate-limit check silently. **Rule: when composing security dependencies, audit the ORDER. Rate-limit-before-auth is correct for brute-force defense. Auth-before-rate-limit would be correct if you WANT unauthenticated requests to be unlimited (rarely what you want for a security perimeter).** M187 got this right in the baseline; M199 preserves it by copying the ordering pattern.
+
+**Items touched:**
+- M199 [x] — added `Depends(check_rate_limit)` to /retry, /admin/purge, /recommend. Extended existing test with M199-attributed failure messages. 8-iter forecast backlog closed.
+
+**Commit:** (this iteration)
+
+**Verification:** 69 jang-server tests pass (no count change — test body extended).
+
+**Closed-status tally:** 152 (iter 135) + M199 = 153 items touched, all closed. Zero known bugs as of iter-136 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (invariant extension — iter-135 meta-audit pattern):** invariant-coverage audit for JANGStudio main app. Sweep iters 81-110 for security/UX fixes; confirm each has a paired test file.
+- **NEW:** anti-regression invariant for `try? await` in JANGStudio main-app Button handlers (codifies iter-122 memory feedback). M198 covered the swiftpm frontend but the main app likely has more Button sites.
+- **NEW:** Swift JobStore / PythonRunner / LogAccumulator audit for M193-style subprocess-stream redaction (on-ingest scrub vs only on-diag-bundle-write).
+- **NEW:** extend M195's DB backfill idempotency with a chaos test (simulate interrupted backfill, verify restart resumes cleanly).
+- **NEW (cross-cutting):** audit jang-tools CLI for leak-vectors. The CLI runs outside the server's redaction umbrella; a user piping CLI output to a logfile could capture unscrubbed tokens. Apply the 5-dim credential hygiene matrix (SOURCE/URL/LOG/RESPONSE/DATA-AT-REST) to jang-tools.
+
+**Next iteration should pick:** JANGStudio main-app invariant-coverage audit (continues iter-135 meta-audit), OR `try? await` anti-regression invariant for main-app (extends iter-122 memory to enforcement), OR jang-tools CLI leak-vector audit (extends credential hygiene matrix to the CLI layer).

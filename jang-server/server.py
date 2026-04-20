@@ -1081,7 +1081,7 @@ def cancel_job(job_id: str):
 
 # ── Retry failed job ───────────────────────────────────────
 
-@app.post("/jobs/{job_id}/retry", dependencies=[Depends(check_auth)])
+@app.post("/jobs/{job_id}/retry", dependencies=[Depends(check_rate_limit), Depends(check_auth)])
 def retry_job(job_id: str):
     """Retry a failed job."""
     with _lock:
@@ -1272,7 +1272,7 @@ def estimate_size(req: EstimateRequest, request: Request):
 
 # ── Architecture recommendation ─────────────────────────────
 
-@app.get("/recommend/{model_id:path}", dependencies=[Depends(check_auth)])
+@app.get("/recommend/{model_id:path}", dependencies=[Depends(check_rate_limit), Depends(check_auth)])
 def recommend_profile(model_id: str):
     """Detect architecture and recommend best profiles for a model."""
     from huggingface_hub import HfApi, hf_hub_download
@@ -1308,7 +1308,7 @@ def recommend_profile(model_id: str):
 
 # ── Admin: purge old jobs ───────────────────────────────────
 
-@app.post("/admin/purge", dependencies=[Depends(check_auth)])
+@app.post("/admin/purge", dependencies=[Depends(check_rate_limit), Depends(check_auth)])
 def purge_old_jobs(hours: int = CLEANUP_HOURS):
     """Delete completed/failed jobs older than N hours."""
     cutoff = time.time() - hours * 3600

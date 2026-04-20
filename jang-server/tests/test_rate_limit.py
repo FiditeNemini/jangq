@@ -63,19 +63,33 @@ def test_check_rate_limit_uses_sliding_window():
 
 
 def test_rate_limit_applied_to_high_cost_endpoints():
-    """POST /estimate (HF API call) and POST /jobs (subprocess work) must
-    have check_rate_limit in their dependencies. Other auth'd POSTs
-    (cancel, retry, admin/purge) are lower-cost and not strictly required
-    but could be added later."""
+    """High-cost endpoints must have check_rate_limit in their
+    dependencies. Pre-M187 any of these could be flooded:
+    - POST /estimate: HF API call (exhausts HF rate budget)
+    - POST /jobs: subprocess + DB work
+    - POST /jobs/{id}/retry (M199 iter 136): spawns subprocess work —
+      real DoS vector, finally added per iter-127's 8-iter backlog.
+    - POST /admin/purge (M199 iter 136): sweep + DELETE work on DB —
+      less severe than /retry but still cheap to extend.
+    - GET /recommend/{model_id:path} (M199 iter 136): hits HF API on
+      every call; same exhaustion vector as /estimate.
+    """
     content = SERVER_PY.read_text(encoding="utf-8")
     routes = _route_decorators(content)
-    for endpoint in ("POST /estimate", "POST /jobs"):
+    for endpoint in (
+        "POST /estimate",
+        "POST /jobs",
+        "POST /jobs/{job_id}/retry",
+        "POST /admin/purge",
+        "GET /recommend/{model_id:path}",
+    ):
         decos = routes.get(endpoint, [])
         assert any("check_rate_limit" in d for d in decos), (
-            f"M187 regression: {endpoint} must include "
-            f"`Depends(check_rate_limit)` in its dependencies. Pre-M187 "
-            f"a single client could flood this endpoint exhausting the "
-            f"server's HF rate budget (estimate) or DB+validation budget (jobs)."
+            f"M199 regression: {endpoint} must include "
+            f"`Depends(check_rate_limit)` in its dependencies. See M187 "
+            f"(iter 124) for the original rate-limit motivation and "
+            f"M199 (iter 136) for the extension to /retry, /admin/purge, "
+            f"and /recommend."
         )
 
 
