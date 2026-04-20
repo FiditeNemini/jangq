@@ -5937,3 +5937,52 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **NEW (5-dim credential hygiene for Swift):** apply the SOURCE/URL/LOG/RESPONSE/DATA-AT-REST matrix to JANGStudio. Python side is clean at all 5 dimensions; Swift side has partial LOG coverage only. Inventory Swift-side leak points across all 5 dimensions.
 
 **Next iteration should pick:** invariant audit across iters 111-196 (meta-audit to verify each security fix has a paired invariant — extends iter-134 meta-lesson), OR rate-limit /retry + /admin/purge extension (simple + long-deferred), OR Swift JobStore scrub-on-ingest audit (applies M193 to the Swift runtime).
+
+---
+
+## 2026-04-20 iteration 135 — M198 retroactive invariants for JANGQuantizer.swiftpm (M185 + M186)
+
+**Angle:** iter-134 M197 codified "every security fix needs a paired invariant." Apply that rule RETROACTIVELY: audit iters 111-197's security fixes and ensure every one has a corresponding invariant test.
+
+**Deep trace walkthrough:**
+1. **Enumerated security-fix iters 111-197.** 21 M-items. Grep'd tests/ directories for M-number references → each item either has a named test file or is the test file itself (e.g., M197 IS the parity invariant).
+2. **Found 2 gaps:** M185 (iter 120, URL injection in APIClient.listJobs) and M186 (iter 121, silent Cancel/Retry in QueueView). Both are in `jang-server/frontend/JANGQuantizer.swiftpm/Sources/`. That package has NO Tests/ directory — no SwiftPM test target today.
+3. **Design decision: source-inspection from Python, not new SwiftPM test target.** Scaffolding a new SwiftPM test target for 2 invariants costs: Package.swift edits, test dependency wiring, Xcode project updates, XCTest imports. Source-inspection from the existing `ralph_runner/tests/` uses the M197 pattern (Python reads Swift source as text, pins properties via substring/regex). Zero scaffolding, works today.
+4. **Designed 5 tests:**
+   - **M185-A** (APIClient.listJobs URL construction): positive pin for `URLComponents` + `URLQueryItem` usage; negative pin that `"/jobs?...\\("` string-interpolation bug can't return.
+   - **M186-A** (QueueView no `try? await`): comment-strip first (the M186 docstring MENTIONS `try? await` in the bug description — naive substring-match would false-positive); then assert no `try? await` in live code.
+   - **M186-B** (QueueView actionError state): pin `@State private var actionError` AND `Text(err)` rendering. Both needed — capture without render = same UX as silent swallow.
+   - **M185-B** (SettingsView Check Connection): pin do/catch + lastError in the button's Task closure.
+   - **M185-C** (SettingsView lastError rendering): pin `if let err = lastError` render site.
+5. **Ran suite.** 5/5 M198 pass. Full collectible ralph_runner invariant suite: 12/12 pass. jang-server: 69/69 pass.
+
+**Meta-lesson — audit INVARIANT coverage as a first-class property.** M197 stated the rule "every security fix gets a paired invariant"; M198 applied it BACKWARDS. Found 2 gaps out of ~21 items (~90% coverage). The 10% gap was real bugs (URL injection + silent swallow) that could have silently regressed. **Rule: every ~10-20 accumulated security fixes, spend one iter doing a full invariant-coverage audit. Treat invariant coverage as a property worth measuring and closing gaps on, not an implicit outcome of each fix.** Same philosophy as test-coverage audits in normal software engineering — it's easier to prevent regressions than to catch them post-hoc.
+
+**Meta-lesson — cross-language invariants via source inspection > new test targets.** Setting up a Swift test target for 2 small invariants is 4x the cost of writing them. Source-inspection from Python reads Swift as text and pins properties via regex/substring — no scaffolding. **Rule: prefer source-inspection (from an existing test framework in any language) over standing up a NEW test target. Native test targets are only worth the cost when you need runtime behavior (function calls, internal state) that source inspection can't replicate.** Parallels iter-134 M197's architectural choice: Python test reads Swift source for parity check.
+
+**Meta-lesson — pin CAPTURE and RENDER, not just capture.** Error surfaces have two parts: the state variable (capture) and the view rendering (display). Either missing = identical UX to silent swallow. Tests that only pin capture give false confidence. **Rule: for user-facing error properties, write TWO invariants — one pins the state variable's existence, the other pins its rendering in at least one view site.** The dual-pin is ~2x the code but prevents a class of regression that's otherwise subtle and hard to reason about from code review alone.
+
+**Meta-lesson — comment-strip before "no pattern in code" checks.** When an invariant says "live code must not contain X", the rationale comment explaining WHY almost always MENTIONS X. Naive substring checks false-positive on comments. Strip `//` and `///` lines first. **Rule: for "no bad pattern" invariants, preprocess the source to strip single-line comments before searching.** Inverse of iter-130 M193's `rfind` lesson but same class of bug: must distinguish rationale text from live code. Parallels iter-127 M190's structural-slicing for similar reason (anchor on code structure, not on textual coincidence).
+
+**Items touched:**
+- M198 [x] — retroactive invariants for M185 (URL injection) + M186 (silent swallow) in JANGQuantizer.swiftpm. 5 new tests in `ralph_runner/tests/test_frontend_quantizer_invariants.py`.
+
+**Commit:** (this iteration)
+
+**Verification:** 5 new M198 tests pass. 12/12 collectible ralph_runner invariant tests pass. 69/69 jang-server tests pass.
+
+**Closed-status tally:** 151 (iter 134) + M198 = 152 items touched, all closed. Zero known bugs as of iter-135 end. **Operational task from iter-116 still open:** rotate the leaked HF_UPLOAD_TOKEN at HF settings.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW (long-deferred — 8 iters now):** extend rate-limit dependency to /retry + /admin/purge. Carried since iter-127. /retry can spawn subprocess work = real DoS vector.
+- **NEW (parity follow-on):** apply same invariant-coverage audit to JANGStudio main app. Sweep iters 81-110 for security/UX fixes; confirm each has a paired test file. Several may already be covered via DiagnosticsBundleTests + AppSettingsTests + WizardStepContinueGateTests; audit systematically.
+- **NEW:** Swift JobStore / PythonRunner / LogAccumulator audit for the M193 subprocess-stream redaction pattern. Does JANGStudio's runner apply scrubSensitive on ingest, or only at diag-bundle write?
+- **NEW (anti-regression extension):** add a source-inspection invariant asserting NO `try? await` in JANGStudio's main app's SwiftUI Button handlers (currently covered in JANGQuantizer.swiftpm via M198, but the main app likely has more Button sites).
+- **NEW (data integrity):** audit the M195 DB backfill's idempotency claim with a chaos test — simulate a backfill interrupted mid-sweep, verify restart resumes cleanly.
+
+**Next iteration should pick:** rate-limit /retry + /admin/purge extension (simple + 8-iter backlog), OR invariant-coverage audit for JANGStudio main app (continues iter-135 meta-audit pattern), OR anti-regression invariant for `try? await` in main-app Button handlers (codifies iter-122 memory feedback).

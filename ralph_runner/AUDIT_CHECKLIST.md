@@ -225,6 +225,34 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M198 (retroactive invariants for JANGQuantizer.swiftpm — M185 URL injection + M186 silent swallow)** — Iter-135 applies iter-134 M197's meta-rule RETROACTIVELY: every security fix needs a paired invariant. Audit across iters 111-197 found M185 (iter 120) and M186 (iter 121) both fixed real bugs in the JANGQuantizer.swiftpm frontend but neither had a paired regression test. The package has NO Tests/ directory today.
+      **Audit results (iters 111-197):** confirmed every other security fix has an invariant:
+      - M177 (except: pass) → `test_exception_handling_invariant.py`
+      - M178 (SSRF webhook) → `test_webhook_ssrf.py`
+      - M179 (auth on GETs) → `test_auth_enforcement.py`
+      - M180 (SSE subscriber leak) → `test_sse_subscribers_cleanup.py`
+      - M181 (hardcoded HF token) → `test_no_hardcoded_secrets.py`
+      - M182 (repo-wide secrets) → `test_no_hardcoded_secrets_repo_wide.py`
+      - M183 (non-source files) → `test_no_hardcoded_secrets_repo_wide.py`
+      - M184 (SKIP_DIR gap) → `test_no_hardcoded_secrets_repo_wide.py`
+      - M185 (URL injection) → **MISSING**
+      - M186 (silent swallow) → **MISSING**
+      - M187-M197 → all have paired invariants
+      Two gaps, both in JANGQuantizer.swiftpm. Rather than stand up a SwiftPM test target just for these two, used source-inspection invariants in Python (same pattern as M197's cross-language parity test — Python tests can read Swift source).
+      **Fix (iter 135):** new `ralph_runner/tests/test_frontend_quantizer_invariants.py` with 5 tests:
+      - `test_list_jobs_uses_url_components_not_interpolation` (M185 APIClient): pins `URLComponents` + `URLQueryItem` are used in `listJobs`; negative-pin that `"/jobs?...\\("` string-interpolation bug can't return.
+      - `test_queue_view_cancel_retry_use_do_catch_not_try_optional` (M186 JobCard): strips comments (the M186 docstring MENTIONS `try? await` as the pre-fix bug) and asserts no `try? await` in live code.
+      - `test_queue_view_has_actionError_state_for_error_surface` (M186): pins `@State private var actionError` + its `Text(err)` rendering. Captures-without-rendering would be an invisible security property.
+      - `test_settings_check_connection_uses_do_catch_with_last_error` (M185 SettingsView): pins the "Check Connection" button uses do/catch + lastError.
+      - `test_settings_has_last_error_rendering` (M185): pins `if let err = lastError` rendering.
+      **Technique — comment-stripping before the `try? await` check.** The M186 docstring comment legitimately quotes the bug pattern (`Task { try? await api.X(...) }`) to explain what it fixed. A naive "no `try? await` anywhere" check would false-positive on that comment. The test strips `//`/`///` lines before searching — catches live-code reintroduction without flagging the educational comment. Inverse of iter-130 M193's `rfind` lesson (both are "test must distinguish rationale comments from live code").
+      **Why invariants-on-render matter, not just invariants-on-capture:** a future edit could add `catch { lastError = "..." }` but remove the `Text(err)` rendering. Capture without render = invisible error = same UX as the pre-fix silent swallow. The test pins BOTH sides.
+      **Evidence:** `ralph_runner/tests/test_frontend_quantizer_invariants.py` (new, ~140 lines). 12/12 collectible ralph_runner invariants pass. 69/69 jang-server tests pass.
+      **Meta-lesson — audit INVARIANT coverage as a first-class property.** M197 made the rule "every security fix needs a paired invariant"; M198 applied the rule BACKWARDS by auditing the last 20 iters of security fixes. Found exactly 2 gaps out of ~20 items — ~90% coverage already, but the 10% gap covered real bugs that could silently reopen. **Rule: periodically audit INVARIANT coverage alongside bug-coverage. The audit doesn't need to be exhaustive every iter, but after ~10-20 security fixes accumulate, spend one iter doing a full invariant-coverage sweep.** Same philosophy as "periodically run the full test suite even if CI runs a subset" — detect silent gaps before they matter.
+      **Meta-lesson — Python tests CAN invariantize Swift code without a Swift test target.** Setting up a new Swift test target adds scaffolding (Package.swift edits, test-only deps, Xcode project ref updates) that's unwarranted for 2 invariants. The source-inspection approach from M197 works for any language — Python reads the Swift source as text + pins properties via regex/substring. **Rule: when adding invariants across language boundaries, prefer source-inspection from the EXISTING test framework over standing up a new test target.** Only stand up a native test target when you need runtime behavior (actual function calls, assertions on internal state) that source inspection can't replicate.
+      **Meta-lesson — pin CAPTURE and RENDER, not just capture.** Error surfaces have two parts: "we caught the error" (state assignment) and "we showed it to the user" (view rendering). Either missing = same UX as silent swallow. Tests that only pin capture give false confidence. **Rule: for user-facing error properties, pin BOTH the state variable's existence AND its rendering in at least one Text/Label/Alert site.** Dual pins are ~2x the code; silent-swallow-via-missing-render is a subtle regression worth preventing.
+      **Meta-lesson — comment stripping is a necessary preprocessing step for "no X in code" invariants.** When a rule is "live code must not contain pattern Y", the rationale comments explaining WHY usually MENTION Y. Naive substring checks false-positive on the comments. Strip `//` and `///` lines first, then search. **Rule: for "no bad pattern in code" invariants, strip single-line comments before the search. Block comments (`/* ... */`) also if used.** Trivial preprocessing, makes educational comments safe.
+      **Commit:** (this iteration)
 - [x] **M197 (mechanical cross-language parity invariant for redaction helpers)** — Iter-134 codifies iter-133 M196's meta-lesson. M196 fixed a parity DRIFT but didn't add a mechanism to PREVENT FUTURE drift. Without an invariant, the next iter to add a pattern on one side (Python or Swift) wouldn't know the OTHER side needs the matching pattern. M197 is the enforcement layer that makes parity an executable property.
       **Design:**
       - A new test file `ralph_runner/tests/test_redaction_cross_language_parity.py` with 3 tests.
