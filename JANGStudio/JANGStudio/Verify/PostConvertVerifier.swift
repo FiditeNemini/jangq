@@ -160,36 +160,49 @@ struct PostConvertVerifier {
         // Race the natural exit against a timeout sleep. First winner resolves
         // the continuation; if the timeout wins, SIGTERM the subprocess + a
         // 3-second SIGKILL escalation so a truly deadlocked child still dies.
-        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            // Atomic-ish guard — Process APIs don't expose a built-in "already
-            // resolved" flag, and a double-resume on CheckedContinuation is a
-            // fatal error. Wrap with a dispatch queue so exit + timeout can't
-            // resume in parallel.
-            let lock = DispatchQueue(label: "PostConvertVerifier.runJangValidate")
-            var resolved = false
+        //
+        // M101 (iter 33): wrap in withTaskCancellationHandler so a cancelled
+        // consumer Task (e.g., user navigating away from VerifyStep mid-run)
+        // also tears down the subprocess instead of waiting for the 60s
+        // default timeout. See iter-32 cross-layer cancel sweep.
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                // Atomic-ish guard — Process APIs don't expose a built-in "already
+                // resolved" flag, and a double-resume on CheckedContinuation is a
+                // fatal error. Wrap with a dispatch queue so exit + timeout +
+                // cancel can't resume in parallel.
+                let lock = DispatchQueue(label: "PostConvertVerifier.runJangValidate")
+                var resolved = false
 
-            proc.terminationHandler = { p in
-                lock.sync {
-                    if resolved { return }
-                    resolved = true
-                    cont.resume(returning: p.terminationStatus == 0)
-                }
-            }
-
-            Task.detached {
-                try? await Task.sleep(for: .seconds(timeoutSeconds))
-                lock.sync {
-                    if resolved { return }
-                    resolved = true
-                    // SIGTERM + 3s SIGKILL escalation, same pattern as PythonRunner.
-                    if proc.isRunning { proc.terminate() }
-                    Task.detached {
-                        try? await Task.sleep(for: .seconds(3))
-                        if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+                proc.terminationHandler = { p in
+                    lock.sync {
+                        if resolved { return }
+                        resolved = true
+                        cont.resume(returning: p.terminationStatus == 0)
                     }
-                    cont.resume(returning: false)
+                }
+
+                Task.detached {
+                    try? await Task.sleep(for: .seconds(timeoutSeconds))
+                    lock.sync {
+                        if resolved { return }
+                        resolved = true
+                        // SIGTERM + 3s SIGKILL escalation, same pattern as PythonRunner.
+                        if proc.isRunning { proc.terminate() }
+                        Task.detached {
+                            try? await Task.sleep(for: .seconds(3))
+                            if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+                        }
+                        cont.resume(returning: false)
+                    }
                 }
             }
+        } onCancel: {
+            // On consumer-Task cancel, SIGTERM the subprocess. The
+            // terminationHandler will then resolve the continuation with
+            // the terminated exit code (→ returns false, which is fine:
+            // cancelled verifications are treated as "did not succeed").
+            if proc.isRunning { proc.terminate() }
         }
     }
 }

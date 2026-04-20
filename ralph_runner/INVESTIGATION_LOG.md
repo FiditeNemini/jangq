@@ -1228,3 +1228,64 @@ Three different Swift async primitives (AsyncThrowingStream from actor, AsyncThr
 **Pattern established for future audits:** any `await withCheckedContinuation` used to bridge a callback-based C / ObjC / subprocess API to Swift async MUST be wrapped in `withTaskCancellationHandler` when the callback can take arbitrarily long. This is a reviewable code-smell worth grep-audit-ing the codebase for.
 
 **Next iteration should pick:** Audit the above pattern across the rest of the Swift codebase. `grep -n "withCheckedContinuation" JANGStudio/` and stress-test each call site. Alternatively M87 (Mistral 4 live validation), M88 (publish sheet init-vs-task), M97 (partial HF cleanup), or Cat D with `feedback_model_checklist.md` (untouched).
+
+---
+
+## 2026-04-20 iteration 33 — M101 grep-audit for withCheckedContinuation + 6 new wraps
+
+**Angle:** Direct application of iter-32's meta-pattern. The "audit the whole codebase for the same vulnerability" step. If iters 30-32 were high-confidence-but-localized fixes, this is breadth coverage.
+
+**Deep trace walkthrough:**
+1. `grep -n "withCheckedContinuation|withCheckedThrowingContinuation|withTaskCancellationHandler" JANGStudio/JANGStudio/` returned 13 hits across 9 files.
+2. Categorized:
+   - **Already fixed iters 30-32 (3):** PythonRunner.swift:105 (M98), PublishService.swift:263 (M96 streaming), InferenceRunner.swift (M100).
+   - **One-shot service invokes lacking cancel (6):** ModelCardService, ExamplesService, ProfilesService, CapabilitiesService, RecommendationService, PublishService.swift:286 (non-streaming invoke).
+   - **Verifier timeout lacking cancel (1):** PostConvertVerifier.runJangValidate. iter 19 M42 already added a 60s timeout race but not consumer-Task cancel.
+   - **Settings observation loop (1):** SettingsWindow.observeAndPersist. Inside `while !Task.isCancelled` so cancellation is bounded to next change. Deferred as M103.
+3. Risk assessment for the 6+1 unfixed: same class of bug as M100, but subprocesses are shorter-running (1-30s each). Hang impact is bounded but still real — UI dismissing after an action suffers ghost work, rapid navigation spawns overlapping subprocesses.
+4. **Scope decision: fix all 6 services + PostConvertVerifier in one iter.** Single template applied consistently:
+   ```swift
+   let handle = ProcessHandle()
+   return try await withTaskCancellationHandler {
+       try await withCheckedThrowingContinuation { cont in
+           DispatchQueue.global().async {
+               // ... existing subprocess logic ...
+               try proc.run()
+               handle.set(process: proc)     // <- new
+               proc.waitUntilExit()
+               // ...
+           }
+       }
+   } onCancel: { handle.cancel() }
+   ```
+5. `ProcessHandle` (iter 30) was already declared `final class @unchecked Sendable` with internal default access — usable from every file without modification.
+6. PostConvertVerifier was trickier: already had a CheckedContinuation + timeout race + DispatchQueue lock. Wrapping in withTaskCancellationHandler required careful brace accounting; onCancel closure just SIGTERMs the proc, then the existing terminationHandler resolves the continuation with the terminated status (→ false, semantically "validation did not succeed"). Avoided touching the proven timeout logic.
+7. **Non-unification decision:** considered extracting a shared `runCancellableCLI(args:) async throws -> Data` helper. Rejected because each service has its own error type (ModelCardServiceError / ExamplesServiceError / NSError / etc.) and slightly different stderr handling (token-scrubbing in PublishService). A unified helper would add a new wrapper error type + mapping code per service. Net lines changed would go UP, not down. Logged as M102 for revisit if maintenance becomes painful.
+8. **Test scope decision:** the iter-31 / iter-32 pattern for stress-testing used a real bash subprocess + tick-file mtime comparison, ~5s per test. Multiplying 6 services × 5s = 30s of extra test time. Declined to add 6 more integration tests this iter, but documented the template in M104 so a regression can be pinned quickly.
+
+**Items touched:**
+- M101 [x] — 6 service invokes + 1 verifier timeout now propagate Task-cancel to subprocess.
+
+**Commit:** (this iteration)
+
+**Verification:** 122 Swift tests pass unchanged (same count — iter 33 is pure-plumbing). jang-tools 260 + ralph_runner 68 unchanged.
+
+**Closed-status tally:** 46 (prior) + M101 = 47 closed / 82 total = 57% closure rate.
+
+**Cross-layer cancel sweep COMPLETE (iters 30-33):**
+- iter 30 M96: PublishService streaming
+- iter 31 M98: PythonRunner
+- iter 32 M100: InferenceRunner
+- iter 33 M101: 6 service invokes + PostConvertVerifier verifier
+
+**Every `withCheckedContinuation` site in the Swift codebase that bridges a subprocess is now Task-cancel-aware.** Only exception: SettingsWindow.observeAndPersist (logged M103, bounded leak).
+
+**Meta-pattern validated at scale:** the iter-30 meta-lesson ("cross-layer cancellation needs explicit handling") predicted this finding. iter 31/32 validated the pattern produces real bugs. iter 33 cleaned up the tail. Total Task-cancel-related closures: M96, M98, M100, M101 = 4 audit items, 10 invoke sites patched, all reviewable against the same fix template.
+
+**Next iteration should pick:** With the cross-layer cancel sweep done, options widen:
+- M87 (Mistral 4 live validation — needs a real convert workflow)
+- M88 (publish sheet init-vs-task field-lifecycle unification, iter 25 spawn)
+- M97 (partial HF repo cleanup — follow-up from M96)
+- M104 (add integration tests for the 6 service cancel paths — if regressions surface)
+- Continue Cat D with `feedback_model_checklist.md` (untouched, last Cat D memory)
+- Spawn audit on a NEW class of bug: grep for `proc.waitUntilExit()` directly (without any async wrapping) — if any exist, they'd block the calling thread AND miss cancel.

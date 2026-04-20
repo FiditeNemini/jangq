@@ -283,41 +283,46 @@ enum PublishService {
     }
 
     private nonisolated static func invoke(args: [String], token: String) async throws -> Data {
-        try await withCheckedThrowingContinuation { cont in
-            DispatchQueue.global().async {
-                do {
-                    let proc = Process()
-                    proc.executableURL = BundleResolver.pythonExecutable
-                    proc.arguments = args
-                    var env = ProcessInfo.processInfo.environment
-                    env["HF_HUB_TOKEN"] = token
-                    env["PYTHONUNBUFFERED"] = "1"
-                    // M62 env-passthrough for PYTHONPATH / thread count /
-                    // throttle. Publish is a one-shot Python invoke just like
-                    // PythonRunner, so it benefits from the same user settings.
-                    for (k, v) in BundleResolver.childProcessEnvAdditions(inherited: env) {
-                        env[k] = v
+        // M101 (iter 33): Task-cancel propagation — parallel to the
+        // streaming publishWithProgress path (iter 30 M96) and the other
+        // CLI service invokes. Dry-run publish is fast (<1s) but a hung
+        // consumer Task shouldn't still drag a subprocess behind it.
+        let handle = ProcessHandle()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                DispatchQueue.global().async {
+                    do {
+                        let proc = Process()
+                        proc.executableURL = BundleResolver.pythonExecutable
+                        proc.arguments = args
+                        var env = ProcessInfo.processInfo.environment
+                        env["HF_HUB_TOKEN"] = token
+                        env["PYTHONUNBUFFERED"] = "1"
+                        for (k, v) in BundleResolver.childProcessEnvAdditions(inherited: env) {
+                            env[k] = v
+                        }
+                        proc.environment = env
+                        let out = Pipe(); let err = Pipe()
+                        proc.standardOutput = out
+                        proc.standardError = err
+                        try proc.run()
+                        handle.set(process: proc)
+                        proc.waitUntilExit()
+                        if proc.terminationStatus != 0 {
+                            let stderrData = err.fileHandleForReading.readDataToEndOfFile()
+                            let stderrRaw = String(data: stderrData, encoding: .utf8) ?? ""
+                            let stderr = stderrRaw.replacingOccurrences(of: token, with: "<redacted>")
+                            cont.resume(throwing: PublishServiceError.cliError(code: proc.terminationStatus, stderr: stderr))
+                            return
+                        }
+                        cont.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
+                    } catch {
+                        cont.resume(throwing: error)
                     }
-                    proc.environment = env
-                    let out = Pipe(); let err = Pipe()
-                    proc.standardOutput = out
-                    proc.standardError = err
-                    try proc.run()
-                    proc.waitUntilExit()
-                    if proc.terminationStatus != 0 {
-                        let stderrData = err.fileHandleForReading.readDataToEndOfFile()
-                        let stderrRaw = String(data: stderrData, encoding: .utf8) ?? ""
-                        // Extra belt-and-suspenders: if the Python side ever leaks
-                        // the token into an error message, scrub it before surfacing.
-                        let stderr = stderrRaw.replacingOccurrences(of: token, with: "<redacted>")
-                        cont.resume(throwing: PublishServiceError.cliError(code: proc.terminationStatus, stderr: stderr))
-                        return
-                    }
-                    cont.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
-                } catch {
-                    cont.resume(throwing: error)
                 }
             }
+        } onCancel: {
+            handle.cancel()
         }
     }
 }
