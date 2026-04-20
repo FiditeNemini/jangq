@@ -58,6 +58,24 @@ struct PublishToHuggingFaceSheet: View {
             orgPrefixApplied = true
             applyOrgPrefixIfNeeded()
         }
+        .onDisappear {
+            // M162 (iter 85): dismissing the sheet mid-publish (user clicks
+            // Close, cmd-W, or the in-header Close button) MUST tear down
+            // the upload. Before this hook, the publishTask kept running
+            // even after the sheet was gone — the Python subprocess
+            // continued uploading files to HuggingFace for the remaining
+            // ~30 minutes with no UI, no way to cancel, no visibility.
+            // User who hit Close thinking they were cancelling would
+            // unknowingly complete the upload to the wrong repo. Real
+            // data-exfiltration vector: picks the wrong org/name, hits
+            // Close to try again, and the files still ship.
+            //
+            // Cancelling the Task triggers onTermination on the
+            // AsyncThrowingStream, which triggers ProcessHandle.cancel()
+            // via the iter-30 M96 wiring — SIGTERM + 3 s SIGKILL
+            // escalation. Partial-repo cleanup is still M97 (deferred).
+            publishTask?.cancel()
+        }
     }
 
     /// Prefix the default HF org onto a basename-only repo field. No-ops when:

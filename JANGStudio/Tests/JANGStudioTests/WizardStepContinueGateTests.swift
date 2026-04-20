@@ -177,6 +177,50 @@ final class WizardStepContinueGateTests: XCTestCase {
         )
     }
 
+    // MARK: - M162 (iter 85): sheet dismissal must cancel in-flight subprocesses
+
+    func test_publishSheet_cancels_publishTask_onDisappear() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard")
+        let src = try String(contentsOf: dir.appendingPathComponent("PublishToHuggingFaceSheet.swift"), encoding: .utf8)
+        XCTAssertTrue(
+            src.contains(".onDisappear") && src.contains("publishTask?.cancel()"),
+            """
+            PublishToHuggingFaceSheet must wire `.onDisappear { publishTask?.cancel() }`
+            so sheet dismissal tears down the active upload. Without it, user
+            who clicks Close mid-publish continues uploading to HF in the
+            background with no UI — accidental data exfiltration vector.
+            """
+        )
+    }
+
+    func test_publishSheet_M162_rationale_pinned() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard")
+        let src = try String(contentsOf: dir.appendingPathComponent("PublishToHuggingFaceSheet.swift"), encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("M162") && src.contains("data-exfiltration"),
+            "M162 rationale must remain — describes why the onDisappear cancel is security-critical"
+        )
+    }
+
+    func test_testInferenceSheet_cancels_vm_onDisappear() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard")
+        let src = try String(contentsOf: dir.appendingPathComponent("TestInferenceSheet.swift"), encoding: .utf8)
+        XCTAssertTrue(
+            src.contains(".onDisappear") && src.contains("vm.cancel()"),
+            """
+            TestInferenceSheet must wire `.onDisappear { Task { await vm.cancel() } }`
+            so dismissing mid-generate tears down the inference subprocess —
+            freeing the GPU + memory for subsequent runs.
+            """
+        )
+    }
+
     // MARK: - M136 (iter 58): RunStep auto-start must only fire on .idle
     //
     // Pre-iter-58 RunStep's .onAppear was:

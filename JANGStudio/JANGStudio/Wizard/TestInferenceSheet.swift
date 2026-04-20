@@ -38,6 +38,19 @@ struct TestInferenceSheet: View {
             footer
         }
         .frame(minWidth: 680, minHeight: 540)
+        .onDisappear {
+            // M162 (iter 85): closing the sheet mid-generate was leaving
+            // the Python inference subprocess running to completion — the
+            // user saw the sheet disappear (and assumed the work stopped)
+            // while the GPU + memory stayed pinned for the remaining
+            // 5-60 seconds of the generate call. Not as severe as the
+            // publish-sheet variant (no data goes anywhere), but wastes
+            // compute + can block a subsequent Test Inference from loading
+            // the same model if memory is tight. Cancelling on disappear
+            // funnels through vm.cancel() → InferenceRunner.cancel() →
+            // SIGTERM + 3 s SIGKILL.
+            Task { await vm.cancel() }
+        }
         .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
             settingsPopover
         }

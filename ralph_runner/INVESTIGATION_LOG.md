@@ -3582,3 +3582,51 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: sidebar `canActivate` gate missing — clicks on locked rows still jump. Minor UX fix but cheap: add `.disabled(!coord.canActivate(step))` or gate the set: binding to only accept reachable steps.
 
 **Next iteration should pick:** Task.isCancelled cross-view orphan sweep across all step files — apply the same content-match guard pattern wherever @State Task handles feed MainActor.run write-backs.
+
+---
+
+## 2026-04-20 iteration 85 — M162 sheet-dismiss orphan-subprocess sweep (iter-84 meta-lesson applied)
+
+**Angle:** Iter-84 forecast: "grep all `Task.isCancelled` inside `MainActor.run` closures across the Swift app — audit for matching content-match guards vs not. Expected to find at least 2-3 more similar orphan races in other step files."
+
+**Deep trace walkthrough:**
+1. **Grepped all 5 step files** for `Task.isCancelled` / `MainActor.run` / `@State.*Task<`. Only SourceStep had the pattern — iter-84 M161 already fixed it. No other step files use @State Task handles feeding MainActor.run write-backs.
+2. **Triaged each step:**
+   - ArchitectureStep: no async work, no Task. Safe.
+   - ProfileStep: only synchronous `refresh()` from PreflightRunner. No Task handle. Safe.
+   - RunStep: uses `.onAppear { if run == .idle { Task { await start() } } }`. The idle-guard prevents double-start on nav-back (iter-58 M136). Task handle NOT stored, but `runner: PythonRunner?` IS stored, so cancel flows through it. On view destruction, the Task consuming `r.run()` keeps running — but that's desirable (conversion should continue), and the user nav-back into RunStep sees shared `coord.plan.run` state and picks up where the subprocess left off. Safe by design.
+   - VerifyStep: uses `.task { await refresh() }`. SwiftUI auto-cancels on dismount. Safe.
+   - SourceStep: fixed iter-84.
+3. **Extended the audit to sheets** — same meta-rule ("@State handles don't bridge view destruction") applies to sheet DISMISSAL, which is also a view-death event. Grepped `JANGStudio/Wizard/*Sheet.swift` for Task-spawning sites.
+4. **Found two sheets with orphan-subprocess bugs:**
+   - **PublishToHuggingFaceSheet** stores `publishTask: @State Task<Void, Never>?` (iter-30 M96) for the in-sheet Cancel button. But NO `.onDisappear` wires cancel — dismissing via header Close / cmd-W / system close gesture orphans the Task. Python subprocess keeps uploading files to HF for the remaining ~30 minutes. **User-visible data-exfiltration vector** — user types wrong org/name, clicks Close, upload still completes.
+   - **TestInferenceSheet** has no task handle but uses `Task { await vm.send() }` on ENTER/submit. ViewModel is an actor with `cancel()`. Dismissing the sheet during generate() orphans the subprocess for 5-60 seconds. Lower severity — no data goes anywhere — but wastes GPU + blocks subsequent Test Inference runs on the same model.
+5. **Assessed fix cost vs alternatives:**
+   - **(a) `.onDisappear { handle?.cancel() }`** — minimum code, hooks the standard SwiftUI sheet dismissal lifecycle. Cancel flows through existing plumbing (iter-30 M96 for publish, TestInferenceViewModel.cancel() for inference).
+   - **(b) Transfer ownership of the task handle to a coordinator.** Overkill for two sheets; the onDisappear approach handles ALL dismissal causes uniformly.
+   - **(c) Confirmation prompt on dismiss-while-publishing.** UX-disruptive; the user's natural expectation is that Close = cancel.
+   Went with (a). Publish rationale comment includes "data-exfiltration" verbatim so a future simplification sweep surfaces the security-critical nature to the reviewer.
+6. **Regression tests:** source-inspection, same pattern as iter-80 M157 and iter-84 M161. Pin the literal `.onDisappear` + `publishTask?.cancel()` / `vm.cancel()` hooks; pin the M162 rationale. Counter-reasoning: integration tests would need to drive SwiftUI sheet presentation + dismissal which is out-of-reach without XCUITest. Source-inspection is the appropriate shape for a "this hook must exist" invariant.
+
+**Meta-lesson extension — dismissal is a "view destruction" event too.** Iter-84's rule was framed around sidebar navigation in the main wizard. Sheet dismissal is the SAME CLASS (view disappears with active work handle as @State) via a different UI affordance. General audit rule: **for every presentation-detachable UI surface (sheets, popovers, inspectors, modals, full-screen covers), ask "does dismissing while work is in flight leave an orphan subprocess / network call / DB write?"** If yes, add an explicit `.onDisappear { handle?.cancel() }` OR store the handle on a persistent coordinator. The `.task { ... }` modifier has this built in (auto-cancel on dismount) — prefer it whenever the work is initiated on view appear.
+
+**Meta-lesson — SwiftUI sheet lifecycle doesn't auto-cancel button-driven Tasks.** `.task` is cancelled on dismount; `Button { Task { ... } }` is NOT. A common misconception is that SwiftUI "owns" all Tasks spawned inside a view — it doesn't. Button handlers spawn detached Tasks that live past their creating view. Any user-triggered async work needs explicit cancel wiring. This is the structural root cause of M162 + M161 + iter-57 M135 — three separate manifestations over 28 iters.
+
+**Items touched:**
+- M162 [x] — PublishToHuggingFaceSheet + TestInferenceSheet now cancel in-flight Tasks on dismissal; 3 new source-inspection tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 23 WizardStepContinueGateTests pass (was 20, +3). Python 348 + ralph 73 unchanged. Full Swift suite ~188.
+
+**Closed-status tally:** 97 (iter 84) + M162 = 98 closed / 100 total = 98.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (now higher priority — M162 cancels the upload but leaves partial files on HF; user has to clean manually)
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: GenerateModelCardSheet + UsageExamplesSheet have `Button("Retry") { Task { await fetchSnippet(lang) } }` patterns. The buttons spawn detached Tasks that outlive sheet dismissal. Read-only operations (low severity, seconds not minutes) but inconsistent with the new iter-85 pattern. Should add `.onDisappear` + task handle tracking for consistency.
+- **NEW**: widget sweep — audit every `.sheet(isPresented:)` / `.popover(isPresented:)` / `.alert(isPresented:)` + their task-spawning children for the sheet-dismiss orphan class.
+
+**Next iteration should pick:** Either GenerateModelCardSheet/UsageExamplesSheet retry-Task cleanup for consistency, OR M97 partial-HF-repo cleanup (now more urgent since the iter-85 cancel may leave uploads half-done on HF). M97 is the bigger piece of work but the harder one — requires HF API knowledge.
