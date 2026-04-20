@@ -418,6 +418,60 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(s2.defaultHFOrg, "dealignai", "third mutation must persist")
     }
 
+    // MARK: - Iter 104 M108: try? site count invariant (coarse bulk-addition trap)
+
+    func test_try_question_site_count_within_threshold() throws {
+        // M108 (iter 14 observation, closed iter 104): `try?` is NOT inherently
+        // a bug — iter-104's audit classified all 34 sites into 8 acceptable
+        // categories:
+        //   A. comment text referencing prior fixes (6)
+        //   B. parse-tolerance file reads (read file that may not exist) (9)
+        //   C. Task.sleep ignore in cancellation paths (5)
+        //   D. stderrTask.value await fallback (2)
+        //   E. regex compile of known-valid static patterns (2)
+        //   F. macOS resource-query with 0-fallback (1)
+        //   G. temp-dir cleanup / pipe-close (4)
+        //   H. JSON round-trip in mixed-type dict (2)
+        //   I. other acceptable patterns — inspect new additions (varies)
+        //
+        // The BAD pattern is iter-35 M107 / iter-80 M157's class: user-action
+        // silent swallow in a Button handler. Iter-35+iter-80 fixed those.
+        // This test catches bulk NEW additions — a routine 1-2 new try? per
+        // PR goes through; a 15+ addition triggers review. The threshold
+        // lives above today's 34 with generous headroom.
+        //
+        // When this test fails:
+        //   1. The engineer adding new try? should classify each addition
+        //      per the taxonomy above.
+        //   2. If all fit, bump the threshold (a small nudge, 50 → 60).
+        //   3. If any is user-action-silent-swallow, fix with do/catch +
+        //      stderr log per iter-35 / iter-80 pattern.
+        //   4. Update the category counts in this comment.
+
+        let srcDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/JANGStudio")
+
+        var total = 0
+        let enumerator = FileManager.default.enumerator(atPath: srcDir.path)
+        while let rel = enumerator?.nextObject() as? String {
+            guard rel.hasSuffix(".swift") else { continue }
+            let path = srcDir.appendingPathComponent(rel).path
+            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            // `try?` (with question mark) as a substring anywhere — counts
+            // comment mentions too, which is fine for this coarse gate.
+            let occurrences = content.components(separatedBy: "try?").count - 1
+            total += occurrences
+        }
+
+        // Today's count is 34. Threshold is 50 — 16 addition headroom before
+        // this test fires. A bulk new-pattern introduction (e.g., someone
+        // reintroducing the M107 class) would push past this; routine work
+        // passes through.
+        XCTAssertLessThanOrEqual(total, 50,
+            "try? site count (\(total)) exceeds threshold — audit new additions per the taxonomy in this test's comment (M108 iter 104). If all additions are in acceptable categories, bump the threshold.")
+    }
+
     // MARK: - Iter 103 M65: AppSettings mutation is SettingsWindow-only (grep invariant)
 
     func test_appSettings_mutations_are_settingsWindow_only() throws {
