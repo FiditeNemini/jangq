@@ -149,6 +149,22 @@ The goal: every item reaches `[x]` with production-ready behavior. "Production" 
 - [ ] **J02** — Runtime checklist from `research/GLM-5.1-RUNTIME-AUDIT.md` (17 points) applied to any "converted model outputs garbage" triage.
 - [ ] **J03** — MLA absorb bf16 SDPA bug fix present in `mlx_lm/models/deepseek_v32.py` on the installed env (cast to float32 on L==1 branch). Source: `project_mla_absorb_bug.md`.
 
+## L. Beginner usability — hints, tooltips, smart defaults
+
+- [x] **L01** — `jang-tools recommend --model <dir> --json` CLI exists; returns `detected`, `recommended`, `beginner_summary`, `warnings`, `why_each_choice` for any source model.
+      **Evidence:** commit in iteration 2; 35 pytest tests across 17 model families pass (dense: llama/mistral/qwen2/qwen3/gemma3/phi3/falcon; MoE: qwen2_moe/mixtral/qwen3_5_moe/deepseek_v32/mistral4/minimax_m2/glm_moe_dsa; hybrid: nemotron_h; VL: qwen2_vl/idefics3/qwen3_vl video).
+- [ ] **L02** — `SourceDetector` (Swift) calls `jang-tools recommend` alongside `inspect-source` and pre-fills the wizard's defaults (profile, family, method, hadamard, force_dtype).
+- [ ] **L03** — Every field in Step 2 (Advanced overrides) has an `InfoHint` popover with plain-English explanation derived from `recommend`'s `why_each_choice`.
+- [ ] **L04** — Every field in Step 3 (Profile, Method, Hadamard, Block size, Output folder) has an `InfoHint` popover + alternatives surface.
+- [ ] **L05** — Preflight rows in Step 3 link to plain-English remediation steps on failure (e.g., "Disk space" → "This is the free GB on your output volume. You need ~X GB — free up space or pick a different drive").
+- [ ] **L06** — Step 1 shows a "Recommended for this model" banner once folder is picked, pre-populated from `recommend` output (beginner_summary + warnings).
+- [ ] **L07** — Alternative profiles appear as expandable "Other options" in Step 3 with `use_when` description.
+- [ ] **L08** — Every warning from `recommend.warnings` surfaces as a yellow banner in the appropriate step (512-expert, gated, unknown-arch, etc.).
+- [ ] **L09** — Settings pane every field has an `InfoHint` popover explaining the setting + its default.
+- [ ] **L10** — Test Inference sheet: beginner-friendly placeholder text (e.g., "Ask your converted model a question — try 'What is the capital of France?'").
+
+---
+
 ## K. Cross-cutting rules (never-forget)
 
 - [ ] **K01** — No AI attribution in any commit, README, or public material. Spot-check recent 20 commits.

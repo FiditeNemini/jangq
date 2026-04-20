@@ -287,6 +287,9 @@ def main():
     from .publish import register as _register_publish
     _register_publish(subparsers)
 
+    from .recommend import register as _register_recommend
+    _register_recommend(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -300,7 +303,7 @@ def main():
 
     suppress_banner = args.quiet_text or (
         args.command in ("inspect-source", "examples", "modelcard", "inference",
-                         "profiles", "capabilities", "estimate-model", "publish")
+                         "profiles", "capabilities", "estimate-model", "publish", "recommend")
         and getattr(args, "json", False)
     )
     if not suppress_banner:
