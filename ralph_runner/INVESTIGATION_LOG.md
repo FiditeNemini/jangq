@@ -3250,3 +3250,50 @@ Three iters building the same pattern — it's now a template. Future read-side 
 - **NEW**: Pipe-drain peer-helper audit (iter-76 forecast) — PythonRunner + PublishService + InferenceRunner each drain stdout/stderr with Task.detached patterns; check for 3+-copy threshold.
 
 **Next iteration should pick:** loader.py mid-load migration (now cheap with `_json_utils` ready) OR Pipe-drain audit.
+
+## 2026-04-20 iteration 78 — M155 SourceDetector: 6th invokeCLI copy iter-76 missed
+
+**Angle:** Iter-77 forecast: Pipe-drain audit. Grep for `readDataToEndOfFile` + `bytes.lines` across the Swift app. Look for more 3+-copy patterns.
+
+**Deep trace walkthrough:**
+1. **Grep results classify into two categories:**
+   - **Post-wait drain** (`readDataToEndOfFile()` after `proc.waitUntilExit()`):
+     - InferenceRunner:134-135 (actor-isolated, part of broader generate())
+     - PythonCLIInvoker:70,76 (canonical — iter-76 M153 extraction).
+     - **SourceStep:393,405** (SourceDetector.inspect — 6th copy of iter-76's pattern).
+     - PublishService:312,318 (dryRun subprocess — has its own structure).
+   - **Live stream drain** (`bytes.lines` inside Task.detached):
+     - PythonRunner:79,87 (convert subprocess live output).
+     - PublishService:241 (upload live progress).
+2. **The 6th copy iter-76 missed:** SourceDetector.inspect is the same shape as the 5 adoption services but it's defined as an `enum SourceDetector` inside `SourceStep.swift` under `Wizard/Steps/` — not `Runner/`. iter-76's audit scoped to `Runner/`-adjacent services.
+3. **Extra find:** SourceDetector was throwing raw `NSError(domain: "SourceDetector")`. iter-51 M129 retired NSError usage in Capabilities/Profiles services for typed errors — but again, SourceDetector was in the wrong directory for that sweep. Two crystallization iters (M129 + M153) both missed this file.
+4. **Fix combines both:**
+   - Create `SourceDetectorError: Error, LocalizedError` with `.cliError(code, message)` — matches the 5 adoption services' `.cliError(code, stderr)` shape. Slight naming difference (`message` vs `stderr`) because SourceDetector pre-formats the message with the "inspect-source exited N: <stderr>" prefix for the banner — iter-43 M120 pattern preserved.
+   - Migrate the 44-line body to a 10-line `PythonCLIInvoker.invoke` call with the typed error factory.
+5. **No new tests needed.** M154 pinned PythonCLIInvoker's contract with 5 tests. SourceDetector is now a thin call-through. Integration tests wouldn't exercise anything the helper's own tests don't already cover.
+6. **Live-stream drain pattern (PythonRunner + PublishService) is a separate concern.** Those use `Task.detached { for try await line in pipe.bytes.lines { ... } }` for LIVE progress events. Different domain — streaming vs. one-shot. 2 copies total. Below the 3+ extract threshold. Documented as not-yet-actionable.
+
+**Meta-lesson — grep the whole codebase, not just the expected directory.** iter-76's `invokeCLI` audit scoped to `Runner/` services. iter-77's `readDataToEndOfFile` audit was code-shape-based, caught the 6th copy in `Wizard/Steps/`. Future crystallization iters should:
+  1. Start with a code-shape grep across the ENTIRE codebase.
+  2. Then grep by location/naming convention as a secondary sweep.
+Both are needed — location-based audit misses body-structure matches outside the expected home.
+
+**Items touched:**
+- M155 [x] — SourceDetector.inspect migrated to PythonCLIInvoker + typed SourceDetectorError. Last NSError service surface retired.
+
+**Commit:** (this iteration)
+
+**Verification:** 39 tests across PythonCLIInvokerTests, AdoptionServicesTests, CapabilitiesServiceTests, ProfilesServiceTests pass unchanged. Python 348 + ralph 73 unchanged. Total Swift 175.
+
+**Closed-status tally:** 90 (iter 77) + M155 = 91 closed / 100 total = **91.0% closure rate.**
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW M156 candidate**: PythonRunner stdoutTask/stderrTask live-stream drain + PublishService upload progress drain are 2 copies — below the 3+ threshold but worth noting for next-pattern-extraction. Alternative: grep `Task.detached` patterns for other hidden duplicates.
+- loader.py 7 mid-load json.loads sites still deferred.
+- routing_profile.py + codebook_vq.py json.loads migration trivial with _json_utils.
+
+**Next iteration should pick:** loader.py mid-load migration (cheap cleanup now that _json_utils is canonical) OR another audit category.

@@ -892,6 +892,16 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `stamp_directory_malformed_config_json_returns_false`
       **Evidence:** `jang-tools/jang_tools/capabilities.py:169-260`, `jang-tools/jang_tools/capabilities.py:295-330`. 329 Python tests pass (was 323, +6). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M155 (SourceDetector was a 6th invokeCLI copy iter-76 missed — migrate + typed error)** — Iter-77 forecast: Pipe-drain audit. Grepped `readDataToEndOfFile()` + `bytes.lines` across the Swift app. Found **SourceDetector.inspect was a 6th copy** of the iter-76 M153 pattern — iter-76 touched the 5 adoption services but SourceStep's embedded `SourceDetector` enum lived outside the Runner/ directory and got missed.
+      **Extra find beyond just migration:** SourceDetector was also the LAST remaining `NSError(domain: "SourceDetector")` usage. iter-51 M129 cleaned up Capabilities/Profiles' NSError usages for typed errors; SourceDetector was missed then too because it's in Wizard/Steps/ not Runner/. Same NSError-stringified-into-banner anti-pattern M129 fixed.
+      **Fix (iter 78):** Two changes:
+      1. Added `SourceDetectorError: Error, LocalizedError` enum with `.cliError(code, message)` case and `errorDescription` that returns the message directly (preserves iter-43 M120's stderr-in-banner UX).
+      2. Replaced 44 lines of inline ProcessHandle / withTaskCancellationHandler / DispatchQueue dance with 10 lines delegating to `PythonCLIInvoker.invoke(args:errorFactory:)`.
+      **Impact:** ~34 lines of duplicated subprocess-cancellation code eliminated. Last NSError usage in service-layer code retired. Total `invokeCLI` copies across the Swift app: 5 → 6 migrated → 0 remaining.
+      **Tests:** all 5 PythonCLIInvokerTests + 22 AdoptionServicesTests + 5 CapabilitiesServiceTests + 7 ProfilesServiceTests pass unchanged — 39 tests verifying the migration preserves behavior. No new dedicated SourceDetector tests this iter; the helper's contract is already pinned by M154's 5 tests.
+      **Meta-observation:** iter-76 "extract 5 copies" missed a 6th that lived outside the expected directory. General rule: when extracting a pattern, grep the WHOLE codebase (not just the expected home directory) for structural matches. Iter-77's `readDataToEndOfFile` grep caught it by body shape, not location.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift:346-360, 375-391`. 175 Swift tests pass (unchanged — migration preserves behavior). Python 348 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [x] **M154 (dedicated `PythonCLIInvoker` contract tests)** — iter-76 M153 extracted the shared helper but relied on existing service-level tests to verify behavior (34 tests across CapabilitiesServiceTests/ProfilesServiceTests/AdoptionServicesTests). That's indirect coverage — a helper-level regression could slip through the service tests' type-specific assertions. Iter-77 pins the contract directly.
       **Fix (iter 77):**
       - Added `executableOverride: URL? = nil` parameter to `PythonCLIInvoker.invoke` (matches iter-31/32 InferenceRunner / PythonRunner pattern). Production code passes nil; tests pass shell-script URLs.

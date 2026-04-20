@@ -343,6 +343,21 @@ struct SourceStep: View {
     }
 }
 
+/// M155 (iter 78): typed error for the SourceDetector's subprocess CLI
+/// call — matches iter-51 M129's typed-error pattern on the peer adoption
+/// services. Pre-M155 this path threw `NSError(domain: "SourceDetector")`,
+/// the only remaining NSError-based surface after iter-51.
+enum SourceDetectorError: Error, LocalizedError {
+    case cliError(code: Int32, message: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .cliError(_, let message):
+            return message
+        }
+    }
+}
+
 enum SourceDetector {
     struct SourceInfo: Decodable {
         let model_type: String
@@ -358,58 +373,21 @@ enum SourceDetector {
     }
 
     static func inspect(url: URL) async throws -> ArchitectureSummary {
-        // M105 (iter 34): previously used synchronous `proc.waitUntilExit()`
-        // inside this `async` function, blocking whatever thread the async
-        // context was running on (often the main actor via SourceStep's
-        // .task) AND missing Task-cancel propagation. A user picking folder
-        // A then quickly picking folder B would orphan the A-subprocess
-        // AND momentarily freeze the UI. Same fix template as iter 33's
-        // service-sweep: DispatchQueue for the subprocess thread +
-        // withTaskCancellationHandler + ProcessHandle for SIGTERM on cancel.
-        let handle = ProcessHandle()
-        let data: Data = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { cont in
-                DispatchQueue.global().async {
-                    do {
-                        let proc = Process()
-                        proc.executableURL = BundleResolver.pythonExecutable
-                        proc.arguments = ["-m", "jang_tools", "inspect-source", "--json", url.path]
-                        let out = Pipe()
-                        let err = Pipe()
-                        proc.standardOutput = out
-                        proc.standardError = err
-                        try proc.run()
-                        handle.set(process: proc)
-                        proc.waitUntilExit()
-                        if proc.terminationStatus != 0 {
-                            // M120 (iter 43): include stderr in the surfaced
-                            // error so SourceStep's errorText banner tells the
-                            // user WHY inspect-source failed (e.g. "config.json
-                            // at … is not valid JSON (line 1, col 3)"). Pre-fix,
-                            // a malformed config.json produced a useless
-                            // "inspect-source exited 1" with the real reason
-                            // discarded on the floor.
-                            let stderr = String(
-                                data: err.fileHandleForReading.readDataToEndOfFile(),
-                                encoding: .utf8
-                            )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                            let desc = stderr.isEmpty
-                                ? "inspect-source exited \(proc.terminationStatus)"
-                                : "inspect-source exited \(proc.terminationStatus): \(stderr)"
-                            cont.resume(throwing: NSError(
-                                domain: "SourceDetector",
-                                code: Int(proc.terminationStatus),
-                                userInfo: [NSLocalizedDescriptionKey: desc]))
-                            return
-                        }
-                        cont.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
-                    } catch {
-                        cont.resume(throwing: error)
-                    }
-                }
-            }
-        } onCancel: {
-            handle.cancel()
+        // M155 (iter 78): migrated to shared PythonCLIInvoker.
+        // Previously a standalone copy of the iter-33 M101 cross-layer
+        // cancel pattern (iter-34 M105 wired it; iter-43 M120 added stderr
+        // surfacing). Now delegates to the canonical helper that
+        // iter-76 M153 extracted — with matching typed-error surface
+        // (iter-51 M129 retired the last NSError uses in the peer
+        // services; SourceDetector was a 6th copy the M153 sweep missed).
+        let data = try await PythonCLIInvoker.invoke(
+            args: ["-m", "jang_tools", "inspect-source", "--json", url.path]
+        ) { code, stderr in
+            let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let desc = trimmed.isEmpty
+                ? "inspect-source exited \(code)"
+                : "inspect-source exited \(code): \(trimmed)"
+            return SourceDetectorError.cliError(code: code, message: desc)
         }
 
         let info = try JSONDecoder().decode(SourceInfo.self, from: data)
