@@ -1,42 +1,75 @@
-// Minimal example: load a JANG model directory in Swift via JANGCore + JANGCoreMetal.
+// Minimal example: load a JANG model in Swift via JANGKit.
 //
 // Requirements:
 //   - macOS 15+ (Apple Silicon)
-//   - The JANGRuntime Swift package from https://github.com/jjang-ai/jangq
-//     added to your project via SwiftPM.
+//   - Add JANGRuntime to your SwiftPM dependencies (see Package.swift block below)
+//   - Link the JANGKit product.
 //
-// Status (as of v1):
-//   JANGCore handles the on-disk format: manifest parsing, expert index,
-//   and tensor loading from .safetensors shards.
-//   Full text-generation inference is provided via JANGCoreMetal + JANG.
-//   See Package.swift for the product structure.
+// Usage (after `swift build`):
+//   .build/debug/MyJANGApp /path/to/model "Your prompt here"
 //
 // Author: Jinho Jang (eric@jangq.ai)
 
 import Foundation
-import JANGCore
+import JANGKit
 
-// MARK: - Load a JANG model bundle
+@main
+struct JANGExample {
+    static func main() async {
+        let args = CommandLine.arguments
+        guard args.count >= 3 else {
+            fputs("Usage: \(args[0]) <model_dir> <prompt>\n", stderr)
+            exit(1)
+        }
 
-func loadJANGModel(at modelURL: URL) throws {
-    // JANGCore parses jang_config.json + model.safetensors.index.json
-    // and exposes the shard manifest and expert index.
-    let bundle = try JangSpecBundle(directory: modelURL)
+        let modelURL = URL(fileURLWithPath: args[1])
+        let prompt = args[2]
 
-    print("Format version: \(bundle.manifest.formatVersion)")
-    print("Profile: \(bundle.manifest.profile ?? "unknown")")
-    print("Source model: \(bundle.manifest.sourceName ?? "unknown")")
+        do {
+            // JANGKit.Model.load auto-detects JANG vs JANGTQ via jang_config.json.
+            // JANGTQ models will throw .jangtqNotYetSupported — use JANGTQGenerator
+            // directly from the JANG module for those (see PORTING.md).
+            let model = try await JANGKit.Model.load(at: modelURL)
 
-    // The manifest exposes a list of shard files; each is a standard
-    // safetensors v2 file you can memory-map directly.
-    for shard in bundle.manifest.shards {
-        print("Shard: \(shard.filename) — \(shard.tensorCount) tensors")
+            let result = try await model.generate(
+                prompt: prompt,
+                config: JANGKit.SamplingConfig(temperature: 0.0, maxTokens: 200)
+            )
+
+            print(result.text)
+            fputs(
+                "tokens=\(result.tokens) "
+                + "elapsed=\(String(format: "%.2f", result.elapsedSeconds))s "
+                + "throughput=\(String(format: "%.1f", result.tokensPerSecond))tok/s "
+                + "finish=\(result.finishReason.rawValue)\n",
+                stderr
+            )
+
+        } catch let error as JANGKit.ModelError {
+            fputs("JANGKit error: \(error.localizedDescription ?? "\(error)")\n", stderr)
+            exit(2)
+        } catch {
+            fputs("Unexpected error: \(error)\n", stderr)
+            exit(3)
+        }
     }
 }
 
-// MARK: - Package.swift reference for SwiftPM adopters
+// MARK: - Chat (Qwen-family models)
 //
-// Add JANGRuntime as a dependency in your Package.swift:
+// For Qwen im_start/im_end models you can use model.chat() instead:
+//
+//   let result = try await model.chat(
+//       system: "You are a helpful assistant.",
+//       user: prompt,
+//       config: JANGKit.SamplingConfig(maxTokens: 200)
+//   )
+//
+// NOTE: chat() uses JANGTokenizer.encodeChatPrompt(), which implements the Qwen
+// <|im_start|>/<|im_end|> template only. For LLaMA / Mistral / other chat families,
+// format your prompt manually (including special tokens) and call generate() directly.
+
+// MARK: - Package.swift for adopters
 //
 // // swift-tools-version: 6.0
 // import PackageDescription
@@ -51,26 +84,11 @@ func loadJANGModel(at modelURL: URL) throws {
 //         .executableTarget(
 //             name: "MyJANGApp",
 //             dependencies: [
-//                 .product(name: "JANGCore", package: "jangq"),
-//                 .product(name: "JANGCoreMetal", package: "jangq"),
+//                 .product(name: "JANGKit", package: "jangq"),
 //             ]
 //         )
 //     ]
 // )
-
-// MARK: - Entry point
-
-let args = CommandLine.arguments
-guard args.count >= 2 else {
-    print("Usage: \(args[0]) <model_dir>")
-    exit(1)
-}
-
-let modelURL = URL(fileURLWithPath: args[1])
-
-do {
-    try loadJANGModel(at: modelURL)
-} catch {
-    fputs("Error: \(error)\n", stderr)
-    exit(2)
-}
+//
+// Power users who need direct access to MXQModel / JANGInferenceEngine /
+// JANGTokenizer / JANGSampler can use the `JANG` product instead of JANGKit.

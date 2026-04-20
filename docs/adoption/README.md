@@ -35,13 +35,14 @@ Two families of output:
   `uint32` weight packing. Loads via any MLX-compatible runtime with one extra dequant step.
 - **JANGTQ** (TurboQuant) — supported on Qwen 3.6 (`qwen3_5_moe`) and MiniMax 2.7 (`minimax_m2`)
   in v1. Uses a codebook-based format for expert MLP weights that cuts size by another 30-50% at the
-  same quality. Requires a specialized loader (`jang_tools.load_jangtq.load_jangtq_model` or the
-  equivalent Swift entry point in JANGCore).
+  same quality. Requires a specialized loader (`jang_tools.load_jangtq.load_jangtq_model` in Python,
+  or `JANGTQGenerator` from the `JANG` SwiftPM product in Swift — see `jang-runtime/Sources/JANG/JANGTQGenerator.swift`).
 
 ## Frameworks currently supporting JANG
 
 - **MLX** via the `jang` Python package — reference implementation (Python)
-- **JANGCore** — Swift/Metal native loader shipped in JANG Studio
+- **JANGKit** — Swift high-level facade (`JANGKit.Model.load` + `generate`) built on top of `JANG`
+- **JANGCore** — Swift/Metal on-disk format reader (manifest, expert index, tensor loading) shipped in JANG Studio
 - **[MLX Studio](https://mlx.studio)** — GUI inference with JANG support
 - **Osaurus** — OpenAI-compatible HTTP server (JANG + JANGTQ)
 

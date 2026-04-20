@@ -99,16 +99,32 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-### Swift (JANGCore)
+### Swift (via JANGKit)
 
 ```swift
-import Foundation
-import JANGCore
+import JANGKit
 
-let bundle = try JangSpecBundle(directory: URL(fileURLWithPath: "/path/to/this-model"))
-print("Loaded: \(bundle.manifest.sourceName ?? "unknown")")
-// Full inference: see JANGCoreMetal + JANG products in the JANGRuntime package
+let model = try await JANGKit.Model.load(at: URL(fileURLWithPath: "/path/to/this-model"))
+let result = try await model.generate(
+    prompt: "Hello",
+    config: JANGKit.SamplingConfig(maxTokens: 200)
+)
+print(result.text)
 ```
+
+Add to your `Package.swift`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/jjang-ai/jangq", branch: "main")
+],
+targets: [
+    .executableTarget(name: "YourApp", dependencies: [.product(name: "JANGKit", package: "jangq")])
+]
+```
+
+> Note: JANGTQ models throw `.jangtqNotYetSupported` from `JANGKit.Model.load`. Use
+> `JANGTQGenerator` from the `JANG` product directly for JANGTQ inference.
 
 ## Performance
 
