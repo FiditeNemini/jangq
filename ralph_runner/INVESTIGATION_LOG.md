@@ -4925,3 +4925,50 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
 - **NEW**: look at the unexamined repo subdirs — `examples/`, `docs/` scripts, model scripts.
 
 **Next iteration should pick:** jang-server server-specific anti-pattern sweep (fresh surface, likely high-yield given iter-111 found 3 bare-swallows in first pass), OR M80 audit baseline, OR scripts-in-examples/docs sweep.
+
+---
+
+## 2026-04-20 iteration 113 — M178 jang-server webhook_url SSRF (real security bug)
+
+**Angle:** Iter-112 forecast: "jang-server server-specific anti-patterns." Picked up where iter-111 left off with a security-specific lens: "what does the server do with user-controlled input?"
+
+**Deep trace walkthrough:**
+1. **Grepped for HTTP-making code** — `requests.`, `urllib`, `hf_hub_download`, `.post(`, `.get(`, `urlopen`. Found the webhook path at line 1476.
+2. **Read `_fire_webhook`** — it unwraps user-provided `job.webhook_url` and POSTs JSON to it with `urllib.request.urlopen(req, timeout=10)`. **Zero validation.** No scheme check, no IP check, no allowlist.
+3. **Classified as SSRF.** Attacker submits a job with:
+   - `webhook_url = "http://127.0.0.1:8080/admin"` → server hits its own localhost services.
+   - `webhook_url = "http://169.254.169.254/latest/meta-data/iam/security-credentials/"` → AWS metadata endpoint (returns IAM role credentials). Classic cloud escalation vector.
+   - `webhook_url = "http://192.168.1.1/router/admin"` → LAN device.
+   - `webhook_url = "file:///etc/passwd"` → if urllib supports file scheme (it does), SSRF-via-scheme.
+4. **Designed the validator.** Three-layer check:
+   - Scheme: http/https only.
+   - Hostname: present + resolves via getaddrinfo.
+   - IP: ALL resolved IPs checked against `.is_private / .is_loopback / .is_link_local / .is_multicast / .is_reserved / .is_unspecified`. Using `getaddrinfo` catches `localhost` → 127.0.0.1 and any DNS-rebinding attempt that resolves to a private IP at validation time.
+5. **Defense-in-depth:** applied at submission time (fails fast with 400, server never stores invalid URL) AND at fire time (catches pre-M178 persisted jobs).
+6. **Tests:** 12 covering accept (empty, public https) + reject (file, gopher, 127.0.0.1, 10.x, 192.168.x, AWS metadata, ::1, localhost, nonexistent, missing hostname).
+
+**Meta-lesson — security audits need a different framing from correctness audits.** Iter-112 swept Buttons for "does it work?" and found nothing. Iter-113 swept jang-server for "how could an attacker abuse this?" and found an SSRF in the first function inspected. **Rule: for security-critical code paths (any place user input becomes an outbound request / subprocess arg / SQL / file path / eval), explicitly enumerate the attack classes and check each. Correctness-focused audits miss security bugs because they don't think adversarially.**
+
+**Meta-lesson — `is_private` is not enough; check the full IP category set.** My first draft of the validator only checked `.is_private` and `.is_loopback`. Running through mental attack scenarios caught additional cases — `169.254.x.x` is `.is_link_local` (not `.is_private`), multicast could be abused for network discovery, `::` (unspecified) can bind-to-all behavior. The full set `.is_private | .is_loopback | .is_link_local | .is_multicast | .is_reserved | .is_unspecified` covers all non-public ranges. Rule: when validating "is this a public IP?", use the full category set from the `ipaddress` module, not a subset.
+
+**Meta-lesson — defense-in-depth matters for bugs that might already have persisted state.** Submission-time validation is the primary gate, but a malicious webhook URL could already be in the SQLite DB from pre-M178 job submissions. Layer-2 validation at fire time catches those. Applied the same iter-91/92 "tiered remediation" structural thinking to security fixes.
+
+**Items touched:**
+- M178 [x] — SSRF vulnerability fixed. 12 new regression tests covering the attack surface.
+
+**Commit:** (this iteration)
+
+**Verification:** 14 jang-server tests pass (was 2, +12). jang-tools 355 + ralph_runner 76 unchanged.
+
+**Closed-status tally:** 131 (iter 112) + M178 = 132 items touched, all closed. Zero known bugs as of iter-113 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: continue jang-server security audit — other user-controlled inputs (model_id → subprocess args, webhook payloads, etc.)? Unbounded resource growth (_jobs dict is never pruned)? Race conditions on _jobs shared state across the 3 threading.Lock()s? SQL injection in the jobs table?
+- **NEW**: sweep jang-tools CLI for user-input injection (shell splicing in convert pipeline).
+
+**Next iteration should pick:** continue jang-server security audit with the "adversarial thinking" lens — unbounded resource growth + SQL injection + model_id path traversal are natural follow-ups to M178.

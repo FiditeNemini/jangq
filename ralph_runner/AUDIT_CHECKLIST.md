@@ -225,6 +225,27 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M178 (jang-server webhook_url SSRF — user-controlled URL blindly POSTed)** — Iter-113 audited jang-server for server-specific anti-patterns (unbounded resources, uncaught async, missing auth, etc.). **Found a REAL security vulnerability in the first sweep.**
+      **Bug:** `_fire_webhook(job)` at line 1484 POSTs JSON to `job.webhook_url` — a user-controlled string from the job submission request. Pre-M178, the server blindly made an HTTP request to whatever URL the user provided. Classic **Server-Side Request Forgery (SSRF)** vulnerability. Attack vectors:
+      - **Loopback:** `webhook_url = "http://127.0.0.1:8080/admin"` → server hits its own localhost services.
+      - **Private LAN:** `"http://192.168.1.1/router/admin"` → targets routers and internal dashboards.
+      - **Cloud metadata:** `"http://169.254.169.254/latest/meta-data/"` → AWS/GCP/Azure instance metadata service (classic escalation to IAM credentials).
+      - **Non-HTTP schemes:** `"file:///etc/passwd"` (urllib may support file://).
+      - **IPv6 equivalents:** `"http://[::1]/"`, `"http://[fc00::1]/"`.
+      **Fix (iter 113):** added `_validate_webhook_url(url)` with comprehensive checks:
+      - Empty URL → valid (no webhook).
+      - Scheme must be `http` or `https` (rejects file, gopher, ftp, data, etc.).
+      - Hostname present + resolves via `socket.getaddrinfo`.
+      - **All resolved IPs** checked via `ipaddress.ip_address(ip).is_private / .is_loopback / .is_link_local / .is_multicast / .is_reserved / .is_unspecified`. Handles IPv4 + IPv6 + hostnames like `localhost` that resolve to loopback.
+      **Defense-in-depth:** validator applied at TWO points:
+      - **Submission time** (`create_job`) — fails fast with 400 Bad Request. Server never persists an invalid webhook URL.
+      - **Fire time** (`_fire_webhook`) — re-validates before the outbound request. Catches any pre-M178 persisted jobs still in the DB.
+      **Tests (+12) in new `jang-server/tests/test_webhook_ssrf.py`:**
+      - Accepts: empty string, public https URL.
+      - Rejects: `file://`, `gopher://`, `127.0.0.1`, `10.0.0.5`, `192.168.1.1`, `169.254.169.254` (AWS metadata), `[::1]`, `localhost`, nonexistent hostname, missing hostname.
+      **Evidence:** `jang-server/server.py:1476-1534, 629-632`. 14 jang-server tests pass (was 2, +12).
+      **Meta-lesson — security audits yield fast on fresh surfaces.** Iter-112 re-swept already-audited Swift buttons and found 0 bugs (diminishing returns signal). Iter-113 pivoted to jang-server with a security-specific lens ("what does the server do with user input?") and found a classic SSRF in the first function inspected. **Rule: for security-critical code paths (any place user input becomes an outbound request / subprocess / SQL / file path), explicitly enumerate the attack classes (SSRF, injection, path traversal, SSRF-via-DNS-rebinding) and check each.** Security threats don't show up through the normal "does it work" audit; they require adversarial thinking from the start.
+      **Commit:** (this iteration)
 - [x] **M177 (jang-server bare `except Exception: pass` sweep — 4 sites audited, 3 fixed + dual invariant added)** — Iter-111 diversified the audit surface to `jang-server/` (previously unaudited). Applied iter-106 M119's dual-invariant template to a new subproject.
       **Site inventory:** 10 `except Exception` sites in `server.py` (1774 lines). 4 were bare `except Exception: pass`:
       - L415 — DB job restore per-row loop.

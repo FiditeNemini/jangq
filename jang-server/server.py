@@ -624,6 +624,14 @@ def create_job(req: JobRequest):
     if not req.model_id or "/" not in req.model_id:
         raise HTTPException(400, "model_id must be 'org/name' format (e.g. 'Qwen/Qwen3-235B-A22B')")
 
+    # M178 (iter 113): validate webhook_url BEFORE persisting the job.
+    # Fails fast for obvious SSRF attempts; the server never stores an
+    # invalid webhook URL in the DB. _fire_webhook re-validates at fire
+    # time as layer-2 defense for jobs that might have been persisted
+    # before this check landed.
+    if err := _validate_webhook_url(req.webhook_url):
+        raise HTTPException(400, f"webhook_url rejected: {err}")
+
     # Duplicate detection: same model+profile already running or completed
     with _lock:
         for existing in _jobs.values():
@@ -1473,9 +1481,65 @@ Quantized by [JANG Quantization API](https://jangq.ai) | Created by Jinho Jang (
 # Webhook
 # ---------------------------------------------------------------------------
 
+def _validate_webhook_url(url: str) -> str | None:
+    """M178 (iter 113): validate a user-provided webhook URL before the
+    server makes an outbound HTTP request to it. Pre-M178 `_fire_webhook`
+    blindly POSTed JSON to whatever the user submitted — classic SSRF
+    vulnerability. An attacker could target:
+      - Localhost / loopback services (127.0.0.0/8, ::1)
+      - Private LAN (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+      - Link-local (169.254.0.0/16 — AWS/GCP instance metadata at
+        169.254.169.254 is the canonical exploit target)
+      - IPv6 equivalents (fc00::/7, fe80::/10)
+      - Non-HTTP schemes (file://, gopher://, ftp://)
+    Returns a user-facing error string if invalid, None if the URL is
+    safe. Validation is applied at job submission AND at fire time
+    (defense-in-depth — if a job was persisted pre-M178, the layer-2
+    check still blocks).
+    """
+    if not url:
+        return None  # empty is valid (no webhook requested)
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        return f"webhook_url could not be parsed: {type(e).__name__}: {e}"
+    if parsed.scheme not in ("http", "https"):
+        return f"webhook_url must use http or https (got '{parsed.scheme}')"
+    if not parsed.hostname:
+        return "webhook_url missing hostname"
+    # Resolve hostname to IPs and check each.
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror as e:
+        return f"webhook_url hostname '{parsed.hostname}' did not resolve: {e}"
+    resolved_ips = {info[4][0] for info in infos}
+    for ip_str in resolved_ips:
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return f"webhook_url hostname resolved to an unparseable address '{ip_str}'"
+        if ip.is_private or ip.is_loopback or ip.is_link_local \
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            return (
+                f"webhook_url hostname '{parsed.hostname}' resolves to a private / "
+                f"loopback / link-local address ({ip}) — blocked to prevent SSRF "
+                f"against internal services (M178)"
+            )
+    return None
+
+
 def _fire_webhook(job: Job):
     """POST final job status to webhook URL if configured."""
     if not job.webhook_url:
+        return
+    # M178 (iter 113): layer-2 SSRF guard. Submission-time validation
+    # should have caught this, but a persisted-pre-M178 job might slip
+    # through. Re-validate before making the outbound request.
+    if err := _validate_webhook_url(job.webhook_url):
+        job.log(f"Webhook blocked: {err}")
         return
     try:
         import urllib.request
