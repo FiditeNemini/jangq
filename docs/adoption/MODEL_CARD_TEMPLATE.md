@@ -123,8 +123,7 @@ targets: [
 ]
 ```
 
-> Note: JANGTQ models throw `.jangtqNotYetSupported` from `JANGKit.Model.load`. Use
-> `JANGTQGenerator` from the `JANG` product directly for JANGTQ inference.
+> `JANGKit.Model.load` auto-detects JANG vs JANGTQ via `jang_config.json` — the same API works for both families.
 
 ## Performance
 

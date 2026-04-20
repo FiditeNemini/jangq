@@ -26,9 +26,7 @@ struct JANGExample {
         let prompt = args[2]
 
         do {
-            // JANGKit.Model.load auto-detects JANG vs JANGTQ via jang_config.json.
-            // JANGTQ models will throw .jangtqNotYetSupported — use JANGTQGenerator
-            // directly from the JANG module for those (see PORTING.md).
+            // JANGKit.Model auto-detects JANG vs JANGTQ via jang_config.json — same API for both families.
             let model = try await JANGKit.Model.load(at: modelURL)
 
             let result = try await model.generate(
