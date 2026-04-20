@@ -6,6 +6,7 @@ struct VerifyStep: View {
     @Environment(CapabilitiesService.self) private var capsSvc
     @State private var checks: [VerifyCheck] = []
     @State private var busy = true
+    @State private var showingInference = false
 
     var body: some View {
         Form {
@@ -25,11 +26,33 @@ struct VerifyStep: View {
                     if let url = coord.plan.outputURL {
                         LabeledContent("Ready at", value: url.path)
                     }
+
+                    // Adoption actions row
                     HStack {
-                        Button("Reveal in Finder") { revealOutput() }
-                        Button("Copy Path") { copyPath() }
+                        Button {
+                            showingInference = true
+                        } label: {
+                            Label("Test Inference", systemImage: "bubble.left.and.bubble.right")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(coord.plan.outputURL == nil)
+
+                        Button {
+                            revealOutput()
+                        } label: {
+                            Label("Reveal in Finder", systemImage: "folder")
+                        }
+                        Button {
+                            copyPath()
+                        } label: {
+                            Label("Copy Path", systemImage: "doc.on.doc")
+                        }
+                    }
+
+                    HStack {
                         Button("Convert another") { reset() }
-                        Button("Finish") { finishApp() }.buttonStyle(.borderedProminent)
+                        Spacer()
+                        Button("Finish") { finishApp() }
                     }
                 }
             } else if !busy {
@@ -42,6 +65,18 @@ struct VerifyStep: View {
         }
         .formStyle(.grouped).padding()
         .onAppear { Task { await refresh() } }
+        .sheet(isPresented: $showingInference) {
+            if let url = coord.plan.outputURL {
+                TestInferenceSheet(
+                    modelPath: url,
+                    isVL: coord.plan.detected?.isVL ?? false,
+                    isVideoVL: coord.plan.detected?.isVideoVL ?? false,
+                    modelType: coord.plan.detected?.modelType ?? "unknown",
+                    profile: coord.plan.profile,
+                    sizeGb: Double(coord.plan.detected?.totalBytes ?? 0) / 1_000_000_000.0
+                )
+            }
+        }
     }
 
     private func refresh() async {
