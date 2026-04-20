@@ -43,11 +43,17 @@ struct InferenceError: Error, Equatable {
 /// TestInferenceSheet would never take effect.
 actor InferenceRunner {
     nonisolated let modelPath: URL
+    /// Executable to run. Production uses `BundleResolver.pythonExecutable`;
+    /// tests pass a short-sleep shell script to exercise the cancel / timeout
+    /// paths without needing an actual Python + model to load. Mirrors the
+    /// `executableOverride` pattern on PythonRunner.
+    nonisolated let executableOverride: URL?
     private var currentProcess: Process?
     private var cancelled: Bool = false
 
-    init(modelPath: URL) {
+    init(modelPath: URL, executableOverride: URL? = nil) {
         self.modelPath = modelPath
+        self.executableOverride = executableOverride
     }
 
     func generate(prompt: String,
@@ -74,7 +80,7 @@ actor InferenceRunner {
         }
 
         let proc = Process()
-        proc.executableURL = BundleResolver.pythonExecutable
+        proc.executableURL = executableOverride ?? BundleResolver.pythonExecutable
         proc.arguments = args
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
@@ -97,8 +103,23 @@ actor InferenceRunner {
         // the actor and call proc.terminate() while we are waiting.
         // Without this, the actor is held inside waitUntilExit() and cancel()
         // queues indefinitely, defeating the Cancel button.
-        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            proc.terminationHandler = { _ in done.resume() }
+        //
+        // M100 (iter 32): wrap the CheckedContinuation in a
+        // withTaskCancellationHandler so consumer-Task cancellation ALSO
+        // terminates the subprocess. Iter 3's M19 fix handled explicit
+        // `await runner.cancel()`, but the Task-cancel path was never wired.
+        // Without this wrap, cancelling the consuming Task leaves the
+        // subprocess running to natural completion (wasted load, stale
+        // inference, orphaned GPU allocation). Same pattern iter 30/31
+        // applied to publish + PythonRunner.
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                proc.terminationHandler = { _ in done.resume() }
+            }
+        } onCancel: {
+            // `onCancel` is a Sendable, nonisolated closure. We can't await
+            // the actor's `cancel()` directly — hop via Task.detached.
+            Task.detached { await self.cancel() }
         }
 
         let stdout = out.fileHandleForReading.readDataToEndOfFile()

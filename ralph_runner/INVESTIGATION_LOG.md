@@ -1188,3 +1188,43 @@ This bug was latent since iter 23-24. No test caught it because testing subproce
 - **Integration tests with real subprocesses** are slow (5+ seconds each) but catch cross-layer race conditions that mocks cannot. Iter 30 ProcessHandle + iter 31 PythonRunner = two confirmed-via-real-subprocess bugs that would have been invisible with pure unit tests.
 
 **Next iteration should pick:** The iter-30/31 pair established a clear pattern for cross-layer cancel auditing. Next subprocess-holding surface to audit with the same rigor: `InferenceRunner.generate()` (iter 3 M19 fixed explicit cancel but never stress-tested consumer-Task / stream-abandon paths). Alternatively M88 (sheet init-vs-task lifecycle) or M87 (Mistral 4 live validation) or continue Cat D with `feedback_model_checklist.md`.
+
+---
+
+## 2026-04-20 iteration 32 — M100 InferenceRunner consumer-Task cancel (completes cross-layer cancel sweep)
+
+**Angle:** Third iteration applying iter-30's meta-lesson. Iter 30 found M96 in PublishService. Iter 31 found M98 in PythonRunner (same class). This iter checks InferenceRunner — the last subprocess-holding surface that iter 3 established a cancel pattern for but never stress-tested end-to-end.
+
+**Deep trace walkthrough:**
+1. Read `InferenceRunner.generate()`. Unlike PythonRunner/PublishService (both streams), this is a single `async throws -> InferenceResult`. So the cancellation API shape is different.
+2. `generate()` awaits `withCheckedContinuation { proc.terminationHandler = ... }`. **CheckedContinuation does not participate in Task cancellation** — the await blocks until the subprocess naturally exits OR `runner.cancel()` is called explicitly. Consumer-Task cancel has no propagation path.
+3. Predicted failure mode: user's Swift code does `Task { try await runner.generate(...) }`. The Task is cancelled mid-run (view dismount, SwiftUI task lifecycle, user abort). The subprocess continues running — model load continues, inference continues, result is computed but nobody consumes it. GPU pinned, memory held, no UI feedback.
+4. On a 70 GB JANG model with ~30s load time, this creates a real UX pain: user cancels a prompt, GPU stays busy for tens of seconds, user thinks the app is frozen.
+5. **Write failing test first** — replicating iter-31 pattern. Added `executableOverride: URL? = nil` init parameter (matching PythonRunner's testability pattern). Test spawned a tick-writing bash script.
+6. **Test HUNG indefinitely** at `try? await consumerTask.value` after cancel — because generate() was stuck in the continuation wait forever. Had to `pkill -f xcodebuild` to recover. This is the strongest possible proof of the bug: not a failed assertion, but a complete deadlock at the cancel boundary.
+7. **Fix:** wrap the `withCheckedContinuation` inside `withTaskCancellationHandler { ... } onCancel: { Task.detached { await self.cancel() } }`. Task cancel now triggers SIGTERM + SIGKILL escalation via the existing actor cancel() method. The onCancel closure is `@Sendable` and nonisolated; hops onto the actor via Task.detached.
+8. **Test refactor to avoid harness-timeout on regression:** removed `try? await consumerTask.value` from the test. If the fix ever regresses, we'd hang for the test harness's 10-minute timeout instead of getting an informative assertion failure. Now we sleep 5s past SIGTERM+SIGKILL window and verify via tick-file mtime non-advance. Same diagnostic power, no hang risk.
+9. **Regression pin for iter 3's M19:** added `test_explicit_cancel_still_works_via_actor_method` — explicit `await runner.cancel()` must continue to work after the Task-cancel addition. Both paths must terminate the subprocess; neither must regress the other.
+10. **Verification under concurrent test load:** ran full Swift suite (122 tests). InferenceRunner tests pass reliably alongside PythonRunnerTests (which also do real-subprocess spawn). No flakes observed.
+
+**Items touched:**
+- M100 [x] — InferenceRunner consumer-Task cancel now propagates to subprocess. Cross-layer cancel sweep complete across all three subprocess-holding surfaces (publish / PythonRunner / InferenceRunner).
+
+**Commit:** (this iteration)
+
+**Verification:** 122 Swift tests (was 120, +2 — consumer-cancel + explicit-cancel regression pin). jang-tools 260 + ralph_runner 68 unchanged.
+
+**Closed-status tally:** 45 (prior) + M100 = 46 closed / 79 total = 58% closure rate.
+
+**Cross-layer cancel sweep summary (iters 30-32):**
+| Iter | Item | Surface | Root pattern | Fix |
+|------|------|---------|--------------|-----|
+| 30 | M96 | PublishService stream | no onTermination | ProcessHandle + onTermination |
+| 31 | M98 | PythonRunner stream | no onTermination | onTermination inside launch() |
+| 32 | M100 | InferenceRunner single-async | CheckedContinuation doesn't honor cancel | withTaskCancellationHandler wrap |
+
+Three different Swift async primitives (AsyncThrowingStream from actor, AsyncThrowingStream from enum, single async throws from actor) — three different fix shapes. All share the same root: **subprocess-holding async APIs must explicitly handle Task cancellation**. Swift's structured concurrency doesn't propagate automatically through `await withCheckedContinuation`.
+
+**Pattern established for future audits:** any `await withCheckedContinuation` used to bridge a callback-based C / ObjC / subprocess API to Swift async MUST be wrapped in `withTaskCancellationHandler` when the callback can take arbitrarily long. This is a reviewable code-smell worth grep-audit-ing the codebase for.
+
+**Next iteration should pick:** Audit the above pattern across the rest of the Swift codebase. `grep -n "withCheckedContinuation" JANGStudio/` and stress-test each call site. Alternatively M87 (Mistral 4 live validation), M88 (publish sheet init-vs-task), M97 (partial HF cleanup), or Cat D with `feedback_model_checklist.md` (untouched).
