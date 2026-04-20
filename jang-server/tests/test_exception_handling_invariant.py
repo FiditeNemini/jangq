@@ -53,15 +53,56 @@ def test_no_bare_except_exception_pass_in_server():
     # Allowlist: progress-pct calculation at ~1113 is acceptable — a
     # ZeroDivisionError on bytes_total=0 shouldn't spam logs every tick.
     # Line numbers may shift across edits; match by approximate line.
-    # Progress-pct defensive catch — line shifts as code is added above.
-    # Iter-111: 1121 → iter-115: 1150 → iter-124: 1207 → iter-126: 1300.
-    # Iter-125 meta-lesson: switch to function-body slicing instead of
-    # line-number range when a 5th bump arrives. For now, generous
-    # range. Before bumping further: open server.py at the reported
-    # line and confirm it's still the progress-pct tick-loop guard
-    # (lines 1296-1302 currently). Any new bare-pass needs its own
-    # audit per iter-106 M119 / iter-111 M177.
-    allowed_lines = set(range(1115, 1500))
+    # M190 (iter 127): refactored from a line-number range allowlist to
+    # a function-context allowlist. Iter-125's 4-bump rule fired at
+    # iter-126 — line shifted four times (1121 → 1150 → 1207 → 1300)
+    # and was on track for a 5th. Function-body slicing is immune to
+    # line-number shifts as long as the function name + the bare-pass
+    # line both stay inside the same def block.
+    #
+    # Allowed function NAMES whose bodies legitimately contain
+    # `except Exception: pass` (per iter-106 M119 progress-tick-guard
+    # taxonomy bucket). New entries need a rationale comment.
+    allowed_function_bodies = {
+        "_phase_download": "tick-loop progress-pct guard — bytes_total=0 "
+            "ZeroDivisionError must not spam logs every tick"
+    }
+    # Compute (start_line, end_line) for each allowed function via simple
+    # `def name(` scan. End line = next top-level def/class or EOF.
+    func_ranges: dict[str, tuple[int, int]] = {}
+    src_lines = SERVER_PY.read_text(encoding="utf-8").split("\n")
+    current_func: str | None = None
+    current_start: int = 0
+    for i, line in enumerate(src_lines, start=1):
+        # New top-level def closes the previous function range.
+        if line.startswith("def ") or line.startswith("async def "):
+            # Close previous if it was an allowed func.
+            if current_func and current_func in allowed_function_bodies:
+                func_ranges.setdefault(current_func, (current_start, i - 1))
+            # Extract `def NAME(` or `async def NAME(`.
+            after = line.removeprefix("async ").removeprefix("def ")
+            current_func = after.split("(")[0].strip()
+            current_start = i
+    # Close the last function in the file.
+    if current_func and current_func in allowed_function_bodies:
+        func_ranges.setdefault(current_func, (current_start, len(src_lines)))
+
+    # Build the line-set from the resolved function ranges.
+    allowed_lines: set[int] = set()
+    for func_name, (start, end) in func_ranges.items():
+        allowed_lines.update(range(start, end + 1))
+
+    # Sanity: every allowed function name must have actually resolved.
+    # Catches a renamed/removed function before the next test bump
+    # quietly hides a real new bare-pass.
+    missing = set(allowed_function_bodies) - set(func_ranges)
+    assert not missing, (
+        f"M190 invariant: allowed_function_bodies references functions not "
+        f"found in server.py: {missing}. Either the function was renamed "
+        f"(update the allowlist key) or removed (drop the entry + audit "
+        f"whether the bare-pass moved)."
+    )
+
     remaining = [ln for ln in offenders if ln not in allowed_lines]
     assert not remaining, (
         f"Found {len(remaining)} new bare `except Exception: pass` sites in "
