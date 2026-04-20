@@ -213,23 +213,51 @@ struct SourceStep: View {
         isDetecting = true
         do {
             let detected = try await SourceDetector.inspect(url: url)
-            // M135: guard against stale-task overwrite. If this task was
-            // cancelled while waiting on the subprocess (user picked a
-            // different folder), don't mutate state — the newer task owns it.
+            // M135 (iter 57): guard against stale-task overwrite when the task
+            // was explicitly cancelled (user picked a different folder and
+            // `pickFolder` called `detectionTask?.cancel()`).
             guard !Task.isCancelled else { return }
-            await MainActor.run { coord.plan.detected = detected }
+            await MainActor.run {
+                // M161 (iter 84): second-line guard for ORPHANED tasks —
+                // ones that survived view destruction. `detectionTask` is
+                // @State private to SourceStep, so if the user sidebar-jumps
+                // away from Source and back (creating a fresh SourceStep
+                // instance), the NEW view's `detectionTask` is nil and
+                // can't cancel the OLD view's task. The old task then
+                // keeps running, Task.isCancelled stays false, and it
+                // overwrites `coord.plan.detected` with the OLD folder's
+                // result — silently corrupting the conversion plan when
+                // the user has since picked a new folder. The URL-match
+                // check is the authoritative "is this still relevant?"
+                // signal: if sourceURL has moved on, this detection's
+                // result is stale regardless of cancel state.
+                guard coord.plan.sourceURL == url else { return }
+                coord.plan.detected = detected
+            }
         } catch {
             await MainActor.run {
                 // Also guard the error-path — a cancelled task's subprocess
                 // kill shouldn't surface as a user-facing "Detection failed".
                 guard !Task.isCancelled else { return }
+                // M161 (iter 84): orphaned-task guard on the error path too.
+                // Without it, an old folder's detection failure would flash
+                // as an errorText banner against a NEW folder the user just
+                // picked — user sees "Detection failed: …" while looking at
+                // a model that is actually fine.
+                guard coord.plan.sourceURL == url else { return }
                 errorText = "Detection failed: \(error.localizedDescription)"
                 isDetecting = false
             }
             return
         }
         guard !Task.isCancelled else { return }
-        await MainActor.run { isDetecting = false }
+        await MainActor.run {
+            // M161 (iter 84): the isDetecting indicator belongs to the URL
+            // whose task is finishing. If sourceURL has moved on, the NEW
+            // url has its own isDetecting=true in flight; don't stomp it.
+            guard coord.plan.sourceURL == url else { return }
+            isDetecting = false
+        }
 
         // Step B: recommendation call (also fast, reads same config.json)
         isRecommending = true
@@ -238,12 +266,20 @@ struct SourceStep: View {
             let rec = try await RecommendationService.fetch(modelURL: url)
             guard !Task.isCancelled else { return }
             await MainActor.run {
+                // M161 (iter 84): same orphaned-task guard for recommendation.
+                // A stale recommendation write would set self.recommendation
+                // to the OLD folder's suggestions AND call applyRecommendation
+                // which mutates plan.profile/family/method — a direct user-
+                // visible data-corruption vector.
+                guard coord.plan.sourceURL == url else { return }
                 self.recommendation = rec
                 self.applyRecommendation(rec)
             }
         } catch {
             await MainActor.run {
                 guard !Task.isCancelled else { return }
+                // M161 (iter 84): symmetric guard on recommendation error.
+                guard coord.plan.sourceURL == url else { return }
                 // Recommendation failure is soft — user can still convert manually.
                 errorText = "Recommendation failed (conversion still works): \(error.localizedDescription)"
             }

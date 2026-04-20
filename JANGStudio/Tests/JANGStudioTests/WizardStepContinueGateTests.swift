@@ -131,6 +131,52 @@ final class WizardStepContinueGateTests: XCTestCase {
         }
     }
 
+    // MARK: - M161 (iter 84): SourceStep URL-match guard on write-back
+    //
+    // iter-57 M135's `detectionTask?.cancel()` handles the case where the
+    // user picks a new folder within the SAME SourceStep view instance.
+    // But `detectionTask` is `@State private` — scoped to the view. When
+    // the user sidebar-jumps to Architecture and back to Source, the old
+    // SourceStep is destroyed; the detection Task it spawned keeps
+    // running (Task independence from creation scope) but the NEW
+    // SourceStep instance has `detectionTask = nil` so it can't cancel
+    // the orphan. The orphan then completes and stomps
+    // `coord.plan.detected` with stale data.
+    //
+    // M161's defense-in-depth: every MainActor.run write-back in
+    // detectAndRecommend now checks `coord.plan.sourceURL == url`. If
+    // sourceURL has moved on, the write is stale regardless of cancel
+    // state and is discarded.
+
+    func test_sourceStep_detectAndRecommend_guards_writes_by_url_match() throws {
+        let src = try stepSource("SourceStep.swift")
+        // There are 5 MainActor.run sites in detectAndRecommend (detect
+        // success, detect error, isDetecting=false, rec success, rec error).
+        // Each must contain a `guard coord.plan.sourceURL == url else { return }`
+        // to block stale writes from orphaned tasks.
+        let guardCount = src.components(
+            separatedBy: "guard coord.plan.sourceURL == url else { return }"
+        ).count - 1
+        XCTAssertGreaterThanOrEqual(guardCount, 5,
+            """
+            detectAndRecommend must have sourceURL-match guards at all 5
+            MainActor.run write-back sites (detect success, detect error,
+            isDetecting=false, rec success, rec error). Found \(guardCount)
+            — M161 regression.
+            """
+        )
+    }
+
+    func test_sourceStep_M161_rationale_is_present() throws {
+        let src = try stepSource("SourceStep.swift")
+        // Pin the M161 rationale comment so a future "simplification" that
+        // strips it also flags to the reviewer why those guards are there.
+        XCTAssertTrue(
+            src.contains("M161") && src.contains("orphaned"),
+            "M161 rationale comment must remain — explains why URL-match is the authoritative stale-write defense"
+        )
+    }
+
     // MARK: - M136 (iter 58): RunStep auto-start must only fire on .idle
     //
     // Pre-iter-58 RunStep's .onAppear was:

@@ -3533,3 +3533,52 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: audit the UI layer — SwiftUI state machine transitions, @Observable mutation races, wizard step-validity silent traps. Haven't deep-traced this surface since iter-56 (WizardStepContinueGateTests).
 
 **Next iteration should pick:** save the pipe-drain memory note, then pivot to UI-layer audit (wizard state machine races / SwiftUI @State mutation from non-MainActor contexts / step gate conditions).
+
+---
+
+## 2026-04-20 iteration 84 — M161 SourceStep stale-task cross-view-destruction race (UI-layer audit)
+
+**Angle:** Iter-83 forecast: "pivot to UI-layer audit — wizard state machine races / SwiftUI @State mutation from non-MainActor contexts / step gate conditions." Pipe-drain class is closed (M158+M159+M160); saved the three-pattern memory note; now new ground.
+
+**Deep trace walkthrough:**
+1. **Mapped the wizard surface.** WizardCoordinator is @Observable (plan + active step). WizardView uses NavigationSplitView with sidebar List(selection: Binding(get: { coord.active }, set: { coord.active = $0 ?? .source })) and a switch-based detail view (SourceStep → ArchitectureStep → ProfileStep → RunStep → VerifyStep).
+2. **Observed immediately:** the sidebar selection binding has NO `canActivate` check on the `set:` side. User can jump to Architecture even when Source is incomplete. The visual hint is `.foregroundStyle(.secondary)` on locked rows but no `.disabled()`. Mild UX issue, but not a data bug — Continue buttons on destination steps are gated by `isStepNComplete`, so the user just lands in a dead-end.
+3. **Followed the sidebar-jump pattern deeper.** What else breaks when Source is NOT complete and the user jumps away? The SourceStep view gets DESTROYED when the switch lands on a different case. All @State variables go away. But `coord.plan` (on the @Observable coordinator) persists.
+4. **Asked: what in SourceStep is state-coupled to an async operation?** Found the iter-57 M135 `detectionTask: @State Task<Void, Never>?`. Handle to a cancellable detection Task, sitting on VIEW-lifetime state. Jumping away destroys the handle but NOT the Task (Swift Tasks are independent of their creator's lifecycle).
+5. **Formed hypothesis:** orphaned task from destroyed view continues running and writes back to `coord.plan.detected` AFTER the user has come back and picked a different folder. Iter-57 M135's Task.isCancelled guard wouldn't catch this because the task wasn't cancelled — it was orphaned.
+6. **Traced the race timeline:**
+   - T=0: Old view picks folder A (500 GB). TaskA starts.
+   - T=1: User sidebar-jumps to Architecture. Old SourceStep destroyed; TaskA lives on.
+   - T=2: User jumps back. NEW SourceStep created; its `detectionTask = nil`.
+   - T=3: User picks folder B (5 GB). `detectionTask?.cancel()` runs on the new nil handle — no-op. TaskB starts.
+   - T=4: TaskB finishes fast, writes `coord.plan.detected = B`.
+   - T=5: TaskA finishes slow, writes `coord.plan.detected = A`.
+   - **Outcome:** `plan.sourceURL = B`, `plan.detected = A`. Convert dispatches with B's path but A's architecture → wrong quantization → subtly wrong output. Silent data corruption of the conversion plan.
+7. **Considered fix options:**
+   - (a) Move detectionTask to WizardCoordinator so it survives destruction. Works but couples UI-lifecycle concerns to the coordinator, and the handle-tracking approach is inherently fragile (imagine a third view creating another orphan we don't know about).
+   - (b) Add a URL-match guard at each write-back site: `guard coord.plan.sourceURL == url else { return }`. The URL the task was spawned for is a content-match authoritative signal: if the plan's sourceURL has moved on, this task's output is stale no matter how it got orphaned.
+   Went with (b). Five write-back sites in detectAndRecommend (detect-success, detect-error, isDetecting=false, rec-success, rec-error), all get the guard. Kept the existing Task.isCancelled first-line defense — M135's explicit-cancel path still benefits from short-circuiting early before await MainActor.run.
+8. **Regression tests:** source-inspection. Pin the guard COUNT (≥5 occurrences of the literal) and the M161 rationale comment presence. Matches iter-80 M157's test pattern. Source-inspection is the right shape here because reproducing the race in XCTest would require driving NavigationSplitView destruction + recreation, which isn't feasible outside XCUITest.
+
+**Meta-lesson — @State handles don't bridge view destruction.** Any cancel token / task handle / subscription that must survive the user moving away from a view MUST live on an @Observable coordinator, NOT @State. Corollary: for cross-view-lifetime orphan protection, rely on CONTENT-MATCH (URL / generation token / resource ID) rather than handle-tracking. The handle can disappear with the view; the content match is authoritative against the latest state.
+
+**Meta-lesson — `Task.isCancelled` is insufficient for cross-view-destruction.** It only catches tasks that were explicitly cancelled via a still-live handle. An orphaned task's isCancelled stays false until its creator explicitly cancels it — which can't happen if the handle is gone. Any stale-task guard that relies SOLELY on isCancelled has a cross-view-destruction hole. This is a codebase-wide audit axis for the next iter: grep for `Task.isCancelled` checks inside `MainActor.run` write-back closures and see which ones also have a content-match guard vs not.
+
+**Items touched:**
+- M161 [x] — SourceStep's 5 MainActor.run write-back sites now guard on `coord.plan.sourceURL == url` in addition to Task.isCancelled. Orphaned tasks from destroyed view instances are contained.
+
+**Commit:** (this iteration)
+
+**Verification:** 20 WizardStepContinueGateTests pass (was 18, +2). Python 348 + ralph 73 unchanged. Full Swift suite ~185.
+
+**Closed-status tally:** 96 (iter 83) + M161 = 97 closed / 100 total = 97.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: grep all `Task.isCancelled` inside `MainActor.run` closures across the Swift app — audit for matching content-match guards vs not. Expected to find at least 2-3 more similar orphan races in other step files (RunStep, VerifyStep, ProfileStep).
+- **NEW**: sidebar `canActivate` gate missing — clicks on locked rows still jump. Minor UX fix but cheap: add `.disabled(!coord.canActivate(step))` or gate the set: binding to only accept reachable steps.
+
+**Next iteration should pick:** Task.isCancelled cross-view orphan sweep across all step files — apply the same content-match guard pattern wherever @State Task handles feed MainActor.run write-backs.
