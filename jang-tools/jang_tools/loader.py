@@ -706,8 +706,25 @@ def load_jang_vlm_model(model_path: str | Path):
 
     jang_cfg = json.loads(config_path.read_text())
     fmt = jang_cfg.get("format")
-    if not fmt or fmt not in JANG_FORMAT_VALUES:
-        raise ValueError(f"Not a JANG model: format='{fmt}'")
+    # M130 (iter 52): peer-helper parity with load_jang_model's format guard.
+    # The text path uses a split check that gives a clearer "missing field"
+    # vs "not a JANG model" message and adds a format_version sanity check.
+    # Mirror it here so a future v3 artifact (or a bad format tag) produces
+    # the same actionable message instead of confusing mlx_vlm internals.
+    if not fmt:
+        raise ValueError(
+            f"JANG config {config_path.name} is missing 'format' field. "
+            f"Expected one of: {', '.join(JANG_FORMAT_VALUES)}"
+        )
+    if fmt not in JANG_FORMAT_VALUES:
+        raise ValueError(f"Not a JANG model: format='{fmt}' (expected {', '.join(JANG_FORMAT_VALUES)})")
+
+    version = jang_cfg.get("format_version", "1.0")
+    major = int(version.split(".")[0])
+    if major > 2:
+        raise ValueError(
+            f"Unsupported JANG format version: {version} (this loader supports 1.x and 2.x)"
+        )
 
     # v2: instant load
     if _is_v2_model(path):

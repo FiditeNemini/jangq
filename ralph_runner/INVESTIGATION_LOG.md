@@ -2088,3 +2088,39 @@ Pivoted to re-audit M121. Iter 45 closed the text path but the VL path is a SEPA
 - peer-helper sweep on `allocate.py` / `recommend.py` bit-width picking functions.
 
 **Next iteration should pick:** `_load_jang_v1*` Python peer-helper sweep (matches iter 50's pattern but on the legacy path; likely to find something given iter 50 found the modality bug in the active path) OR M128 observation needs a bounded plan even if we can't run a live test.
+
+## 2026-04-20 iteration 52 — M130 public loader entrypoint parity
+
+**Angle:** Iter 51 applied peer-helper meta-checklist Swift-side (found typed-error asymmetry in Capabilities/Profiles services). Iter 52 back to Python on the two public loader entrypoints. Both route to v1/v2 and LLM/VLM inner helpers; both should validate the jang_config tag and version. Do they?
+
+**Deep trace walkthrough:**
+1. **Diff the two entrypoints side-by-side:**
+   - `load_jang_model` (text): reads jang_cfg, checks `if not fmt: raise "missing field"`, checks `if fmt not in JANG_FORMAT_VALUES: raise "not a JANG model"`, **checks `major = int(version.split(".")[0]); if major > 2: raise "Unsupported JANG format version"`**, then dispatches v1/v2.
+   - `load_jang_vlm_model` (VL): reads jang_cfg, checks `if not fmt or fmt not in JANG_FORMAT_VALUES: raise "Not a JANG model: format='{fmt}'"`. **No version check.** Then dispatches v1/v2.
+2. **What breaks when a future v3 artifact hits the VL path?** `_is_v2_model()` returns True (format_version starts with "2" check is misleading but let's trace it). Actually looking at `_is_v2_model` at loader.py:52-73, it's True for EITHER "standard safetensors + no jang.safetensors" OR "format_version starts with 2". A v3 artifact has standard safetensors, so it's detected as v2. Control flows to `_load_jang_v2_vlm`. Internal `get_model_and_args` raises ValueError("Model type X not supported") — obscure, and importantly doesn't mention format_version.
+3. **The TDD-first test captures this exact regression:** `test_vlm_path_also_rejects_unsupported_format_version` constructed a minimal model dir with `format_version: "3.0"` and `model_type: "llama"`. Ran `load_jang_vlm_model(path)` in subprocess. Pre-fix: stderr was "ERROR:root:Model type llama not supported. Error: No module named 'mlx_vlm.models.llama'" — confusing. Post-fix: "Unsupported JANG format version: 3.0 (this loader supports 1.x and 2.x)" — actionable.
+4. **Fix is mechanical** — copy the 4-line version check from text-path into vlm-path. Also refactor the missing-format check to match the text-path's two-step form (gives better error when 'format' is absent entirely vs. present-but-wrong).
+5. **Why iter-44 Cat D didn't catch this:** iter 44 verified stamping behavior of current converters. It didn't diff the two public loader entrypoints. Sibling-function diff is a different audit axis.
+
+**Meta-lesson reinforcement.** The peer-helper checklist has now produced 4 bug finds in 6 iters (iter 47 M123, iter 50 M127, iter 51 M129, iter 52 M130). Pattern: **whenever a module has 2+ near-parallel functions with overlapping responsibilities, ONE of them has drifted.** The ROI is consistent enough to elevate peer-helper grep to a standard iter-opening move.
+
+**Items touched:**
+- M130 [x] — `load_jang_vlm_model` gains format_version check + split missing-format check.
+
+**Commit:** (this iteration)
+
+**Verification:** 302 jang-tools tests pass (was 297, +5 for entrypoint parity suite). Swift 136 + ralph 73 unchanged.
+
+**Closed-status tally:** 64 (iter 51) + M130 = 65 closed / 99 total = 65.7% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (still observation — needs live test)
+- **NEW**: peer-helper sweep inside recommend.py's `_recommend_family` / `_recommend_profile` / `_recommend_hadamard` / `_recommend_dtype` family — different signatures by design but all return `(choice, reasoning)` tuples; worth verifying each has consistent "fallback on unknown input" behavior.
+- **NEW**: peer-helper sweep inside allocate.py's `classify_tensor` family.
+- grep-audit class: any `raise` without a message (empty Exception) in production.
+
+**Next iteration should pick:** `_recommend_*` peer-helper sweep (natural continuation of iter 52's approach — recommend.py is user-facing, Step 1 of the wizard, so inconsistencies here directly hit UX).
