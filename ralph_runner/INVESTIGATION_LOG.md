@@ -2956,3 +2956,40 @@ Three iters building the same pattern — it's now a template. Future read-side 
 - **NEW**: routing_profile.py has `json.loads(config_path.read_text())` at three places (iter-43 re-grep noted). Same M148 template.
 
 **Next iteration should pick:** format/reader.py symmetric-path hardening (direct continuation) OR a fresh category.
+
+## 2026-04-20 iteration 71 — M149 format/reader.py: extract shared helper + harden 3 sites
+
+**Angle:** Iter-70 crystallized the read-side-loader hardening template across 3 iters (M120/M147/M148). Iter-71 applies it in `format/reader.py`'s `load_jang_model` — which has THREE bare `json.loads(path.read_text())` call sites. At that many repetitions, it's time to DRY.
+
+**Deep trace walkthrough:**
+1. **Three sites identified** in `load_jang_model`:
+   - `jang_config = json.loads(config_path.read_text())` at line 168.
+   - `model_config = json.loads(model_config_path.read_text())` at line 176.
+   - `index = json.loads(index_path.read_text())` at line 183.
+2. Every one of these fails cryptically on disk error / malformed JSON / non-dict root. Error surfacing depends on the call site; Swift-side shows whatever the subprocess traceback says.
+3. **Decision: extract shared helper.** Four iters of the same pattern inline would be the most DRY-violating approach. At three+ sites (M149) with one more already existing (M148 manifest), the crystallized helper is cheaper to write and more consistent.
+4. **`_read_json_object(path, *, purpose: str)`** — keyword-only `purpose` forces call sites to document what the JSON is ("JANG config", "model config", "shard index"). The purpose lands in error messages for diagnostics.
+5. **The fourth check (weight_map structure):** after parsing the shard index, `index["weight_map"]` was accessed unsafely. `.values()` on a missing/non-dict key would produce `KeyError` or `AttributeError`. Added an explicit isinstance check with a schema-migration hint. This catches the case where an old-format index had a flat list instead of a dict, or a new-format index changed the key name.
+6. **Test strategy:** five pins covering each failure mode. Shared invariant: error must be ValueError, must include path, must name the purpose. Repeating invariants across the pins hammer in the template for future readers.
+
+**Meta-lesson — when to crystallize.** The first inline try/except (M120 iter 43) looked ad-hoc. Second (M147 iter 69) matched the first. Third (M148 iter 70) still seemed fine to inline. FOURTH (this iter's three-sites-in-one-function) is where DRY wins: one helper + purpose arg, four call sites all terse. Future iters should extract to `_read_json_object` for any read-side loader with 2+ sites in the same module. Logged as a codebase convention.
+
+**Items touched:**
+- M149 [x] — `format/reader.py` now shares `_read_json_object` helper across 3 sites; 5 new error-path tests.
+
+**Commit:** (this iteration)
+
+**Verification:** 323 jang-tools tests pass (was 318, +5 for format reader error-path pins). Swift 170 + ralph 73 unchanged.
+
+**Closed-status tally:** 83 (iter 70) + M149 = 84 closed / 100 total = 84.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW M150 candidate**: migrate other read-side sites in jang-tools to use `_read_json_object` template. capabilities.py had 5 sites (iter-48 M125 wrapped them in context managers but didn't harden error paths), loader.py has many.
+- Python-side audit continuations: routing_profile.py + codebook_vq.py have `json.loads(...)` sites.
+
+**Next iteration should pick:** M150 capabilities.py migration (reuses the helper in another high-traffic module) OR Swift-side continuation.

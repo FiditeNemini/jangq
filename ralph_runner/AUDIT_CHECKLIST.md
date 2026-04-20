@@ -864,6 +864,21 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `test_manifest_missing_file_raises_value_error`: OSError → ValueError with "could not read manifest" + path.
       **Evidence:** `jang-tools/jang_tools/jangspec/manifest.py:49-104`. 318 Python tests pass (was 314, +4). Swift 170 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M149 (format/reader.py: extract shared `_read_json_object` helper + harden 3 call sites)** — iter-70 meta-lesson about the M120/M147/M148 template applied to `format/reader.py`'s `load_jang_model`. Three bare `json.loads(path.read_text())` calls: jang_config, model config, shard index. All produced cryptic tracebacks on disk/encoding/JSON/schema errors — same user-hostile UX.
+      **Fix (iter 71):**
+      - **Extracted shared helper `_read_json_object(path, *, purpose)`** — first formalization of the template. Wraps OSError / UnicodeDecodeError / JSONDecodeError + isinstance(dict) guard. Every failure emits a ValueError with path + purpose (e.g., "JANG config at /path/x is not valid JSON (line 1, col 3): …").
+      - Replaced 3 bare reads with `_read_json_object(config_path, purpose="JANG config")`, `(model_config_path, purpose="model config")`, `(index_path, purpose="shard index")`.
+      - Added downstream structure check: `if "weight_map" not in index or not isinstance(index.get("weight_map"), dict):` → ValueError with "corrupted or incompatible version" hint. Catches the schema-migration case where older index format shipped a different top-level key.
+      **Tests (+5) in tests/test_format.py `TestFormatReaderErrorDiagnostics`:**
+      - `test_malformed_jang_config_raises_with_path`
+      - `test_non_dict_root_jang_config_raises`
+      - `test_malformed_model_config_raises_with_purpose`
+      - `test_malformed_shard_index_raises_with_purpose`
+      - `test_shard_index_missing_weight_map_raises`
+      Each asserts the 3-property invariant: ValueError + path in message + purpose-noun in message.
+      **Why extract the helper now (vs inline like iters 43/69/70):** four sites with near-identical shape is the threshold where DRY wins over simple inline try/except. `_read_json_object` becomes reusable for future read-side loaders in the same codebase — capabilities.py, loader.py, recommend.py could all migrate. Logged for future iters.
+      **Evidence:** `jang-tools/jang_tools/format/reader.py:14-60, 200-220`. 323 Python tests pass (was 318, +5). Swift 170 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

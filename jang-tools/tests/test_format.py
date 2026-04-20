@@ -116,3 +116,71 @@ class TestFormatRoundtrip:
 
             with pytest.raises(ValueError, match="Invalid format"):
                 load_jang_model(tmpdir)
+
+
+class TestFormatReaderErrorDiagnostics:
+    """M149 (iter 71): every JSON read in load_jang_model must produce an
+    actionable ValueError with the file path + purpose in the message.
+    Same template as M120 (inspect_source), M147 (AppSettings.load),
+    M148 (jangspec.manifest)."""
+
+    def test_malformed_jang_config_raises_with_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "jang_config.json"
+            cfg_path.write_text("{ this is not json")
+            with pytest.raises(ValueError) as excinfo:
+                load_jang_model(tmpdir)
+            msg = str(excinfo.value)
+            assert "not valid JSON" in msg
+            assert str(cfg_path) in msg, f"error must include path, got: {msg}"
+            assert "JANG config" in msg
+
+    def test_non_dict_root_jang_config_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "jang_config.json"
+            cfg_path.write_text("[1, 2, 3]")
+            with pytest.raises(ValueError) as excinfo:
+                load_jang_model(tmpdir)
+            assert "expected a JSON object" in str(excinfo.value)
+
+    def test_malformed_model_config_raises_with_purpose(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # jang_config OK but config.json broken.
+            (Path(tmpdir) / "jang_config.json").write_text(
+                json.dumps({"format": "jang", "format_version": "1.0"})
+            )
+            mc_path = Path(tmpdir) / "config.json"
+            mc_path.write_text("not json at all")
+            with pytest.raises(ValueError) as excinfo:
+                load_jang_model(tmpdir)
+            msg = str(excinfo.value)
+            assert "model config" in msg, f"purpose must be in the error: {msg}"
+            assert str(mc_path) in msg
+
+    def test_malformed_shard_index_raises_with_purpose(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "jang_config.json").write_text(
+                json.dumps({"format": "jang", "format_version": "1.0"})
+            )
+            idx_path = Path(tmpdir) / "model.jang.index.json"
+            idx_path.write_text("{ broken")
+            with pytest.raises(ValueError) as excinfo:
+                load_jang_model(tmpdir)
+            msg = str(excinfo.value)
+            assert "shard index" in msg
+            assert str(idx_path) in msg
+
+    def test_shard_index_missing_weight_map_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "jang_config.json").write_text(
+                json.dumps({"format": "jang", "format_version": "1.0"})
+            )
+            # Index is valid JSON but missing weight_map.
+            (Path(tmpdir) / "model.jang.index.json").write_text(
+                json.dumps({"metadata": {"total_size": 0}})
+            )
+            with pytest.raises(ValueError) as excinfo:
+                load_jang_model(tmpdir)
+            msg = str(excinfo.value)
+            assert "weight_map" in msg
+            assert "corrupted" in msg or "incompatible" in msg

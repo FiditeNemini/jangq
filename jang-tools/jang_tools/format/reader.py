@@ -5,7 +5,7 @@ Created by Jinho Jang (eric@jangq.ai)
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from safetensors import safe_open
@@ -20,6 +20,39 @@ from .spec import (
     DEFAULT_BLOCK_SIZE,
 )
 from ..quantize import QuantizedTensor
+
+
+def _read_json_object(path: Path, *, purpose: str) -> dict[str, Any]:
+    """M149 (iter 71): shared loader for JSON files with clear diagnostics.
+
+    Applies the template crystallized in M120 (inspect_source), M147
+    (AppSettings.load), M148 (jangspec manifest):
+      * Disk/encoding errors → ValueError with path + purpose.
+      * Malformed JSON → ValueError with path + line/col.
+      * Non-dict root → ValueError naming the wrong type.
+    Every message is actionable enough that a user staring at a bug
+    report can identify WHICH file and WHY.
+
+    ``purpose`` is a short noun phrase ("JANG config", "model config",
+    "shard index") that lands in the error message.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"could not read {purpose} at {path}: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{purpose} at {path} is not valid JSON "
+            f"(line {exc.lineno}, col {exc.colno}): {exc.msg}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{purpose} at {path} has a top-level {type(data).__name__}, "
+            f"expected a JSON object"
+        )
+    return data
 
 
 class JANGModel:
@@ -164,23 +197,30 @@ def load_jang_model(path: str | Path) -> JANGModel:
             f"Not a JANG model directory: {path} (missing {JANG_CONFIG_FILENAME})"
         )
 
-    # Load JANG config
-    jang_config = json.loads(config_path.read_text())
+    # Load JANG config. M149 (iter 71): use the shared _read_json_object
+    # helper so disk/encoding/JSON/schema errors land as actionable
+    # ValueErrors instead of raw tracebacks.
+    jang_config = _read_json_object(config_path, purpose="JANG config")
     if jang_config.get("format") != FORMAT_NAME:
         raise ValueError(f"Invalid format: expected '{FORMAT_NAME}', got '{jang_config.get('format')}'")
 
     # Load model config
     model_config_path = path / "config.json"
-    model_config = {}
+    model_config: dict[str, Any] = {}
     if model_config_path.exists():
-        model_config = json.loads(model_config_path.read_text())
+        model_config = _read_json_object(model_config_path, purpose="model config")
 
     # Load tensors from shard files
     index_path = path / JANG_INDEX_FILENAME
     tensors = {}
 
     if index_path.exists():
-        index = json.loads(index_path.read_text())
+        index = _read_json_object(index_path, purpose="shard index")
+        if "weight_map" not in index or not isinstance(index.get("weight_map"), dict):
+            raise ValueError(
+                f"shard index at {index_path} missing 'weight_map' dict — "
+                f"bundle may be corrupted or written by an incompatible version"
+            )
         shard_files = set(index["weight_map"].values())
 
         for shard_file in sorted(shard_files):
