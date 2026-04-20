@@ -1115,3 +1115,43 @@ Memory `feedback_readme_standards.md` specifies 9+ other HARD upload requirement
 Rules 7-8 (no duplicate tables, no wrong profile data) still aren't automated — they're curator-audit rules that require reading the specific card text. Could potentially add a lint pass but deferring as M95.
 
 **Next iteration should pick:** M88 (sheet init-vs-task field-lifecycle, iter-25 spawn — small cleanup). Or M87 live Mistral 4 validation (needs real convert). Or continue Cat D with `feedback_model_checklist.md` (untouched). Or the VerifyStep adoption action row wiring audit (flagged iter 25). Or broader UX exploration: what happens if user cancels the publish stream mid-upload (iter-23/24 flow) — does the half-uploaded repo get cleaned up, or is it stranded with partial files?
+
+---
+
+## 2026-04-20 iteration 30 — M96 publish cancel propagation (Cat C concern)
+
+**Angle:** Picked the "publish cancel" question that iter 29 surfaced. Iter 23-24 shipped streaming publish + UI progress bar but never verified cancellation propagates from UI → stream → subprocess. Classic layered system where each layer assumes the next one handles cleanup. Let's trace.
+
+**Deep trace walkthrough:**
+1. UI layer: `PublishToHuggingFaceSheet.runPublish()` does `for try await event in PublishService.publishWithProgress(...) { apply(event:) }`. The Task wrapping this runs via `Task { await runPublish() }` — DETACHED, no cancellation path to it.
+2. **First bug found:** no Cancel button during `isPublishing`. Even if cancellation worked, user couldn't trigger it. They'd have to dismiss the sheet, which also doesn't cancel the detached Task.
+3. Service layer: `publishWithProgress` returns `AsyncThrowingStream` from `AsyncThrowingStream { continuation in Task.detached { await _streamPublish(...) } }`. **No `continuation.onTermination` handler.**
+4. **Second bug found:** when the consuming Task cancels (or the stream is abandoned), the continuation terminates but NOTHING tells the subprocess. `_streamPublish` is still awaiting `proc.terminationHandler` inside `withCheckedContinuation`. Subprocess runs to natural completion.
+5. **Confirmed failure mode end-to-end:** user closes Publish sheet mid-upload → SwiftUI dismisses the view → Task detached from view keeps running → Python subprocess keeps uploading to HF → half-published repo is stranded with partial files on HuggingFace → no user feedback → user has no idea the upload is continuing.
+6. **Fix architecture:**
+   - **Need a way** for a Sendable closure (onTermination) to SIGTERM a Process reference that's created on a DIFFERENT task. Process doesn't conform to Sendable; a global / static reference would race.
+   - **Solution:** `ProcessHandle` class — locked wrapper around `process: Process?` + `wasCancelled: Bool`. The @unchecked Sendable annotation is safe because all accesses go through the lock.
+   - onTermination stores `handle.cancel()` before the work Task spawns. Work Task calls `handle.set(process: proc)` after run() lands.
+   - **Race case:** what if cancel() fires BEFORE set()? Happened during testing. Fixed: set() checks `_wasCancelled` and terminates immediately if true. Test `test_processHandle_cancel_before_set_is_safe` pins this with a live /bin/sleep 1000 subprocess.
+7. **Exit semantics:** on cancel, subprocess exits non-zero (SIGTERM termination code 15). Without special handling that would look like a cliError in the stream's `continuation.finish(throwing:)` branch. Fix: check `handle.wasCancelled` before throwing — clean finish instead.
+8. **UI wiring:**
+   - `@State publishTask: Task<Void, Never>?` stores the consuming Task reference.
+   - `@State wasCancelled: Bool` tracks user intent separately from stream termination.
+   - "Cancel upload" button with `.keyboardShortcut(.cancelAction)` (Escape key) visible only during `isPublishing`. Tapping it sets wasCancelled + calls publishTask?.cancel().
+   - `runPublish` distinguishes three branches after the stream: success, user-cancel (informative message about partial HF files), error.
+   - `CancellationError` swallowed silently in the catch — surfaced via wasCancelled branch instead. Prevents "Task was cancelled" from showing as a generic red error.
+9. **Not fixed — flagged M97:** local subprocess is terminated, but files already uploaded to HF stay there. Cleanup would require calling `huggingface_hub.delete_folder` on cancel with a confirmation dialog. Non-trivial because a long user-cancel window could leave HF in an intermediate state that's hard to clean up atomically. Lower priority than the local-subprocess fix which stops the bleeding.
+
+**Items touched:**
+- M96 [x] — end-to-end cancel propagation: UI button → consuming Task cancel → stream onTermination → ProcessHandle.cancel → SIGTERM + SIGKILL escalation.
+
+**Commit:** (this iteration)
+
+**Verification:** 119 Swift tests (was 115, +4). jang-tools 260 + ralph_runner 68 unchanged.
+
+**Closed-status tally:** 43 (prior) + M96 = 44 closed / 78 total = 56% closure rate.
+
+**Meta-lesson on "end-to-end cancellation":**
+This bug was latent since iter 23-24. No test caught it because testing subprocess cancellation requires a real child process and timing coordination. The 4 new ProcessHandle tests use a real `/bin/sleep 1000` subprocess and check actual isRunning / termination status — slower (seconds not ms) but catches race conditions that mock-based tests wouldn't. Worth the test cost for any cancel-propagation path. **Pattern to apply:** when adding a feature that spans Task / stream / subprocess boundaries, ALWAYS add one integration test with a real subprocess. Mock tests verify the contract; subprocess tests verify the plumbing.
+
+**Next iteration should pick:** M88 (sheet init-vs-task lifecycle, iter 25 spawn — small). Or M97 (partial HF repo cleanup — bigger, follows naturally from M96). Or M87 (Mistral 4 live RoPE validation). Or continue Cat D with `feedback_model_checklist.md`. Or audit the convert cancel path (PythonRunner) with the same end-to-end rigor applied here — iter 3 established the pattern but hasn't been stress-tested for Task-cancel-to-subprocess scenarios like M96 was for publish.

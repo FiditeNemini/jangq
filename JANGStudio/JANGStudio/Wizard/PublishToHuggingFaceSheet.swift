@@ -23,6 +23,10 @@ struct PublishToHuggingFaceSheet: View {
     @State private var progressBytes: (done: Int64, total: Int64)? = nil
     @State private var progressLabel: String = ""
     @State private var progressLog: [String] = []
+    // M96 (iter 30): handle to the running publish Task so a user-initiated
+    // Cancel can tear down the subprocess via continuation.onTermination.
+    @State private var publishTask: Task<Void, Never>? = nil
+    @State private var wasCancelled: Bool = false
 
     init(modelPath: URL, defaultRepoName: String = "") {
         self.modelPath = modelPath
@@ -194,7 +198,7 @@ struct PublishToHuggingFaceSheet: View {
             .disabled(isDryRunning || isPublishing || repoName.isEmpty || token.isEmpty)
 
             Button {
-                Task { await runPublish() }
+                publishTask = Task { await runPublish() }
             } label: {
                 if isPublishing {
                     ProgressView().controlSize(.small)
@@ -204,6 +208,20 @@ struct PublishToHuggingFaceSheet: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(isDryRunning || isPublishing || repoName.isEmpty || token.isEmpty || dryRunResult == nil)
+
+            // M96 (iter 30): Cancel button visible only during upload.
+            // Cancelling the consuming Task → stream onTermination → Python
+            // subprocess SIGTERM + 3s SIGKILL escalation. Partial HF repo
+            // cleanup is future work (M97).
+            if isPublishing {
+                Button(role: .destructive) {
+                    wasCancelled = true
+                    publishTask?.cancel()
+                } label: {
+                    Label("Cancel upload", systemImage: "stop.circle")
+                }
+                .keyboardShortcut(.cancelAction)
+            }
         }
         .padding(12)
     }
@@ -239,6 +257,7 @@ struct PublishToHuggingFaceSheet: View {
         progressBytes = nil
         progressLabel = ""
         progressLog = []
+        wasCancelled = false
         // M43 (iter 24): use the streaming variant so the UI gets live
         // progress during the 30+ min upload instead of a dead spinner.
         do {
@@ -247,24 +266,33 @@ struct PublishToHuggingFaceSheet: View {
                 isPrivate: isPrivate, token: token) {
                 apply(event: event)
             }
-            // Stream finished without throwing — upload succeeded. The Python
-            // side printed the final PublishResult JSON to stdout; in the
-            // streaming path we reconstruct it from what we know.
-            publishResult = PublishResult(
-                dryRun: false,
-                repo: repoName,
-                url: "https://huggingface.co/\(repoName)",
-                commitUrl: "https://huggingface.co/\(repoName)",
-                filesCount: nil,
-                totalSizeBytes: Int(progressBytes?.total ?? 0))
-            // M15 (iter 17): wipe the token from @State after a successful
-            // publish. If the user leaves this sheet open on their screen,
-            // a passerby can't see / copy the token from the SecureField's
-            // buffer. On failure we KEEP the token — the user needs to retry
-            // and retyping it is worse UX than a ~30-second exposure window.
-            token = ""
+            if wasCancelled {
+                // M96 (iter 30): user-initiated cancel. Don't claim success.
+                errorMessage = "Upload cancelled. The HuggingFace repo may contain partial files — delete or overwrite before retrying."
+            } else {
+                // Stream finished without throwing — upload succeeded. The Python
+                // side printed the final PublishResult JSON to stdout; in the
+                // streaming path we reconstruct it from what we know.
+                publishResult = PublishResult(
+                    dryRun: false,
+                    repo: repoName,
+                    url: "https://huggingface.co/\(repoName)",
+                    commitUrl: "https://huggingface.co/\(repoName)",
+                    filesCount: nil,
+                    totalSizeBytes: Int(progressBytes?.total ?? 0))
+                // M15 (iter 17): wipe the token from @State after a successful
+                // publish. If the user leaves this sheet open on their screen,
+                // a passerby can't see / copy the token from the SecureField's
+                // buffer. On failure we KEEP the token — the user needs to retry
+                // and retyping it is worse UX than a ~30-second exposure window.
+                token = ""
+            }
         } catch {
-            errorMessage = error.localizedDescription
+            // Swallow CancellationError silently — surfaced via wasCancelled
+            // branch above. Other errors propagate as before.
+            if !(error is CancellationError) {
+                errorMessage = error.localizedDescription
+            }
         }
         isPublishing = false
     }

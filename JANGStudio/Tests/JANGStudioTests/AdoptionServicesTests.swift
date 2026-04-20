@@ -154,6 +154,54 @@ final class AdoptionServicesTests: XCTestCase {
         }
     }
 
+    // MARK: - Iter 30: M96 ProcessHandle cancellation semantics
+
+    func test_processHandle_wasCancelled_defaults_false() {
+        let h = ProcessHandle()
+        XCTAssertFalse(h.wasCancelled)
+    }
+
+    func test_processHandle_cancel_sets_flag() {
+        let h = ProcessHandle()
+        h.cancel()
+        XCTAssertTrue(h.wasCancelled,
+                      "wasCancelled must be true after cancel() so _streamPublish can distinguish user-cancel from real failure")
+    }
+
+    func test_processHandle_cancel_before_set_is_safe() {
+        // Race case: cancel() fires before the Process reference lands. Must
+        // not crash. set(process:) later should terminate immediately.
+        let h = ProcessHandle()
+        h.cancel()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        proc.arguments = ["1000"]
+        try? proc.run()
+        h.set(process: proc)
+        // If the race handling works, set() should have called terminate()
+        // because _wasCancelled was already true. Give it a beat.
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertFalse(proc.isRunning,
+                       "Process spawned after cancel() must be terminated by set()")
+    }
+
+    func test_processHandle_cancel_terminates_running_process() {
+        let h = ProcessHandle()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        proc.arguments = ["1000"]
+        try? proc.run()
+        h.set(process: proc)
+        XCTAssertTrue(proc.isRunning)
+        h.cancel()
+        // SIGTERM should land within a second on /bin/sleep.
+        let deadline = Date().addingTimeInterval(3)
+        while proc.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertFalse(proc.isRunning, "cancel() must terminate the held process")
+    }
+
     @MainActor
     func test_publishWithProgress_is_async_stream() {
         // Type-level pin: the API returns AsyncThrowingStream<ProgressEvent, Error>

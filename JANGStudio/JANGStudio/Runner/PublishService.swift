@@ -64,6 +64,51 @@ enum HFRepoValidator {
     }
 }
 
+/// Sendable holder for the publish subprocess's `Process` reference so the
+/// `AsyncThrowingStream.onTermination` callback (Sendable closure) can SIGTERM
+/// the child when the consumer cancels. Final + internally locked so writes
+/// from the producer task and reads from the onTermination callback are safe.
+/// Introduced iter 30 to close M96.
+final class ProcessHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var _wasCancelled: Bool = false
+
+    /// True if `cancel()` was called at any point. Used by _streamPublish's
+    /// exit branch to distinguish user-cancel (clean finish) from a real
+    /// subprocess failure (throw).
+    var wasCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _wasCancelled
+    }
+
+    func set(process: Process) {
+        lock.lock(); defer { lock.unlock() }
+        // If cancel() already fired before run() landed (race), terminate
+        // immediately. Otherwise just store the reference.
+        if _wasCancelled {
+            if process.isRunning { process.terminate() }
+        }
+        self.process = process
+    }
+
+    func cancel() {
+        lock.lock()
+        _wasCancelled = true
+        let proc = process
+        lock.unlock()
+        // SIGTERM the subprocess. PythonRunner pattern: escalate to SIGKILL
+        // after 3 seconds if the process ignores SIGTERM.
+        if let proc, proc.isRunning {
+            proc.terminate()
+            Task.detached {
+                try? await Task.sleep(for: .seconds(3))
+                if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+            }
+        }
+    }
+}
+
 enum PublishServiceError: Error, LocalizedError {
     case missingToken
     case cliError(code: Int32, stderr: String)
@@ -134,17 +179,30 @@ enum PublishService {
     static func publishWithProgress(modelPath: URL, repo: String, isPrivate: Bool,
                                     token: String) -> AsyncThrowingStream<ProgressEvent, Error> {
         AsyncThrowingStream { continuation in
+            // M96 (iter 30): hold a box for the child Process so
+            // continuation.onTermination can terminate it when the consuming
+            // Task cancels. Without this, cancelling the stream (or dismissing
+            // the Publish sheet) left the Python subprocess running and
+            // uploading to HuggingFace in the background — stranding the
+            // half-published repo with partial files. `ProcessHandle` is a
+            // simple Sendable class so we can reference it across threads.
+            let handle = ProcessHandle()
+            continuation.onTermination = { _ in
+                handle.cancel()
+            }
             Task.detached {
                 await Self._streamPublish(modelPath: modelPath, repo: repo,
                                           isPrivate: isPrivate, token: token,
-                                          continuation: continuation)
+                                          continuation: continuation,
+                                          handle: handle)
             }
         }
     }
 
     private nonisolated static func _streamPublish(
         modelPath: URL, repo: String, isPrivate: Bool, token: String,
-        continuation: AsyncThrowingStream<ProgressEvent, Error>.Continuation
+        continuation: AsyncThrowingStream<ProgressEvent, Error>.Continuation,
+        handle: ProcessHandle
     ) async {
         guard !token.isEmpty else {
             continuation.finish(throwing: PublishServiceError.missingToken)
@@ -198,6 +256,10 @@ enum PublishService {
             return
         }
 
+        // Register the running process so the onTermination handler can
+        // reach it if the consumer cancels.
+        handle.set(process: proc)
+
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             proc.terminationHandler = { _ in done.resume() }
         }
@@ -205,6 +267,12 @@ enum PublishService {
         let lastErrTail = (try? await stderrTask.value) ?? ""
 
         if proc.terminationStatus == 0 {
+            continuation.finish()
+        } else if handle.wasCancelled {
+            // User-initiated cancel — finish cleanly, not as an error. UI
+            // treats a cancelled publish as "user dismissed", not "upload
+            // failed". Any files already written to the HF repo are
+            // documented as M97 (partial-repo cleanup follow-up).
             continuation.finish()
         } else {
             // Scrub token before surfacing stderr to UI (iter 6 M41 layer-2).
