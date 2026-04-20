@@ -391,3 +391,61 @@ sub-items in one patch.
 **Closed-status tally:** 19 (prior) + M62d = 20 closed / 61 total = 33% closure rate. M62 parent item now 9/12 sub-items done; 3 remaining are intentionally deferred (logVerbosity wide-refactor, preAllocateRam upstream-gap, anonymizePathsInDiagnostics medium-rewrite).
 
 **Next iteration should pick:** M55 (multi-instance state.json race — sitting idle since iter 8) would be a natural reliability follow-up to the iter-8 Ralph runner hardening. Alternatively Cat K audit.py (765 lines, never traced). Alternatively spawned-M easy picks: M02 (data-shaped-but-wrong-content HF clones), M07 (non-standard nested model_type), M15 (publish token clear-on-complete), M22 (DiagnosticsBundle race during running convert).
+
+---
+
+## 2026-04-19 iteration 12 — M55 multi-instance lock (Category K reliability follow-up)
+
+**Angle:** M55 was spawned in iter 8 and sat idle for 4 iterations. Picked now because it completes the iter-8 Ralph-runner reliability theme: iter 8 fixed the WHY of interrupted-status recovery (M54), this iter fixes the WHAT ELSE — preventing two instances from even starting a race in the first place.
+
+**Deep trace walkthrough:**
+1. Read `runner.py` with the multi-instance scenario in mind:
+   ```
+   # terminal 1:
+   python -m ralph_runner --next   # dispatches convert A to macstudio
+   # terminal 2 (user forgets terminal 1 is still running):
+   python -m ralph_runner --next   # dispatches convert B to macstudio
+   ```
+2. **BUG M55 CONFIRMED.** `cmd_next` has no mutex. Step-by-step what happens on terminal 2:
+   - `remote_ok()` passes (macstudio is reachable).
+   - `load_state()` reads the same state.json terminal 1 just wrote.
+   - `recover_interrupted(state)` finds no `running` entries yet (terminal 1 hasn't saved its state update, OR terminal 2 runs between terminal 1's `load_state` and `info["status"]="running"` save).
+   - `pick_next(state)` returns the SAME pending combo terminal 1 picked.
+   - Terminal 2 marks it running, overwrites terminal 1's state save.
+   - Both terminals call `run_convert_remote` → two SSH sessions running MLX convert on the same Metal GPU. Per `feedback_no_concurrent_mlx.md`, 99% GPU residency @ P8, total wallclock ≈ 2× serial.
+3. Additional failure modes: audit races on same output path; both try `rm -rf output_path`; state.json last-writer-wins loses one combo's result.
+4. **Fix architecture:** PID+host lock file.
+   - **Why not `fcntl.flock`**: flock is auto-released on process death without a way to inspect the holder's identity. We want to TELL the user who's holding the lock ("pid 12345 on erics-mac-studio, running for 47 minutes").
+   - **Why not `fcntl.lockf`**: same issue + NFS quirks (we're on APFS; N/A but future-proofing).
+   - **Decision: handwritten lock file with JSON payload + O_EXCL create.** O_EXCL is atomic on APFS. Payload includes `pid`, `host`, `started_at` so status/error messages can be informative.
+5. **Corner cases worth enumerating (each pinned by a test):**
+   - Lock holder is alive → refuse.
+   - Lock holder PID is DEAD on this host → stale, reclaim.
+   - Lock holder is on DIFFERENT host → cannot verify remote PID. Choice: reclaim or refuse? **Refuse defensively.** Reclaiming a cross-host lock could stomp a live convert on a shared workspace. Better a human unlocks manually than an automated wrongful reclaim.
+   - Lock file contains garbage JSON → treat as stale, reclaim. Otherwise one corrupted write wedges the whole runner forever.
+   - Cross-uid ownership on same host → `_pid_alive` correctly returns True on `PermissionError` (process exists, just not signallable by us).
+   - `release_lock` is called in `finally` even on early-return paths → ensure it NEVER accidentally removes a lock owned by a different PID. If the releasing process crashed and a new process acquired the lock before our release-handler ran, we must NOT yank their lock. Implemented: release_lock reads the file, only unlinks if `pid == os.getpid()`.
+6. **Implementation notes:**
+   - `cmd_next` split into outer-with-lock + inner `_cmd_next_locked`. Outer uses try/finally so every early-return path (combos empty, macstudio unreachable, combo failure) still releases.
+   - Lock path `ralph_runner/results/ralph.lock` (same directory as state.json — same failure domain).
+   - No retry loop beyond single stale-reclaim — if someone races between our detection-of-stale and our write, let them win; the SECOND caller will see the fresh lock and fail cleanly.
+7. **Tests (10 new in test_runner.py):** happy path, release-missing-noop (defends against finally: on early abort), live-PID refusal, dead-PID reclaim, cross-host refusal, corrupt-JSON reclaim, other-owner release no-op, _pid_alive self/dead coverage.
+
+**Items touched:**
+- M55 [x] — real reliability bug fixed with defense-in-depth lock. Two instances now see `BLOCKED: lock held by another ralph instance: {pid: 12345, host: erics-mac-studio, ...}` instead of racing.
+- M67-M71 [ ] — 5 new lock-adjacent questions spawned (below).
+
+**Commit:** (this iteration)
+
+**Verification:** 38 ralph_runner tests (was 28), 231 Python, 96 Swift all pass.
+
+**Closed-status tally:** 20 (prior) + M55 = 21 closed / 66 total = 32% closure rate.
+
+**New questions added (M67-M71):**
+- M67: lock file in `results/` — `--reset` removes state.json but leaves the lock. On next --next, the lock is stale (this process wrote it, but this process is different now). Same-host + alive PID check works… BUT: if reset runs a second time in the same process, the lock still has the right PID. Edge case: a graceful crash mid-cmd_next leaves a lock AND a running combo; the next launch must recover both. Currently recover_interrupted handles state, lock acquire handles the stale lock. Verified by tracing but untested.
+- M68: systemd / launchd auto-restart could trigger rapid re-launches. If process A acquires, is killed via SIGKILL (bypasses finally), process B retries within 100 ms. Both see A's lock; B checks PID alive, A's PID is actually reassigned to an unrelated process → B thinks it's alive, refuses. Workaround: check process start time (macOS: `ps -o lstart -p PID`). Low priority — SIGKILL + PID reuse within 100 ms is genuinely pathological.
+- M69: lock file on a network-mounted filesystem (user moved `ralph_runner/` to SMB share). O_EXCL on SMB isn't always atomic. Document: lock file path must be on a local filesystem.
+- M70: concurrent `--status` and `--next` — status doesn't take the lock, so it reads the state.json mid-write. JSON atomicity relies on the `STATE_PATH.write_text(json.dumps(...))` being atomic. `Path.write_text` is NOT atomic on most filesystems (opens file, writes, closes) — a concurrent read could see truncated JSON. Should switch to temp-file + rename pattern.
+- M71: `--reset` should acquire the lock too — if a `--next` is running and user hits `--reset`, state.json gets deleted mid-convert. Currently no protection.
+
+**Next iteration should pick:** M70 (state.json read-during-write race) would be the natural third-leg of the Ralph reliability theme (iter 8 M54 recovery + iter 12 M55 lock + iter 13 M70 atomic state-write). Alternatively rotate OUT of Ralph-harness work since we've done iter 8 + iter 12 both there — pick Cat B DiagnosticsBundle anonymization (inert setting M62 remainder), or Cat A M42-M45 remaining publish items, or audit.py (765 lines, still untraced).

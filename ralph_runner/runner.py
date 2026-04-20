@@ -17,7 +17,9 @@ Status strings printed to stdout (Ralph reads these):
 from __future__ import annotations
 import argparse
 import datetime as dt
+import errno
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -31,6 +33,7 @@ from .remote import REMOTE_HOST, REMOTE_WORKSPACE, remote_ok, remote_free_gb, ru
 
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "results" / "state.json"
+LOCK_PATH = ROOT / "results" / "ralph.lock"
 RESULTS_DIR = ROOT / "results"
 JANG_REPO_ROOT = ROOT.parent   # /Users/eric/jang
 
@@ -91,6 +94,123 @@ def _assert_safe_repo_id(hf_repo: str) -> None:
             r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
             " (rejected before shell splicing — see M52 in ralph audit)."
         )
+
+
+# ────────────────────────────────────────────────────────────────────
+# M55: multi-instance lock.
+# Running `--next` twice concurrently would race on state.json AND dispatch
+# two convert subprocesses to macstudio at once — violates
+# `feedback_no_concurrent_mlx.md` (both saturate Metal at P8, 2x wallclock
+# penalty). Lock file holds {pid, host, started_at}; lock is stale if the
+# PID is dead OR the lock is from another host (cross-machine) AND the local
+# PID side is unchecked — we can only verify same-host PIDs.
+# ────────────────────────────────────────────────────────────────────
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if the PID is a running process on this host.
+
+    Uses `os.kill(pid, 0)` which sends a no-op signal — returns without error
+    if the process exists AND we can signal it; raises ProcessLookupError
+    (ESRCH) if the process is gone, PermissionError (EPERM) if we can't
+    signal it (which still means the process is alive).
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists under a different uid — still considered alive.
+        return True
+
+
+def _read_lock_info(path: Path) -> dict[str, Any] | None:
+    """Parse a lock file. Returns None if missing / unparseable (caller
+    should treat as stale and reclaim).
+    """
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+class LockAcquireFailed(RuntimeError):
+    """Raised when another Ralph instance already holds the lock."""
+    def __init__(self, holder: dict[str, Any]):
+        super().__init__(f"lock held by {holder}")
+        self.holder = holder
+
+
+def acquire_lock(lock_path: Path = LOCK_PATH) -> None:
+    """Acquire the Ralph singleton lock or raise `LockAcquireFailed`.
+
+    Strategy:
+    1. Try O_EXCL create — atomic on macOS APFS.
+    2. If it already exists, read it. If the PID is on this host AND alive,
+       refuse. Otherwise treat the lock as stale, remove, retry once.
+    3. One retry only — if someone races us in between, let them win; the
+       second caller will see the newly-written lock and surface the error.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "host": os.uname().nodename,
+        "started_at": dt.datetime.now().isoformat(),
+    }
+    for attempt in range(2):
+        try:
+            # O_EXCL: fail if file exists. This is the atomic "I got it" handshake.
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f)
+            return
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
+        # Lock exists — inspect.
+        holder = _read_lock_info(lock_path)
+        if holder is None:
+            # Unparseable → stale. Remove + retry once.
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+            continue
+        holder_host = holder.get("host", "")
+        holder_pid = holder.get("pid")
+        same_host = holder_host == os.uname().nodename
+        if same_host and isinstance(holder_pid, int) and _pid_alive(holder_pid):
+            raise LockAcquireFailed(holder)
+        if not same_host:
+            # Cross-host lock we can't verify — refuse defensively. Safer than
+            # assuming the other host crashed and stomping on a live convert.
+            raise LockAcquireFailed(holder)
+        # Same-host but PID dead → stale. Clean up and retry.
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+    # One retry loop already failed.
+    holder = _read_lock_info(lock_path) or {"pid": -1, "host": "unknown", "started_at": ""}
+    raise LockAcquireFailed(holder)
+
+
+def release_lock(lock_path: Path = LOCK_PATH) -> None:
+    """Remove the lock file. No-op if missing. Only removes our own lock —
+    defends against accidentally releasing a lock owned by another process
+    that acquired it after we crashed.
+    """
+    try:
+        info = _read_lock_info(lock_path)
+        if info is not None and info.get("pid") != os.getpid():
+            # Not ours — leave it for the rightful owner.
+            return
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
 
 
 def slug(model_repo_or_path: str, profile: str) -> str:
@@ -250,6 +370,25 @@ def run_audits_remote(output_path: str, convert_wall_s: float,
 
 
 def cmd_next() -> int:
+    # M55: refuse to run if another instance holds the lock. Two concurrent
+    # `--next` invocations would race on state.json AND dispatch two convert
+    # subprocesses to macstudio simultaneously (violates no-concurrent-mlx).
+    try:
+        acquire_lock()
+    except LockAcquireFailed as e:
+        print(f"BLOCKED: lock held by another ralph instance: {e.holder}")
+        return 0
+    try:
+        return _cmd_next_locked()
+    finally:
+        release_lock()
+
+
+def _cmd_next_locked() -> int:
+    """Body of cmd_next, executed with the singleton lock held. Split out so
+    the outer cmd_next can guarantee lock release via try/finally even on
+    every early-return path.
+    """
     if not remote_ok():
         print("BLOCKED: macstudio not reachable via SSH")
         return 0
