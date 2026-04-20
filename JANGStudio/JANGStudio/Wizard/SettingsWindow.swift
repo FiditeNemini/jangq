@@ -229,10 +229,52 @@ private struct AdvancedTab: View {
 
 private struct PerformanceTab: View {
     @Bindable var settings: AppSettings
+    private let maxThreads = ProcessInfo.processInfo.processorCount
+
     var body: some View {
         Form {
-            Text("Performance settings — see commit 4")
-                .foregroundStyle(.secondary)
+            Section("Threading") {
+                Stepper(value: $settings.mlxThreadCount, in: 0...maxThreads) {
+                    LabeledContent("MLX thread count",
+                                   value: settings.mlxThreadCount == 0
+                                   ? "Auto (\(maxThreads))"
+                                   : "\(settings.mlxThreadCount)")
+                }
+                Text("0 = automatic. System has \(maxThreads) cores.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Metal") {
+                Toggle("Enable Metal pipeline cache", isOn: $settings.metalPipelineCacheEnabled)
+                Text("Caches compiled Metal kernels on disk. Speeds up re-launches after app update.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Memory") {
+                Toggle("Pre-allocate RAM at launch", isOn: $settings.preAllocateRam)
+                if settings.preAllocateRam {
+                    Stepper(value: $settings.preAllocateRamGb, in: 1...128) {
+                        LabeledContent("Pre-allocate", value: "\(settings.preAllocateRamGb) GB")
+                    }
+                }
+                Text("Reserves RAM up-front. Useful on machines with hungry background apps.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Concurrency") {
+                Stepper(value: $settings.convertConcurrency, in: 1...4) {
+                    LabeledContent("Concurrent conversions", value: "\(settings.convertConcurrency)")
+                }
+                if settings.convertConcurrency > 1 {
+                    Label("Experimental — high RAM pressure with parallel conversions.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()
@@ -243,13 +285,66 @@ private struct PerformanceTab: View {
 
 private struct DiagnosticsTab: View {
     @Bindable var settings: AppSettings
+
     var body: some View {
         Form {
-            Text("Diagnostics settings — see commit 4")
-                .foregroundStyle(.secondary)
+            Section("Diagnostics UX") {
+                Toggle("Always show Copy Diagnostics button", isOn: $settings.copyDiagnosticsAlwaysVisible)
+                Text("When on, the Copy Diagnostics button appears on every run — not just failed ones.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Anonymize paths in diagnostics", isOn: $settings.anonymizePathsInDiagnostics)
+                Text("Replaces source / output paths with their basenames so bug reports don't leak filesystem layout.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Bug reporting") {
+                TextField("GitHub issues URL", text: $settings.githubIssuesUrl)
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                Toggle("Auto-open issue tracker on crash", isOn: $settings.autoOpenIssueTrackerOnCrash)
+            }
+
+            Section {
+                Button {
+                    openLogsDirectory()
+                } label: {
+                    Label("Open logs directory", systemImage: "folder")
+                }
+                Button {
+                    copySystemInfo()
+                } label: {
+                    Label("Copy system info", systemImage: "info.circle")
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func openLogsDirectory() {
+        let dir = settings.logFileOutputDir.isEmpty
+            ? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+                .appendingPathComponent("Logs/JANGStudio")
+            : URL(fileURLWithPath: settings.logFileOutputDir)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
+    }
+
+    private func copySystemInfo() {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let settingsSet = UserDefaults.standard.data(forKey: "JANGStudioSettings") != nil
+        let info = """
+            macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)
+            RAM: \(ProcessInfo.processInfo.physicalMemory / 1_000_000_000) GB
+            CPU cores: \(ProcessInfo.processInfo.processorCount)
+            App version: \(version)
+            Settings: \(settingsSet ? "user defaults" : "not set")
+            """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(info, forType: .string)
     }
 }
 
