@@ -175,6 +175,15 @@ private struct AdvancedTab: View {
                         Text(v.displayName).tag(v)
                     }
                 }
+                // M62 (iter 108): logVerbosity is persisted but no emit
+                // site currently consults it — enabling "Debug"/"Trace"
+                // doesn't change log output. Signal the gap to the user.
+                // When a JANG_LOG_LEVEL refactor lands across all stderr
+                // emit sites, remove this label.
+                Label("Not yet implemented — setting is preserved for when JANG_LOG_LEVEL lands.",
+                      systemImage: "info.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 Stepper(value: $settings.jsonlLogRetentionLines, in: 1000...50000, step: 1000) {
                     LabeledContent("UI log ring size", value: "\(settings.jsonlLogRetentionLines) lines")
                 }
@@ -269,6 +278,15 @@ private struct PerformanceTab: View {
                     }
                 }
                 Text("Reserves RAM up-front. Useful on machines with hungry background apps.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                // M62 (iter 108): preAllocateRam + preAllocateRamGb persist
+                // but there's no MLX buffer-pool env var to pipe them to
+                // today. Signal the gap so a user enabling the toggle
+                // doesn't expect it to actually reserve memory. Remove
+                // this label when MLX exposes a pre-alloc knob.
+                Label("Not yet implemented — awaits an MLX buffer-pool API to pipe the value into.",
+                      systemImage: "info.circle")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

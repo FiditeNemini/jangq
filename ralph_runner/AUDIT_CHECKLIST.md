@@ -1388,16 +1388,20 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - 6 new tests (persist mirror, clear removes key, resolver reads UserDefaults, empty string ignored, load re-syncs on fresh process, reset clears leaf mirror).
       **Evidence:** 81 Swift tests pass (was 75).
       **Commit:** (this iteration)
-- [ ] **M62** — Remaining UI-lie settings. **Iter 10 closed 6, iter 11 closed 3 more** (9/12 done, 3 still inert):
+- [x] **M62** — Remaining UI-lie settings. **Iter 10 closed 6, iter 11 closed 3 more, iter 14 closed 1, iter 108 closed last 3 via "not yet implemented" labels** (12/12 done):
   - ~~`autoDeletePartialOnCancel`~~ ✅ iter 10
   - ~~`revealInFinderOnFinish`~~ ✅ iter 10
   - ~~`defaultProfile` / `defaultFamily` / `defaultMethod` / `defaultHadamardEnabled`~~ ✅ iter 10
   - ~~`customJangToolsPath` → PYTHONPATH prepend~~ ✅ iter 11
   - ~~`tickThrottleMs` → JANG_TICK_THROTTLE_MS env var, Python side reads it~~ ✅ iter 11
   - ~~`mlxThreadCount` → OMP_NUM_THREADS + MLX_NUM_THREADS env vars~~ ✅ iter 11
-  - `logVerbosity` → would need JANG_LOG_LEVEL in every emit site (wide refactor — deferred)
-  - `preAllocateRam*` → no standard MLX env var for buffer pool (deferred — needs upstream feature)
+  - ~~`logVerbosity`~~ → iter 108 added "Not yet implemented — setting is preserved for when JANG_LOG_LEVEL lands." label. Persisted value stays so when the refactor eventually wires it, the user's choice applies immediately.
+  - ~~`preAllocateRam*`~~ → iter 108 added "Not yet implemented — awaits an MLX buffer-pool API." label. Same preserve-value-for-later strategy.
   - ~~`anonymizePathsInDiagnostics` → DiagnosticsBundle pre-process rewrite (medium-size — deferred)~~ ✅ iter 14 (see M22)
+  **Close (iter 108):** applied the M05/M175 disambiguation philosophy to UI-lies: rather than silently doing nothing, the setting's section now explicitly states the implementation status. User who enables `Pre-allocate RAM at launch` sees "Not yet implemented — awaits an MLX buffer-pool API" immediately, so they don't wait 20 minutes wondering why RAM pressure didn't drop.
+  **Tests (+1) in AppSettingsTests:** `test_inert_settings_have_not_yet_implemented_labels` — source-inspection pins both labels + their blocker-citations (JANG_LOG_LEVEL / MLX buffer-pool). Future implementer removes the label when wiring up; test failure then forces updating the taxonomy.
+  **Evidence:** `JANGStudio/JANGStudio/Wizard/SettingsWindow.swift:178-188, 271-281`. 31 AppSettingsTests pass (was 30, +1).
+  **Meta-lesson — "don't lie to the user" extends from .pass states (iter-101/102) to UI affordances.** iter-101 M05 + iter-102 M175 applied the principle to preflight checks. iter-108 M62 applies it to Settings. Rule: any UI affordance (button, toggle, picker, slider) that appears interactive but does nothing should either be wired up OR carry a visible "not yet implemented" label. The persistent value stays so future implementation picks up the user's choice; only the UX claim ("this works") is corrected.
 - [x] **M62d** — `tickThrottleMs` / `mlxThreadCount` / `customJangToolsPath` were UI-only. Persisted to UserDefaults, never consulted by any subprocess-spawning code.
       **Fix (iter 11):** Unified env-addition builder `BundleResolver.childProcessEnvAdditions(inherited:)` reads dedicated leaf UserDefaults keys (same pattern as M61) and returns the env dict. Merged into all three subprocess entry points: `PythonRunner.launch`, `InferenceRunner.generate`, `PublishService.invoke`. Publish path inherits too since it's a python3 child just like convert.
       - tickThrottleMs → `JANG_TICK_THROTTLE_MS`. `progress.py` `_resolve_tick_interval_s()` reads it, falls back to 100 ms on empty / non-integer / zero / negative. Per-ProgressEmitter-instance so a bad env value doesn't poison the module-level constant.

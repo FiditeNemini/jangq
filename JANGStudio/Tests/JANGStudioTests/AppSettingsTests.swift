@@ -418,6 +418,30 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(s2.defaultHFOrg, "dealignai", "third mutation must persist")
     }
 
+    // MARK: - Iter 108 M62: remaining inert settings labeled "not yet implemented"
+
+    func test_inert_settings_have_not_yet_implemented_labels() throws {
+        // iter-14 M62 wired 9 of 12 UI-lie settings to their actual consumers.
+        // Three remained inert: logVerbosity (needs wide JANG_LOG_LEVEL
+        // refactor), preAllocateRam, preAllocateRamGb (needs MLX buffer-pool
+        // API). Iter-108 adds visible "not yet implemented" labels so the
+        // UI doesn't lie — settings persist for when impl lands, but user
+        // knows what's unwired today.
+        let srcURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard/SettingsWindow.swift")
+        let src = try String(contentsOf: srcURL, encoding: .utf8)
+
+        XCTAssertTrue(
+            src.contains("JANG_LOG_LEVEL") && src.contains("Not yet implemented"),
+            "logVerbosity section must carry a Not-yet-implemented label citing JANG_LOG_LEVEL as the blocker (M62 iter 108)"
+        )
+        XCTAssertTrue(
+            src.contains("MLX buffer-pool") && src.contains("Not yet implemented"),
+            "preAllocateRam section must carry a Not-yet-implemented label citing MLX buffer-pool API as the blocker (M62 iter 108)"
+        )
+    }
+
     // MARK: - Iter 104 M108: try? site count invariant (coarse bulk-addition trap)
 
     func test_try_question_site_count_within_threshold() throws {

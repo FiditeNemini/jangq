@@ -4705,3 +4705,47 @@ The three dispositions give a template for triaging open-observation items in th
 - **NEW**: sweep Python projects outside jang_tools + ralph_runner for the dual-invariant pattern.
 
 **Next iteration should pick:** M62 remaining-inert-settings close OR M80 audit baseline observation OR fresh audit angle.
+
+---
+
+## 2026-04-20 iteration 108 — M62 closure: label remaining inert settings
+
+**Angle:** Iter-107 forecast: close M62's last 3 inert settings. These were deferred in iter-11/14 because actual implementation needs wide refactor (logVerbosity → JANG_LOG_LEVEL per-emit-site) or upstream feature (preAllocateRam → MLX buffer-pool API).
+
+**Deep trace walkthrough:**
+1. **Surveyed the 3 remaining inert settings** in SettingsWindow.swift:
+   - `logVerbosity` picker at line 173 — user picks Normal/Verbose/Debug/Trace; no emit site consults the value.
+   - `preAllocateRam` toggle + `preAllocateRamGb` stepper at line 265-269 — user enables + chooses GB; no MLX call allocates anything.
+2. **Considered three fixes:**
+   - (a) **Implement both** — requires wide refactor for logVerbosity + upstream MLX feature for preAllocateRam. Both too big for one iter.
+   - (b) **Remove the UI** — loses the persisted value when future implementation lands; user would have to re-pick.
+   - (c) **Add "not yet implemented" label** — preserves persisted values + doesn't lie to the user. Picked (c).
+3. **Applied M05/M175 disambiguation philosophy to UI affordances.** iter-101 M05 fixed ambiguous `.pass` states; iter-102 M175 swept siblings. Iter-108 applies the same "don't lie" rule to Settings — any affordance that looks interactive but does nothing gets a label citing WHAT'S BLOCKING the implementation.
+4. **Source-inspection test pins both labels + their blocker citations.** Future simplification can't strip the labels without triggering the test.
+
+**Meta-lesson — the "don't lie to the user" rule generalizes.** Three iters now demonstrate this principle at different surfaces:
+  - iter-101 M05 / iter-102 M175: preflight `.pass` states must distinguish evaluated-positive from couldn't-evaluate.
+  - iter-108 M62: UI affordances must distinguish implemented from not-yet-implemented.
+  The underlying rule: **when a UI element carries an implicit claim ("this check passed" / "this setting works"), the UI must not assert that claim when it's false.** False claims waste user time + erode trust. Prefer visible "uncheckable" / "not yet implemented" signals over silent falsity.
+
+**Meta-lesson — preserve persisted values even when implementation is deferred.** User who enables preAllocateRam today has chosen "I want this on." When the MLX buffer-pool API lands in 2 years, the setting fires immediately on their Mac. No need to re-opt-in. Rule: for any deferred-implementation setting, preserve the value in UserDefaults, signal the status in the UI. Never drop the persisted value.
+
+**Items touched:**
+- M62 [x] — last 3 inert settings carry visible "not yet implemented" labels citing specific blockers. 1 new source-inspection test.
+
+**Commit:** (this iteration)
+
+**Verification:** 31 AppSettingsTests pass (was 30, +1). Other suites unchanged.
+
+**Closed-status tally:** 127 (iter 107) + M62 = 128 items touched, all closed. Zero known bugs as of iter-108 end.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (feature work)
+- M117 in-wizard inference smoke (feature work)
+- M124 full-suite Swift-test hang (environmental)
+- M128 gate dtype asymmetry (observation)
+- M80 audit baseline-comparison infrastructure.
+- **NEW**: sweep Python subprojects (Smelt, dflash) for the dual-invariant pattern per iter-105/106 template.
+- **NEW**: audit the UI for other M62-class silent-inert affordances beyond Settings.
+
+**Next iteration should pick:** Smelt/dflash invariant sweep (applies iter-106 template), OR M80 audit baseline, OR M62-class UI inert-affordance sweep.
