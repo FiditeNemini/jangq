@@ -334,10 +334,19 @@ private struct DiagnosticsTab: View {
     }
 
     private func openLogsDirectory() {
-        let dir = settings.logFileOutputDir.isEmpty
-            ? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("Logs/JANGStudio")
-            : URL(fileURLWithPath: settings.logFileOutputDir)
+        // M109 (iter 36): replace `.first!` force-unwrap with a safe fallback.
+        // `.libraryDirectory` is essentially always present on macOS but a
+        // sandboxed/MDM-restricted environment could return an empty array;
+        // force-unwrap crashed the whole app. Fall back to NSHomeDirectory()
+        // + Library so the user still gets SOMETHING to open.
+        let dir: URL
+        if settings.logFileOutputDir.isEmpty {
+            let libraryRoot = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library")
+            dir = libraryRoot.appendingPathComponent("Logs/JANGStudio")
+        } else {
+            dir = URL(fileURLWithPath: settings.logFileOutputDir)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(dir)
     }

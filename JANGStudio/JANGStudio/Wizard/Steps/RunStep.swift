@@ -71,15 +71,25 @@ struct RunStep: View {
                 Label("Conversion failed — see log", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
                 Button("Retry") { cancelRequested = false; Task { await start() } }
                 Button("Copy Diagnostics") {
-                    let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
+                    // M109 (iter 36): `.first!` would crash the app in sandboxed /
+                    // MDM environments where `.desktopDirectory` isn't available.
+                    // Fall back to the home directory so Copy Diagnostics always
+                    // works — the user can move the zip afterward.
+                    let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+                        ?? URL(fileURLWithPath: NSHomeDirectory())
                     let events = logs.filter { $0.hasPrefix("{") }
                     // M62-anonymize: honor Settings → Diagnostics →
                     // "Anonymize paths in diagnostics". Otherwise a bug report
                     // zip leaks the user's filesystem layout.
-                    if let url = try? DiagnosticsBundle.write(plan: coord.plan, logLines: logs, eventLines: events,
+                    // M107 (iter 35): surface write failure via the existing log
+                    // pane instead of silently dismissing.
+                    do {
+                        let url = try DiagnosticsBundle.write(plan: coord.plan, logLines: logs, eventLines: events,
                                                               verify: [], to: desktop,
-                                                              anonymizePaths: settings.anonymizePathsInDiagnostics) {
+                                                              anonymizePaths: settings.anonymizePathsInDiagnostics)
                         NSWorkspace.shared.activateFileViewerSelecting([url])
+                    } catch {
+                        logs.append("[diagnostics] FAILED to write zip: \(error.localizedDescription)")
                     }
                 }
             }

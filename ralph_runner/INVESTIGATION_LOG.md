@@ -1385,3 +1385,51 @@ Three different Swift async primitives (AsyncThrowingStream from actor, AsyncThr
 - `DispatchQueue.main.async` inside async contexts (cross-isolation hops that defeat Swift's structured concurrency)
 - Unchecked array subscript access (e.g. `arr[0]` without a bounds check)
 Or return to domain-specific bugs: M87 Mistral 4 RoPE, M97 partial HF cleanup, M106 DiagnosticsBundle main-thread block, Cat D with `feedback_model_checklist.md`.
+
+---
+
+## 2026-04-20 iteration 36 — M109 force-unwrap sweep
+
+**Angle:** 7th iter applying the grep-audit meta-loop. After closing try?-silent-failure in iter 35, moving to the force-unwrap class. `!` on optionals crashes the app if the optional is nil. Classic crash source — worth sweeping.
+
+**Deep trace walkthrough:**
+1. Tried several regex patterns. Swift's `!` is overloaded (negation, non-optional-constraint, force-unwrap, force-try). Filtering to JUST force-unwraps is hard via pure grep.
+2. Narrow regex that worked: `[a-zA-Z\)]!` with `grep -v '!='` and `grep -v '//'`. Found exactly TWO real force-unwraps in the production Swift, both identical pattern:
+   - `FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!`
+   - `FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!`
+3. The `.urls(...)` call returns `[URL]`. `.first!` assumes the array has ≥1 element. For standard userDomain dirs this ~always holds — macOS provides them. BUT:
+   - Sandboxed app without proper entitlements might return empty.
+   - Enterprise MDM profile could restrict access to `.desktopDirectory`.
+   - Unusual home-directory setups (e.g., NFS-home with unmounted Desktop share) could produce empty.
+4. Impact: `.first!` on empty array crashes the ENTIRE APP. User clicks "Copy Diagnostics" expecting a file → app hard-quits → they have no bug report + need to re-open + lost state. Or clicks "Open logs directory" → same.
+5. **Fix pattern:** `?? URL(fileURLWithPath: NSHomeDirectory())` for the RunStep desktop case (home is always valid), and `?? NSHomeDirectory()+Library` for the SettingsWindow logs case (preserves "logs belong under Library" intent). Both are guaranteed non-empty even in restricted environments.
+6. **Bonus fix spotted during inspection:** the same Copy Diagnostics button I was editing for M109 was STILL using `try? DiagnosticsBundle.write(...)` — the exact M107-class silent-failure I swept in iter 35, but this particular call site was missed because iter 35 only grepped for `try?`, and this one is nested inside a `if let url = try? ...` pattern that my earlier filter missed. Fixed here as a drive-by: explicit do/catch + log-pane surfacing. Lesson: iter-35's `try?` audit wasn't complete; there are probably more "nested `try?` inside if-let" sites worth a second pass.
+7. **Did NOT fix:** lots of `!` usages in Swift's type system semantics (`var foo: Bar!`, Implicitly Unwrapped Optionals) — these are idiomatic for IBOutlet-style late-binding and shouldn't crash under normal usage. Spawned M110 for those if we ever ship a big UI refactor.
+
+**Items touched:**
+- M109 [x] — 2 force-unwrap crash sources replaced with safe fallbacks + 1 drive-by M107-class silent-failure surfaced.
+
+**Commit:** (this iteration)
+
+**Verification:** 122 Swift tests pass unchanged.
+
+**Closed-status tally:** 49 (prior) + M109 = 50 closed / 85 total = 59% closure rate. **Half the audit matrix is comfortably closed.**
+
+**Grep-audit meta-loop yields so far (7 consecutive productive iters):**
+| Iter | Class | Sites found |
+|------|-------|-------------|
+| 30 | publish stream cancel | 1 (M96) |
+| 31 | stream cancel (PythonRunner) | 1 (M98) |
+| 32 | single-async cancel | 1 (M100) |
+| 33 | sweep remaining streams + services | 7 (M101) |
+| 34 | bare waitUntilExit | 1 (M105) |
+| 35 | silent-failure try? on user actions | 3 (M107) |
+| 36 | force-unwraps | 2 (M109) + 1 drive-by |
+
+**16 invoke sites patched + 2 crash sources eliminated + 3 silent failures surfaced** via pure pattern-matching after each confirmed failure mode. This is the highest-yield technique the Ralph loop has found. Keep using it.
+
+**Next iteration should pick:** Continue the meta-loop with another class:
+- `DispatchQueue.main.async` inside async contexts (structured-concurrency escape hatches)
+- Unchecked array subscript access `arr[0]` without bounds check
+- Nested `try?` inside if-let (second pass after iter 35)
+Or a domain item: M87, M97, M106, Cat D.
