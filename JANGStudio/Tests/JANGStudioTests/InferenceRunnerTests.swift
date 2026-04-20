@@ -150,6 +150,60 @@ final class InferenceRunnerTests: XCTestCase {
                        "default call should NOT add --no-thinking — preserves existing reasoning-benchmark behavior. Got:\n\(argv)")
     }
 
+    // MARK: - Iter 82: M159 — generate() must not deadlock on chatty subprocess
+    //
+    // Pre-iter-82, InferenceRunner created `Pipe()` for stdout + stderr but
+    // only READ them via `readDataToEndOfFile()` AFTER `terminationHandler`
+    // fired. Once either stream crossed the 64 KB macOS pipe buffer, the
+    // subprocess blocked on write(2), `terminationHandler` never fired, and
+    // generate() hung forever (or until user cancel). This is the same class
+    // of bug as iter-81 M158's `runJangValidate` fix — latent in any
+    // subprocess helper that defers its pipe reads.
+
+    func test_generate_does_not_hang_on_large_stderr_output() async throws {
+        // Subprocess dumps ~275 KB to stderr (200 × 1 KB random → base64
+        // expands ~1.33×), THEN emits a valid InferenceResult JSON on
+        // stdout, then exits 0. Unfixed code hits the 64 KB buffer, blocks
+        // the subprocess, waits indefinitely. Fixed code drains in a
+        // detached task and the whole thing completes sub-second.
+        let script = try makeTempScript(#"""
+        dd if=/dev/urandom bs=1024 count=200 2>/dev/null | base64 >&2
+        echo '{"text":"x","tokens":1,"tokens_per_sec":1.0,"elapsed_s":0.1,"peak_rss_mb":1.0,"model":"/m"}'
+        exit 0
+        """#)
+        let runner = InferenceRunner(
+            modelPath: URL(fileURLWithPath: "/tmp/nope"),
+            executableOverride: script
+        )
+        let start = Date()
+        let result = try await runner.generate(prompt: "x", maxTokens: 1)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(result.text, "x")
+        XCTAssertLessThan(elapsed, 5,
+            "generate took \(elapsed)s — pipe-fill regression (should be sub-second)")
+    }
+
+    func test_generate_does_not_hang_on_large_stdout_output() async throws {
+        // Same bug in the other direction — lots of noise on stdout
+        // BEFORE the final JSON line. Matches real MLX inference which
+        // prints token progress / warnings to stdout on some builds.
+        let script = try makeTempScript(#"""
+        dd if=/dev/urandom bs=1024 count=200 2>/dev/null | base64
+        echo '{"text":"y","tokens":1,"tokens_per_sec":1.0,"elapsed_s":0.1,"peak_rss_mb":1.0,"model":"/m"}'
+        exit 0
+        """#)
+        let runner = InferenceRunner(
+            modelPath: URL(fileURLWithPath: "/tmp/nope"),
+            executableOverride: script
+        )
+        let start = Date()
+        let result = try await runner.generate(prompt: "x", maxTokens: 1)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(result.text, "y",
+            "JSON-line scan must still find the final JSON after 275 KB of leading noise")
+        XCTAssertLessThan(elapsed, 5, "stdout pipe-fill regression: \(elapsed)s")
+    }
+
     func test_explicit_cancel_still_works_via_actor_method() async throws {
         // Regression pin for iter 3's M19 fix: explicit await runner.cancel()
         // must ALSO continue to work after the iter-32 task-cancel fix. Both

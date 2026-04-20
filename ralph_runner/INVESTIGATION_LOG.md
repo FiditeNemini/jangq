@@ -3428,3 +3428,55 @@ Both are needed — location-based audit misses body-structure matches outside t
 - **NEW**: audit `InferenceRunner.swift` same way.
 
 **Next iteration should pick:** `PythonRunner` / `InferenceRunner` pipe-wiring audit, or `test_runJangValidate_timeoutFiresWithinTolerance` hardening using `executableOverride` now that it exists (the existing test relies on real Python startup being >0.1 s — brittle, the new override lets us drive a real infinite-loop script instead).
+
+---
+
+## 2026-04-20 iteration 82 — M159 InferenceRunner + PublishService pipe-drain audit (iter-81 M158 pattern sweep)
+
+**Angle:** Iter-81 forecast explicitly named this as the next target: "audit `PythonRunner.swift` + `InferenceRunner.swift` for the same two bugs — it's the largest subprocess helper and predates PythonCLIInvoker; could have similar unread-Pipe or post-run-handler patterns." Meta-rule application: **after fixing a pattern, grep the whole app for structurally adjacent variants, not just the exact syntactic match.**
+
+**Deep trace walkthrough:**
+1. **Listed all 4 subprocess helpers:** `PythonRunner`, `InferenceRunner`, `PublishService._streamPublish` (streaming), `PublishService.invoke` (non-streaming, already migrated to `PythonCLIInvoker` in iter-79 M156), `PostConvertVerifier.runJangValidate` (fixed iter-81 M158), `PythonCLIInvoker` (canonical).
+2. **Checked pipe-drain on each:**
+   - `PythonRunner.swift:78-94` — ✅ streams both pipes via `for try await line in ... .bytes.lines` in detached tasks BEFORE `try proc.run()`. Correct.
+   - `PythonCLIInvoker.swift:74-88` — ✅ synchronous `readDataToEndOfFile()` AFTER `proc.waitUntilExit()`, but that's on the dispatch-global thread **which is the same thread that called `run()` and `waitUntilExit()`** — so the drain happens post-exit on the same thread that waited. Wait, that's still the same bug… let me re-read. Actually no: on `waitUntilExit()` the pipe writer closes when subprocess exits, then `readDataToEndOfFile()` drains. BUT if the subprocess can't exit because pipe is full, `waitUntilExit()` never returns. **Same bug pattern!** But this is mitigated by the fact that `PythonCLIInvoker` callers (5 adoption services + SourceDetector + PublishService.invoke) all run short-lived subprocesses (help, list, version) with tiny output. Still a latent bug — flagged for a future iter.
+   - `PublishService._streamPublish:232-267` — ✅ stderr drained in a Task (JSONLProgressParser consumes each line). ❌ **stdout is NEVER drained.** Comment says "Drain stdout silently here — capture at process end" but code just... doesn't. Latent unread-Pipe.
+   - `InferenceRunner.swift:103-135` — ❌ **`readDataToEndOfFile()` called AFTER `proc.terminationHandler` fires**, which can never happen if either pipe fills. Exactly the iter-81 M158 bug 1 shape.
+
+3. **Assessed user-impact severity:**
+   - **InferenceRunner is user-facing** (Test Inference sheet). MLX chatter on some models (GLM-5.1 per-layer fallback warnings, MiniMax expert-load messages, tokenizer init verbose) crosses 64 KB easily. Users see the progress spinner spinning forever, hit Cancel, get `"generation cancelled by user"` for inference that was actually working. Classic feedback_runtime_before_quant.md violation: the wizard silently lies about whether inference succeeded.
+   - **PublishService._streamPublish** — latent, `huggingface_hub` is normally quiet on stdout, but any future print() in a dep is a timebomb. Low probability, but I've already done the analysis so fix it now.
+4. **TDD order:**
+   - Wrote `test_generate_does_not_hang_on_large_stderr_output` + `test_generate_does_not_hang_on_large_stdout_output` against InferenceRunner. Scripts dump ~275 KB then emit valid InferenceResult JSON and exit 0. Pre-fix: hangs at 64 KB.
+   - Applied InferenceRunner fix: promoted both `readDataToEndOfFile()` calls into `Task.detached` BEFORE `proc.run()`, added explicit pipe-close + task-await in the `run()` throw path so detached reads drain on error.
+   - Applied PublishService fix: swapped stdout `Pipe()` → `FileHandle.nullDevice`. Streaming path doesn't use stdout → discard at kernel level.
+   - Ran InferenceRunnerTests (9/9 pass, +2 new at 0.9 s and 0.7 s — both under the 5 s threshold). Ran related suites: PostConvertVerifier (14), PythonCLIInvoker (7), PythonRunner (4), AdoptionServices (22). All green — 56 subprocess-helper tests pass.
+
+**Meta-lesson — grep for the bug CLASS, not the syntactic shape.** Iter-81 M158's grep was `proc\.standardOutput\s*=\s*Pipe\(\)`. That's a syntactic pattern. InferenceRunner's code reads `let out = Pipe(); proc.standardOutput = out` — different syntactic shape, same bug. The correct grep is **the CLASS signature**: "any pipe whose read happens AFTER waitUntilExit / terminationHandler / process-exit continuation." That maps to grepping `readDataToEndOfFile()` and then checking each site's call-order wrt `waitUntilExit` / `terminationHandler`. This is the refinement of iter-58's "code-shape-vs-signature grep" meta-rule.
+
+**Meta-lesson — pipe drain patterns are three-valued.** There are exactly three correct patterns when wiring a `Pipe()` to a subprocess:
+  1. `for try await line in fileHandle.bytes.lines` in a detached Task, started BEFORE run(). Use when you consume line-by-line.
+  2. `Task.detached { fileHandle.readDataToEndOfFile() }` + `await task.value` at the end. Use when you need the whole buffer as Data.
+  3. `FileHandle.nullDevice`. Use when you don't care about the content.
+  ANY OTHER shape (synchronous read post-exit, read on the same thread that awaits termination, unread `Pipe()`) is a latent deadlock. Codify this in feedback-pipe-drain.md if this class re-surfaces.
+
+**Meta-lesson — the `PythonCLIInvoker` synchronous drain is also a latent version of this bug.** `proc.waitUntilExit()` + post-exit `readDataToEndOfFile()` on the same thread has the same pipe-fill deadlock potential as InferenceRunner. Mitigated in practice because callers run short subprocesses (discover, --help, version) with small output. Flagged for a future iter — probably low priority given real-world output sizes, but worth fixing for consistency + defense-in-depth.
+
+**Items touched:**
+- M159 [x] — InferenceRunner pipe-fill deadlock fixed; PublishService._streamPublish stdout drained to nullDevice; 2 new InferenceRunnerTests; whole-app pipe-drain audit complete.
+
+**Commit:** (this iteration)
+
+**Verification:** 9/9 InferenceRunnerTests pass (was 7, +2). 14 PostConvertVerifierTests + 7 PythonCLIInvokerTests + 4 PythonRunnerTests + 22 AdoptionServicesTests unchanged (56 subprocess tests green). Python 348 + ralph 73 unchanged.
+
+**Closed-status tally:** 94 (iter 81) + M159 = 95 closed / 100 total = 95.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M128 gate dtype asymmetry (observation)
+- **NEW**: `PythonCLIInvoker` uses sync `readDataToEndOfFile()` after `waitUntilExit()` on the same dispatch-global thread. Same latent pipe-fill class as M158/M159. Probably never hits for the short-output CLI calls (discover, list, version) but codifies the "three correct pipe-drain patterns" rule if fixed.
+- **NEW**: re-visit `runJangValidate` to use `executableOverride` in the `test_runJangValidate_timeoutFiresWithinTolerance` test — pre-fix it relied on real Python startup being >0.1 s, brittle.
+
+**Next iteration should pick:** fix PythonCLIInvoker to match the three-pattern rule, OR an orthogonal audit angle (e.g., continue iter-80's `try?` sweep with a new grep axis like `try? String(data:)` / `try? JSONSerialization.jsonObject`, or audit the UI layer for wizard state-machine silent-transitions).

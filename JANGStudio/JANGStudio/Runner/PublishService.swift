@@ -229,9 +229,18 @@ enum PublishService {
         }
         proc.environment = env
 
-        let outPipe = Pipe()
         let errPipe = Pipe()
-        proc.standardOutput = outPipe
+        // M159 (iter 82): publishWithProgress yields ProgressEvents from
+        // stderr only; stdout is never consumed by this streaming path (the
+        // non-streaming `publish()` is the one that reads the final JSON
+        // result, via a separate subprocess invocation through
+        // PythonCLIInvoker). The old code wired `outPipe = Pipe()` to
+        // stdout but never read it — a latent deadlock if the Python side
+        // ever emitted >64 KB on stdout (even an unexpected `print()` in a
+        // dependency like huggingface_hub would do it). Swapped to
+        // `FileHandle.nullDevice` so the kernel discards stdout without
+        // ever filling a buffer we'd have to drain.
+        proc.standardOutput = FileHandle.nullDevice
         proc.standardError = errPipe
 
         // Drain stderr for progress events (JSONL schema matches convert).
@@ -247,8 +256,6 @@ enum PublishService {
             return lastErrTail
         }
 
-        // Drain stdout silently here — the final JSON result lives there and
-        // we capture it at process end.
         do {
             try proc.run()
         } catch {

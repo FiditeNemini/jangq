@@ -106,7 +106,41 @@ actor InferenceRunner {
         proc.standardError = err
         self.currentProcess = proc
 
-        try proc.run()
+        // M159 (iter 82): drain both pipes in detached tasks BEFORE run().
+        // Previously both streams were read AFTER terminationHandler fired,
+        // via synchronous `readDataToEndOfFile()`. That's a classic
+        // cross-process deadlock: the subprocess can't exit until its
+        // write(2) calls unblock, and its write(2) calls can't unblock until
+        // we drain the 64 KB pipe buffer, and we don't drain until it exits.
+        // MLX inference can easily emit >64 KB of stderr logs on chatty
+        // models (GLM-5.1 per-layer warnings, MiniMax weight-load chatter),
+        // so this hit users in practice as a Test Inference sheet that
+        // spins forever and only unsticks when they hit Cancel.
+        //
+        // Matches PythonRunner's pattern: read tasks start immediately,
+        // Task.detached runs on a separate thread so the blocking
+        // `readDataToEndOfFile()` doesn't hold the actor. When the
+        // subprocess finally closes the pipe's write end (either by exit
+        // or by explicit close below on run() failure), the read returns
+        // and the task completes.
+        let stdoutTask = Task.detached { out.fileHandleForReading.readDataToEndOfFile() }
+        let stderrTask = Task.detached { err.fileHandleForReading.readDataToEndOfFile() }
+
+        do {
+            try proc.run()
+        } catch {
+            // If run() throws (e.g., executable missing), the pipes never
+            // get a writer — we have to close the write ends explicitly so
+            // the detached reads can see EOF and drain. Otherwise both
+            // tasks leak until the pipes go out of scope via ARC, which
+            // can be deferred unpredictably under Swift's cooperative
+            // executor.
+            try? out.fileHandleForWriting.close()
+            try? err.fileHandleForWriting.close()
+            _ = await stdoutTask.value
+            _ = await stderrTask.value
+            throw error
+        }
 
         // Wait for termination OFF the actor thread so cancel() can acquire
         // the actor and call proc.terminate() while we are waiting.
@@ -131,8 +165,8 @@ actor InferenceRunner {
             Task.detached { await self.cancel() }
         }
 
-        let stdout = out.fileHandleForReading.readDataToEndOfFile()
-        let stderr = err.fileHandleForReading.readDataToEndOfFile()
+        let stdout = await stdoutTask.value
+        let stderr = await stderrTask.value
         let errorText = String(data: stderr, encoding: .utf8) ?? ""
 
         // If the user cancelled, surface a specific error so UI can distinguish
