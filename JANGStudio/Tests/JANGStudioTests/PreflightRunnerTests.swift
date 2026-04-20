@@ -46,6 +46,63 @@ final class PreflightRunnerTests: XCTestCase {
         XCTAssertTrue(checks.contains { $0.id == .outputUsable && $0.status == .fail })
     }
 
+    // MARK: - M139 (iter 61): reject nested src/dst
+    //
+    // Pre-iter-61 outputUsable only rejected `dst == src`. A user picking
+    // output INSIDE the source tree (e.g., src=/models/foo, dst=/models/foo/out)
+    // passed preflight, let convert write shards into a subdir of the source.
+    // Confusing + risky if any future cleanup pass rglobs.
+
+    func test_outputInsideSourceFails() throws {
+        let src = tmp.appendingPathComponent("foo")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try #"{"model_type":"qwen3_5_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = src.appendingPathComponent("out")   // nested inside src
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let failure = checks.first { $0.id == .outputUsable && $0.status == .fail }
+        XCTAssertNotNil(failure, "outputUsable should fail when output is inside source")
+        XCTAssertEqual(failure?.hint, "Output cannot be inside the source folder")
+    }
+
+    func test_sourceInsideOutputFails() throws {
+        // Symmetric: user picks output as the parent of source.
+        let parent = tmp.appendingPathComponent("workspace")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let src = parent.appendingPathComponent("hf-model")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try #"{"model_type":"qwen3_5_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = parent   // source nested inside output
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let failure = checks.first { $0.id == .outputUsable && $0.status == .fail }
+        XCTAssertNotNil(failure, "outputUsable should fail when source is inside output")
+        XCTAssertEqual(failure?.hint, "Source cannot be inside the output folder")
+    }
+
+    func test_siblingPrefixPathsDoNotTrigger() throws {
+        // Regression: `/a/b` must NOT be rejected as "inside /a/bc". The
+        // check uses path + "/" specifically to prevent this.
+        let srcParent = tmp.appendingPathComponent("abc")
+        try FileManager.default.createDirectory(at: srcParent, withIntermediateDirectories: true)
+        try #"{"model_type":"qwen3_5_moe"}"#.write(to: srcParent.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = srcParent
+        plan.outputURL = tmp.appendingPathComponent("abcd")   // sibling with shared prefix
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 256, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let found = checks.first { $0.id == .outputUsable }
+        XCTAssertEqual(found?.status, .pass,
+            "Sibling directories with a shared string prefix (abc vs abcd) must not trigger the nested-path check. Got \(found?.hint ?? "nil")")
+    }
+
     func test_hadamardAt2bitWarns() throws {
         let src = tmp.appendingPathComponent("model"); try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
         try #"{"model_type":"qwen3_5_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)

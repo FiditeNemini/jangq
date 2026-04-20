@@ -2485,3 +2485,40 @@ Each domain has its own correct signal. Audit all cancel-decision points on a pe
 - **NEW**: Python peer-helper sweep on publish.py vs convert.py (still pending from iter 57 forecast).
 
 **Next iteration should pick:** publish/convert Python peer-helper sweep (switches out of Swift territory for one iter; then back for M139 generalization).
+
+## 2026-04-20 iteration 61 — M139 preflight nested src/dst foot-gun
+
+**Angle:** Iter 60's forecast was Python publish.py vs convert.py peer-helper sweep. Triaged both files: error-path reasonably aligned, JSON output shapes consistent. The main divergence was in cmd_convert's lack of a top-level try/except around `convert_model()` — but __main__.py already catches and prints progress event via the outer harness, so CLI behavior is reasonable. No crisp bug from that axis.
+
+Pivoted to examine the path-validation code I'd skimmed during earlier iters — `PreflightRunner.outputUsable`. That's the gate between user folder selection and the convert subprocess. If it misses a foot-gun, convert proceeds with a bad config.
+
+**Deep trace walkthrough:**
+1. **Read outputUsable:** guards `dst != nil`, `dst != src`, `dst` not inside an .app, parent writable.
+2. **Missing guard:** nested src/dst. User source `/models/big-model`, output `/models/big-model/out` — preflight passes because dst != src exactly. Convert proceeds. Shards land in `/models/big-model/out/model-00001-of-00042.safetensors`. User later `rm -rf /models/big-model` to free space → wipes the conversion too. Data-loss foot-gun.
+3. **Adjacent concern:** source inside output. User with source `/workspace/hf-model` picks output `/workspace`. Convert writes into /workspace/ alongside the source subfolder. Cleanup passes mix the two trees.
+4. **Real-user likelihood:** moderate. Not a daily scenario but easy to stumble into — the folder picker defaults to the last-used location. A user picking source in `/models/Qwen3.6-BF16/`, then clicking "Choose output…" with the picker starting at the source location, hitting "New Folder" inside the picker → they've just nested output inside source.
+5. **Fix: straightforward string-prefix check with trailing-slash to prevent sibling-prefix false positives.** `/a/b` is NOT inside `/a/bc` but IS inside `/a/b/c`. The `path + "/"` appendage is the standard trick.
+6. **Standardization:** use `.standardizedFileURL.path` to normalize `/Users/eric/./models` and `/Users/eric/models/` to the same form. SwiftUI's NSOpenPanel can return non-standardized URLs.
+7. **Three tests:** two positive captures (nested dst-in-src, src-in-dst) and one regression guard (sibling-prefix must not trigger).
+
+**Meta-lesson — preflight-as-safety-net.** Preflight is the user-facing safety boundary. Gaps there cascade into DATA-LOSS scenarios because convert trusts preflight and writes where told. Future audits should explicitly enumerate "what could the user select that passes preflight but causes damage at convert time?" — e.g., symlinks to system dirs, mount points, read-only FUSE filesystems (parent-writable check may not catch copy-on-write or network mount quirks). This iter closes one; others remain as future M-items.
+
+**Items touched:**
+- M139 [x] — PreflightRunner.outputUsable now rejects nested src/dst in either direction.
+
+**Commit:** (this iteration)
+
+**Verification:** 149 Swift tests pass (was 146, +3 for M139 preflight nested-path pins). Python 310 + ralph 73 unchanged.
+
+**Closed-status tally:** 73 (iter 60) + M139 = 74 closed / 100 total = 74.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW**: preflight-audit extension — enumerate "what could the user select that passes preflight but causes damage at convert time?" beyond nested paths (symlink chains, mount points, iCloud offline, network drives, read-only overlays).
+- peer-helper on VerifyStep's post-convert checks vs convert.py's own self-verification.
+
+**Next iteration should pick:** preflight-audit extension (continuation of this iter's finding) OR VerifyStep/convert self-check peer-helper sweep.

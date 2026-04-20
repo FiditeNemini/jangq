@@ -44,6 +44,27 @@ struct PreflightRunner {
     private static func outputUsable(src: URL?, dst: URL?) -> PreflightCheck {
         guard let dst else { return .init(id: .outputUsable, title: "Output dir valid", status: .fail, hint: "Pick an output folder") }
         if dst == src { return .init(id: .outputUsable, title: "Output dir valid", status: .fail, hint: "Output cannot equal source") }
+        // M139 (iter 61): reject nested src/dst. If output lives INSIDE the
+        // source tree (or source inside output), the two directories share
+        // safetensors shards in the same subtree. Recursive greps / future
+        // cleanup passes could touch the wrong set. Also confuses users who
+        // later `rm -rf source/` and discover their output went with it.
+        // The plain-equal check above doesn't cover this case because the
+        // paths differ — one is a strict prefix of the other.
+        if let s = src {
+            let srcPath = s.standardizedFileURL.path
+            let dstPath = dst.standardizedFileURL.path
+            // Use path + "/" to prevent sibling-prefix matches
+            // (e.g. `/a/b` is NOT inside `/a/bc`).
+            if dstPath.hasPrefix(srcPath + "/") {
+                return .init(id: .outputUsable, title: "Output dir valid", status: .fail,
+                             hint: "Output cannot be inside the source folder")
+            }
+            if srcPath.hasPrefix(dstPath + "/") {
+                return .init(id: .outputUsable, title: "Output dir valid", status: .fail,
+                             hint: "Source cannot be inside the output folder")
+            }
+        }
         if dst.path.contains(".app/Contents") {
             return .init(id: .outputUsable, title: "Output dir valid", status: .fail, hint: "Do not write inside an .app")
         }

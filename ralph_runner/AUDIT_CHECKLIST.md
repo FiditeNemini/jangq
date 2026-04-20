@@ -699,6 +699,21 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Why M138 is adjacent-but-separate from M137:** the async shapes differ. M137 was about HFHub streaming where cancel throws CancellationError. M138 is about subprocess streaming where cancel is a CLEAN finish (PythonRunner deliberately swallows cancel to keep the stream contract simple). The M137 catch-pattern fix doesn't apply; M138 needs an in-band success marker via protocol events. Both share the META lesson — never use intent flags as outcome signals.
       **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/RunStep.swift:14-30, 130-167, 205-214`. 146 Swift tests pass (was 145, +1 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M139 (preflight: nested src/dst foot-gun — output inside source passes preflight)** — Started iter 61 as a Python publish.py vs convert.py peer-helper sweep. Triaged the two files for error-handling / JSON-shape / exit-code parity — mostly clean. Pivot: re-inspect the JANGStudio preflight where convert's output path validation lives. Found a real foot-gun:
+      **Pre-iter-61 `outputUsable` (PreflightRunner.swift:44):** blocks `dst == src` exact match and `dst.path.contains(".app/Contents")`. But does NOT block **nested** src/dst. User selects source `/models/Qwen3.6-BF16` and output `/models/Qwen3.6-BF16/out` — preflight passes. Convert writes shards + config into a subdir of source. Confusing + risky:
+      - User later does `rm -rf /models/Qwen3.6-BF16` to reclaim disk space → wipes their conversion too.
+      - Any future recursive cleanup pass would touch source files.
+      - Re-running convert with `_remove_stale_jang_artifacts` at one level won't re-scan into a deep subdir, so partial state accumulates if anyone ever extends the cleanup to recurse.
+      **Fix (iter 61):** extend `outputUsable` to check both directions:
+      - `dstPath.hasPrefix(srcPath + "/")` → "Output cannot be inside the source folder"
+      - `srcPath.hasPrefix(dstPath + "/")` → "Source cannot be inside the output folder"
+      Critical detail: uses `path + "/"` (trailing slash) to prevent sibling-prefix false positives. `/a/b` is NOT inside `/a/bc`; the `/`-appended check `/a/bc/`.hasPrefix(`/a/b/`) is false.
+      **Tests (+3) in `PreflightRunnerTests.swift`:**
+      - `test_outputInsideSourceFails`: src=/tmp/foo, dst=/tmp/foo/out → fail with correct hint.
+      - `test_sourceInsideOutputFails`: src=/tmp/ws/hf-model, dst=/tmp/ws → fail with correct hint.
+      - `test_siblingPrefixPathsDoNotTrigger`: regression guard — src=/tmp/abc, dst=/tmp/abcd → pass (sibling with shared prefix must not trip the nested check).
+      **Evidence:** `JANGStudio/JANGStudio/Verify/PreflightRunner.swift:44-76`. 149 Swift tests pass (was 146, +3 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button
