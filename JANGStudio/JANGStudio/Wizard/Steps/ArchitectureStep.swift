@@ -40,9 +40,19 @@ struct ArchitectureStep: View {
                     }
                 }
             }
+            // M134 (iter 56): peer-helper parity with SourceStep (wraps in
+            // `if isStep1Complete`) and ProfileStep (`.disabled(!allMandatoryPass())`).
+            // Pre-iter-56 this button had NO gate, so a user who navigated
+            // to Architecture while detection was still in-flight (or after
+            // repicking a source that failed detection → detected=nil) could
+            // click through to Profile with an inconsistent plan state.
+            // Downstream preflight would eventually block them at
+            // ProfileStep's Start Conversion gate, but that's a late, noisy
+            // failure path. Gate here for immediate, consistent feedback.
             Button("Looks right → Profile") { coord.active = .profile }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
+                .disabled(!coord.plan.isStep2Complete)
         }
         .formStyle(.grouped)
         .padding()

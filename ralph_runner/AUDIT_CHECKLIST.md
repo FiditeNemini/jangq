@@ -621,6 +621,21 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Why not factor into a shared helper:** `_estimate_params_billion` returns billions (float) with domain-specific rounding; `predict` needs raw byte count. Inlining the formula keeps the two call sites independent + avoids import churn. Regression guard now pins both approximations together via behavioral tests.
       **Evidence:** `jang-tools/jang_tools/estimate_model.py:48-75`. 310 Python tests pass (was 308, +2). Swift 136 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M134 (peer-helper Swift sweep: wizard step Continue-button gating)** — Applied iter-53/54/55's decision-overlap pattern to the 5 Wizard step files. Each has a forward-navigation button; diffed the gating styles for consistency:
+      - `SourceStep.swift:164` — `if coord.plan.isStep1Complete { Button… }` (conditional show) ✓
+      - `ArchitectureStep.swift:43` — **unconditional button, no gate** ✗
+      - `ProfileStep.swift:66-69` — `.disabled(!allMandatoryPass())` (preflight-based) ✓
+      - `RunStep.swift:42-43` — `if coord.plan.run == .succeeded { Button… }` ✓
+      - `VerifyStep.swift:172` — reset-state navigation, always safe ✓
+      **Scenario:** User picks source folder A → detection runs async → user navigates to Architecture before detection finishes → user clicks "Looks right → Profile" → lands on Profile with `detected=nil`. Downstream Profile preflight catches it via `allMandatoryPass()` failing, but only after a late, noisy failure path. The clean fix is to gate at Architecture so the user gets immediate, consistent feedback matching the peer steps.
+      **Fix (iter 56):** added `.disabled(!coord.plan.isStep2Complete)` to the Architecture Continue button. Regenerated `.pbxproj` via `xcodegen generate` to pick up the new test file.
+      **Tests (+4) in `Tests/JANGStudioTests/WizardStepContinueGateTests.swift`:** source-inspection pattern (iter-46 M122 / iter-54 M132 style — `.disabled` isn't cheap to inspect at runtime without ViewInspector/XCUITest). Each of the 4 gated steps gets a pin:
+      - `test_architectureStep_continue_is_gated` — "Looks right → Profile" button must be followed by `.disabled(!coord.plan.isStepNComplete)` within 400 chars. The captured regression of the unconditional button.
+      - `test_sourceStep_continue_is_gated` — `if coord.plan.isStep1Complete` wrapper pinned.
+      - `test_profileStep_continue_is_gated` — `.disabled(!allMandatoryPass())` pinned.
+      - `test_runStep_continue_is_gated` — `if coord.plan.run == .succeeded` pinned.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/ArchitectureStep.swift:43-55`. 140 Swift tests pass (was 136, +4 via targeted `xcrun xctest`). Python 310 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button

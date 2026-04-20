@@ -2249,3 +2249,44 @@ Pivoted to a sharper candidate. Grepped for other hardcoded profile → bits map
 - **NEW**: re-grep `def _.*_` in jang_tools with head_limit=0 to verify I haven't missed peer-helper families (iter-48 meta-rule).
 
 **Next iteration should pick:** Swift Wizard step peer-helper sweep (new territory — Python side has been thoroughly worked over; Swift steps haven't).
+
+## 2026-04-20 iteration 56 — M134 ArchitectureStep Continue-button gating
+
+**Angle:** Iter 55's forecast: Swift Wizard step peer-helper sweep. 5 step files, each with forward-navigation buttons. Grep'd each for how the Continue/Start button is gated.
+
+**Deep trace walkthrough:**
+1. **Diff the 5 steps' Continue-button gating:**
+   - Source: `if coord.plan.isStep1Complete { Button("Continue →") { coord.active = .architecture } }`
+   - Architecture: **`Button("Looks right → Profile") { coord.active = .profile }.buttonStyle(…).keyboardShortcut(…)`** (NO gate)
+   - Profile: `Button("Start Conversion") { … }.disabled(!allMandatoryPass())`
+   - Run: `if coord.plan.run == .succeeded { Button("Continue → Verify") { … } }`
+   - Verify: `coord.active = .source` (reset path, intentional)
+2. **The asymmetry:** Architecture's button has no gate. The other 3 active-advance buttons all have one (`if isStepNComplete`, `.disabled(!allMandatoryPass)`, or `if run == .succeeded`).
+3. **Scenario trace:** can this fire in practice? User picks source folder A → detection starts async (SourceStep `Task { await detectAndRecommend(url) }`) → user navigates via sidebar to Architecture before detection completes. At this moment `sourceURL != nil` but `detected == nil`. `isStep1Complete` is false (`shardCount > 0` check fails if detected is nil) so sidebar gate on Architecture is *also* false — CAN the user even land on Architecture? Let me re-read sidebar gating: `WizardCoordinator.canActivate(.architecture) = plan.isStep1Complete`. The List selection binding: `set: { coord.active = $0 ?? .source }`. SwiftUI's List(selection:) doesn't block clicking a disabled-foreground row — the `.foregroundStyle(canActivate ? .primary : .secondary)` is purely visual. So the user CAN click a "locked" sidebar row and the view switches, then lands on Architecture with detected=nil.
+4. **Effect of no gate:** User clicks "Looks right → Profile". Lands on Profile with detected=nil + no source shards found. ProfileStep's `.task { refresh() }` (line 85) runs preflight. Preflight fails on several checks → `allMandatoryPass()` returns false → "Start Conversion" disabled. User is eventually blocked, but at an unexpected place with confusing "why is this disabled" cues.
+5. **Clean fix:** match the peer pattern. Add `.disabled(!coord.plan.isStep2Complete)` to the Architecture button. Same shape as Profile's gate. The button now visually indicates that forward-progress isn't ready.
+6. **Test via source inspection** (same pattern as iter-46 M122 + iter-54 M132): `.disabled` modifier state isn't cheap to inspect without ViewInspector. Four tests pin each of the 4 gated steps' source syntax.
+7. **xcodegen detour:** after writing the new test file, `xcrun xctest` reported "Executed 0 tests" — the file wasn't in the test bundle because `project.pbxproj` was stale. Ran `xcodegen generate` to refresh from `project.yml`. `git status` will show `.pbxproj` modified. Important to commit both the test file AND the regenerated `.pbxproj` together.
+
+**Meta-lesson — pbxproj drift.** This is the first iter where adding a new test file required regenerating xcodeproj. Previous iters added to existing test files (CapabilitiesServiceTests, InferenceRunnerTests, ProfilesServiceTests), which didn't need a regen. Adding a whole new .swift to a `xcodegen`-generated project means: (a) write the file, (b) `xcodegen generate`, (c) commit both `.swift` and `.pbxproj` together. Future rule: whenever adding a new test .swift under Tests/JANGStudioTests/, run xcodegen first.
+
+**Items touched:**
+- M134 [x] — ArchitectureStep Continue button now gated via `.disabled(!coord.plan.isStep2Complete)`.
+- `JANGStudio.xcodeproj/project.pbxproj` — regenerated to include `WizardStepContinueGateTests.swift`.
+
+**Commit:** (this iteration)
+
+**Verification:** 140 Swift tests pass (was 136, +4 for WizardStepContinueGateTests). Verified via `xcrun xctest -XCTest "JANGStudioTests.WizardStepContinueGateTests"` after `xcodegen generate` + `build-for-testing`. Python 310 + ralph 73 unchanged.
+
+**Closed-status tally:** 68 (iter 55) + M134 = 69 closed / 100 total = 69.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW**: peer-helper audit on SourceStep.swift internals — the file is 347 lines, by far the largest step file, and likely has its own internal asymmetries (recommendation-apply vs manual-override handling).
+- **NEW**: peer-helper sweep on `HFRepoValidator` + similar frontend validators.
+
+**Next iteration should pick:** SourceStep internal audit (biggest single file, haven't deep-traced internals yet — likely finds something given the 347 lines of async detection/recommendation/preflight flow).

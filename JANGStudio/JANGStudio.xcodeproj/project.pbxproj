@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		205C14AFA0822C693EADFF4E /* PublishToHuggingFaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA263C1681E544386558CE46 /* PublishToHuggingFaceSheet.swift */; };
+		24A011FB3F5C0B384EFD643A /* WizardStepContinueGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B8E1B0E2161A35807B83BC8 /* WizardStepContinueGateTests.swift */; };
 		25C84B0C74922EE8949D4919 /* PublishService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DBFFA8816FEFBC7EFF5FF5D /* PublishService.swift */; };
 		268698DABB093D7C391FC033 /* RecommendationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04AD44A81E1DAF14ED12741 /* RecommendationService.swift */; };
 		2CA760527194D4934549CBB9 /* WizardCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55E86AE1E8A9CA41738204F /* WizardCoordinator.swift */; };
@@ -101,6 +102,7 @@
 		47BAEB29159082E17CC640F8 /* BundleResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleResolverTests.swift; sourceTree = "<group>"; };
 		4AACB434B97E7FF9C896CD93 /* CapabilitiesService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitiesService.swift; sourceTree = "<group>"; };
 		4AFCA6EF17ACDF8C518375DA /* JANGStudio.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = JANGStudio.entitlements; sourceTree = "<group>"; };
+		4B8E1B0E2161A35807B83BC8 /* WizardStepContinueGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WizardStepContinueGateTests.swift; sourceTree = "<group>"; };
 		4BD8CB3ED2CD8F9F8B6E9963 /* golden_convert_events.jsonl */ = {isa = PBXFileReference; path = golden_convert_events.jsonl; sourceTree = "<group>"; };
 		4E1675A6232217AFF9BFDD1A /* ChatMessageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessageTests.swift; sourceTree = "<group>"; };
 		570938F731FB414081F9CBED /* PythonRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonRunner.swift; sourceTree = "<group>"; };
@@ -187,6 +189,7 @@
 				993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */,
 				D2562B5664B3474649948706 /* ProfilesServiceTests.swift */,
 				8034E6B623B47CCA640CE7BE /* PythonRunnerTests.swift */,
+				4B8E1B0E2161A35807B83BC8 /* WizardStepContinueGateTests.swift */,
 			);
 			name = JANGStudioTests;
 			path = Tests/JANGStudioTests;
@@ -482,6 +485,7 @@
 				6B9F115F2F6B1C5BF471445D /* PreflightRunnerTests.swift in Sources */,
 				C5517C9469AF39EBBA0AA733 /* ProfilesServiceTests.swift in Sources */,
 				D40090D0FEB1DDA976ED672E /* PythonRunnerTests.swift in Sources */,
+				24A011FB3F5C0B384EFD643A /* WizardStepContinueGateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
