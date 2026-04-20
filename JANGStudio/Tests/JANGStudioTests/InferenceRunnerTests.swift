@@ -90,6 +90,66 @@ final class InferenceRunnerTests: XCTestCase {
                        "tick-file mtime advanced after consumer-Task cancel — subprocess still running (M100 regression; same class as M96/M98)")
     }
 
+    // MARK: - Iter 45: M121 — --no-thinking flag propagation
+    //
+    // Reasoning-model smoke-test toggle: when InferenceRunner.generate is
+    // called with noThinking=true, the subprocess must receive --no-thinking
+    // in its argv. When false (or omitted), it must NOT. Pre-M121 the flag
+    // didn't exist — reasoning models consumed the 150-token smoke budget on
+    // <think>…</think> wrappers and never emitted an answer.
+
+    func test_noThinking_flag_added_when_true() async throws {
+        let argsFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ir-args-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: argsFile) }
+
+        // Script writes its argv (one arg per line) to argsFile, then exits
+        // 3 so InferenceRunner surfaces an error — we only care about argv.
+        let capture = try makeTempScript("""
+        for a in "$@"; do echo "$a"; done > "\(argsFile.path)"
+        exit 3
+        """)
+        let runner = InferenceRunner(
+            modelPath: URL(fileURLWithPath: "/tmp/nope"),
+            executableOverride: capture
+        )
+        do {
+            _ = try await runner.generate(
+                prompt: "2+2?",
+                maxTokens: 16,
+                noThinking: true
+            )
+        } catch {
+            // expected — fake subprocess exits 3
+        }
+        let argv = (try? String(contentsOf: argsFile, encoding: .utf8)) ?? ""
+        XCTAssertTrue(argv.contains("--no-thinking"),
+                      "noThinking:true should add --no-thinking to argv. Got:\n\(argv)")
+    }
+
+    func test_noThinking_flag_absent_when_default_false() async throws {
+        let argsFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ir-args-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: argsFile) }
+
+        let capture = try makeTempScript("""
+        for a in "$@"; do echo "$a"; done > "\(argsFile.path)"
+        exit 3
+        """)
+        let runner = InferenceRunner(
+            modelPath: URL(fileURLWithPath: "/tmp/nope"),
+            executableOverride: capture
+        )
+        do {
+            _ = try await runner.generate(prompt: "Hi", maxTokens: 8)
+        } catch {
+            // expected
+        }
+        let argv = (try? String(contentsOf: argsFile, encoding: .utf8)) ?? ""
+        XCTAssertFalse(argv.contains("--no-thinking"),
+                       "default call should NOT add --no-thinking — preserves existing reasoning-benchmark behavior. Got:\n\(argv)")
+    }
+
     func test_explicit_cancel_still_works_via_actor_method() async throws {
         // Regression pin for iter 3's M19 fix: explicit await runner.cancel()
         // must ALSO continue to work after the iter-32 task-cancel fix. Both

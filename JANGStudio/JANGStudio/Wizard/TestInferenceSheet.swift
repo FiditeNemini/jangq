@@ -229,6 +229,15 @@ struct TestInferenceSheet: View {
             Stepper(value: $vm.maxTokens, in: 8...4096, step: 32) {
                 LabeledContent("Max tokens", value: "\(vm.maxTokens)")
             }
+            // M121 (iter 45): reasoning-model smoke-test toggle. When on,
+            // passes --no-thinking to jang_tools inference so the chat
+            // template skips the <think>…</think> wrapper. Essential for
+            // short-answer smoke tests against GLM-5.1 / Qwen3.6 / MiniMax
+            // M2.7 — without it, 150-token smoke tests are consumed by the
+            // thinking block and the user never sees an answer. Non-reasoning
+            // templates silently ignore the flag.
+            Toggle("Skip thinking (reasoning models)", isOn: $vm.skipThinking)
+                .help("GLM-5.1 / Qwen3.6 / MiniMax M2.7 wrap the prompt in <think>…</think> by default, which eats 100+ tokens before answering. Turn this on for quick factual questions.")
         }
         .padding(16)
         .frame(width: 340)

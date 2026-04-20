@@ -45,10 +45,20 @@ class _FakeInnerTokenizer:
     """Minimal stand-in for a HF tokenizer with a chat template."""
     def __init__(self, template: str | None):
         self.chat_template = template
+        # M121: record what kwargs the last apply_chat_template call received,
+        # so tests can pin that enable_thinking is piped through correctly.
+        self.last_call_kwargs: dict = {}
 
-    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
-        # Pretend the template is `<|user|>{content}<|assistant|>`
-        return f"<|user|>{messages[0]['content']}<|assistant|>"
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kwargs):
+        self.last_call_kwargs = {
+            "tokenize": tokenize,
+            "add_generation_prompt": add_generation_prompt,
+            **kwargs,
+        }
+        # Reflect enable_thinking in the output so callers can see the toggle
+        # took effect even if the tokenizer doesn't actually know the kwarg.
+        thinking_tag = "[THINKING]" if kwargs.get("enable_thinking", True) else "[NO-THINK]"
+        return f"<|user|>{thinking_tag}{messages[0]['content']}<|assistant|>"
 
 
 class _FakeWrappedTokenizer:
@@ -62,7 +72,8 @@ def test_apply_chat_template_when_present_on_wrapped_tokenizer():
     inner = _FakeInnerTokenizer(template="<|user|>{content}<|assistant|>")
     wrapped = _FakeWrappedTokenizer(inner)
     out = _apply_chat_template_if_any(wrapped, "Hello")
-    assert out == "<|user|>Hello<|assistant|>"
+    # Default enable_thinking=True → template marks the thinking path.
+    assert out == "<|user|>[THINKING]Hello<|assistant|>"
 
 
 def test_apply_chat_template_falls_through_when_absent():
@@ -78,7 +89,64 @@ def test_apply_chat_template_on_bare_tokenizer():
     from jang_tools.inference import _apply_chat_template_if_any
     bare = _FakeInnerTokenizer(template="<|user|>{content}<|assistant|>")
     out = _apply_chat_template_if_any(bare, "Ping")
-    assert out == "<|user|>Ping<|assistant|>"
+    assert out == "<|user|>[THINKING]Ping<|assistant|>"
+
+
+# M121: reasoning-model smoke-test flag — enable_thinking=False short-circuits
+# the <think>...</think> block that eats 100+ tokens on GLM-5.1/Qwen3.6/
+# MiniMax M2.7. Pre-fix, TestInferenceSheet smoke tests on reasoning models
+# showed partial thinking with no answer. Now opt-in via --no-thinking CLI.
+
+def test_apply_chat_template_pipes_enable_thinking_false():
+    """When enable_thinking=False, the kwarg must arrive at the template."""
+    from jang_tools.inference import _apply_chat_template_if_any
+    inner = _FakeInnerTokenizer(template="<|user|>{content}<|assistant|>")
+    wrapped = _FakeWrappedTokenizer(inner)
+    out = _apply_chat_template_if_any(wrapped, "2+2?", enable_thinking=False)
+    # Output reflects the no-think branch of our fake template.
+    assert out == "<|user|>[NO-THINK]2+2?<|assistant|>"
+    # And the kwarg actually reached apply_chat_template.
+    assert inner.last_call_kwargs.get("enable_thinking") is False
+    assert inner.last_call_kwargs.get("add_generation_prompt") is True
+
+
+def test_apply_chat_template_default_keeps_thinking_on():
+    """Regression guard: omitting the kwarg preserves existing behavior."""
+    from jang_tools.inference import _apply_chat_template_if_any
+    inner = _FakeInnerTokenizer(template="<|user|>{content}<|assistant|>")
+    wrapped = _FakeWrappedTokenizer(inner)
+    out = _apply_chat_template_if_any(wrapped, "Explain quantum mechanics.")
+    # No explicit toggle → kwarg defaults to True (existing behavior).
+    assert "[THINKING]" in out
+    assert inner.last_call_kwargs.get("enable_thinking") is True
+
+
+def test_apply_chat_template_no_thinking_survives_template_error(monkeypatch):
+    """If the template RAISES on the enable_thinking kwarg (ancient tokenizer
+    that strictly rejects unknown kwargs), we must still produce something
+    usable rather than silently dropping the prompt to raw form."""
+    from jang_tools.inference import _apply_chat_template_if_any
+
+    class _StrictTokenizer:
+        chat_template = "strict"
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kwargs):
+            if "enable_thinking" in kwargs:
+                raise TypeError("unexpected kwarg enable_thinking")
+            return f"<|user|>{messages[0]['content']}<|assistant|>"
+
+    out = _apply_chat_template_if_any(_StrictTokenizer(), "Hi", enable_thinking=False)
+    # Retry without the kwarg must succeed — not fall all the way to raw "Hi".
+    assert out == "<|user|>Hi<|assistant|>"
+
+
+def test_cli_help_lists_no_thinking_flag():
+    """Surface the flag in --help so wizard users can discover it via the CLI."""
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "inference", "--help"],
+        capture_output=True, text=True, check=True,
+    )
+    assert "--no-thinking" in r.stdout
 
 
 def test_make_sampler_returns_none_for_greedy():

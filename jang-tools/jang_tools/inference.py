@@ -64,26 +64,56 @@ def _load_vlm(model_dir: Path):
     return load_jangtq_vlm_model(str(model_dir))
 
 
-def _apply_chat_template_if_any(tokenizer, prompt: str) -> str | list[int]:
+def _apply_chat_template_if_any(
+    tokenizer,
+    prompt: str,
+    *,
+    enable_thinking: bool = True,
+) -> str | list[int]:
     """Apply the tokenizer's chat template if it has one — otherwise return the
     raw prompt string unchanged. Without this, Qwen/Llama/Gemma models see
     "Hello" rather than "<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n"
     and either loop forever or emit garbage.
+
+    ``enable_thinking`` (M121): opt-in smoke-test toggle for reasoning models.
+    GLM-5.1 / Qwen3.6 / MiniMax M2.7 chat templates wrap the prompt with a
+    <think>…</think> block when enable_thinking=True (the HF default). For
+    a 150-token in-wizard smoke test that's a black hole — the 100+ tokens
+    of thinking consume the whole budget before an answer emits. Pass False
+    from `cmd_inference` when the user sets `--no-thinking`, and the kwarg
+    flows through to apply_chat_template. Non-reasoning templates simply
+    ignore the unknown kwarg — tokenizers that strictly reject it hit the
+    fallback path below and get retried without the kwarg (so we still
+    produce a templated prompt, not a raw string).
     """
     # TokenizerWrapper (mlx_lm wraps HF tokenizers — chat_template attr lives on
     # the inner HF tokenizer, not the wrapper).
     inner = getattr(tokenizer, "tokenizer", tokenizer)
     if not getattr(inner, "chat_template", None):
         return prompt
+    messages = [{"role": "user", "content": prompt}]
     try:
         return inner.apply_chat_template(
-            [{"role": "user", "content": prompt}],
+            messages,
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=enable_thinking,
         )
+    except TypeError:
+        # Strict tokenizer rejected the enable_thinking kwarg — retry without
+        # it. We still get a properly templated prompt (the old code path);
+        # only the reasoning-toggle behavior degrades.
+        try:
+            return inner.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except Exception:
+            return prompt
     except Exception:
-        # Some templates require `enable_thinking` or other vars the user didn't
-        # supply. Fall back to raw prompt rather than crashing generation.
+        # Some templates require other vars the user didn't supply. Fall back
+        # to raw prompt rather than crashing generation.
         return prompt
 
 
@@ -98,16 +128,25 @@ def _make_sampler(temperature: float):
         return None
 
 
-def _generate_text(model, tokenizer, prompt: str, max_tokens: int, temperature: float) -> dict:
+def _generate_text(
+    model,
+    tokenizer,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    *,
+    enable_thinking: bool = True,
+) -> dict:
     """Generate via mlx_lm. Returns dict with text + timing.
 
     Applies the tokenizer's chat template when available and wires temperature
     through mlx_lm's sampler API. Prior to M29, both were silently ignored:
     temperature slider was a UI lie, and chat models ran with no chat template
-    causing infinite loops / garbage output.
+    causing infinite loops / garbage output. M121 adds the enable_thinking
+    passthrough for reasoning-model smoke tests.
     """
     from mlx_lm import generate
-    templated = _apply_chat_template_if_any(tokenizer, prompt)
+    templated = _apply_chat_template_if_any(tokenizer, prompt, enable_thinking=enable_thinking)
     sampler = _make_sampler(temperature)
 
     t0 = time.time()
@@ -166,7 +205,10 @@ def cmd_inference(args) -> None:
         else:
             model, tokenizer = _load_llm(model_dir)
             load_s = time.time() - t_load
-            result = _generate_text(model, tokenizer, args.prompt, args.max_tokens, args.temperature)
+            result = _generate_text(
+                model, tokenizer, args.prompt, args.max_tokens, args.temperature,
+                enable_thinking=not args.no_thinking,
+            )
     except Exception as e:
         msg = f"{type(e).__name__}: {e}"
         if args.json:
@@ -194,4 +236,16 @@ def register(subparsers) -> None:
     p.add_argument("--image", help="Image path (VL models)")
     p.add_argument("--video", help="Video path (video VL models)")
     p.add_argument("--json", action="store_true", help="JSON output with timing")
+    # M121 (iter 45): short-answer smoke-test toggle for reasoning models.
+    # GLM-5.1, Qwen3.6, and MiniMax M2.7 chat templates default to
+    # enable_thinking=True, wrapping the prompt with a <think>…</think> block
+    # that eats 100+ tokens. For wizard smoke tests with --max-tokens 150,
+    # pass --no-thinking to skip the reasoning wrapper and see a direct answer.
+    # Non-reasoning templates silently ignore the kwarg.
+    p.add_argument(
+        "--no-thinking",
+        action="store_true",
+        help="Skip the chat template's <think> block on reasoning models "
+             "(GLM-5.1 / Qwen3.6 / MiniMax M2.7) — use for short-answer smoke tests",
+    )
     p.set_defaults(func=cmd_inference)

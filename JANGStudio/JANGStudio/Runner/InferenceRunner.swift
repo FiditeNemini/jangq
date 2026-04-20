@@ -60,7 +60,8 @@ actor InferenceRunner {
                   maxTokens: Int = 100,
                   temperature: Double = 0.0,
                   imagePath: URL? = nil,
-                  videoPath: URL? = nil) async throws -> InferenceResult {
+                  videoPath: URL? = nil,
+                  noThinking: Bool = false) async throws -> InferenceResult {
         // Reset cancel flag for this call — each generate is independent.
         cancelled = false
 
@@ -77,6 +78,14 @@ actor InferenceRunner {
         }
         if let video = videoPath {
             args += ["--video", video.path]
+        }
+        // M121 (iter 45): opt-in short-answer mode for reasoning models.
+        // When the user ticks "Skip thinking" in TestInferenceSheet, we
+        // pass --no-thinking so the chat template doesn't wrap the prompt
+        // with a <think>…</think> block that would eat the 150-token
+        // smoke-test budget on GLM-5.1 / Qwen3.6 / MiniMax M2.7.
+        if noThinking {
+            args.append("--no-thinking")
         }
 
         let proc = Process()

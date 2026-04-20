@@ -15,6 +15,12 @@ final class TestInferenceViewModel {
     var lastError: String?
     var lastTokensPerSec: Double = 0
     var lastPeakRssMb: Double = 0
+    /// M121: opt-in toggle for reasoning models (GLM-5.1 / Qwen3.6 / MiniMax
+    /// M2.7). When true, passes --no-thinking to jang_tools inference so the
+    /// chat template doesn't wrap the prompt with <think>…</think>. Default
+    /// false preserves existing behavior for users running reasoning
+    /// benchmarks who expect the full thinking block.
+    var skipThinking: Bool = false
 
     private var runner: InferenceRunner
 
@@ -46,7 +52,8 @@ final class TestInferenceViewModel {
                 maxTokens: maxTokens,
                 temperature: temperature,
                 imagePath: imagePath,
-                videoPath: videoPath
+                videoPath: videoPath,
+                noThinking: skipThinking
             )
             let msg = ChatMessage(
                 role: .assistant,
