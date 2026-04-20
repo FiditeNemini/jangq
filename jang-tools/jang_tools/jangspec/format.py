@@ -41,7 +41,13 @@ INDEX_MAGIC = 0x58494A53  # "SJIX"
 # }
 BLOB_HEADER_FORMAT = "<IHHIIQQ"
 BLOB_HEADER_SIZE = struct.calcsize(BLOB_HEADER_FORMAT)
-assert BLOB_HEADER_SIZE == 32, f"blob header must be 32 bytes, got {BLOB_HEADER_SIZE}"
+# M122 (iter 46): plain `assert` is stripped by `python -O`. These sizes
+# gate the on-disk binary layout; a silent skip under -O would let a
+# broken format change (e.g. adding a field to the struct but forgetting
+# to update the size constant) through to runtime, where readers would
+# misalign and corrupt tensors. Use an unconditional raise.
+if BLOB_HEADER_SIZE != 32:
+    raise ImportError(f"blob header must be 32 bytes, got {BLOB_HEADER_SIZE}")
 
 # ---- Per-tensor header (within a blob) ----
 # struct TensorHeader {
@@ -55,7 +61,8 @@ assert BLOB_HEADER_SIZE == 32, f"blob header must be 32 bytes, got {BLOB_HEADER_
 # }
 TENSOR_HEADER_FORMAT = "<BBHIIIIQQ"
 TENSOR_HEADER_SIZE = struct.calcsize(TENSOR_HEADER_FORMAT)
-assert TENSOR_HEADER_SIZE == 36, f"tensor header must be 36 bytes, got {TENSOR_HEADER_SIZE}"
+if TENSOR_HEADER_SIZE != 36:
+    raise ImportError(f"tensor header must be 36 bytes, got {TENSOR_HEADER_SIZE}")
 
 # Tensor-kind enum (matches TensorHeader.kind).
 KIND_GATE = 0
@@ -78,7 +85,8 @@ DTYPE_BIASES = 2    # float16
 # }
 INDEX_ENTRY_FORMAT = "<IIHHQQ"
 INDEX_ENTRY_SIZE = struct.calcsize(INDEX_ENTRY_FORMAT)
-assert INDEX_ENTRY_SIZE == 28, f"index entry must be 28 bytes, got {INDEX_ENTRY_SIZE}"
+if INDEX_ENTRY_SIZE != 28:
+    raise ImportError(f"index entry must be 28 bytes, got {INDEX_ENTRY_SIZE}")
 
 # ---- Index file header ----
 # struct IndexHeader {
@@ -91,7 +99,8 @@ assert INDEX_ENTRY_SIZE == 28, f"index entry must be 28 bytes, got {INDEX_ENTRY_
 # }
 INDEX_HEADER_FORMAT = "<IHHIIQ"
 INDEX_HEADER_SIZE = struct.calcsize(INDEX_HEADER_FORMAT)
-assert INDEX_HEADER_SIZE == 24, f"index header must be 24 bytes, got {INDEX_HEADER_SIZE}"
+if INDEX_HEADER_SIZE != 24:
+    raise ImportError(f"index header must be 24 bytes, got {INDEX_HEADER_SIZE}")
 
 
 def align_up(n: int, align: int = BLOB_ALIGNMENT) -> int:

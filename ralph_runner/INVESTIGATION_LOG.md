@@ -1844,3 +1844,39 @@ Punted to M121 with a clear scope specification so a future iter can do the full
 - grep-audit class: `shell=True` in subprocess calls (not yet swept)
 
 **Next iteration should pick:** M117 revisit given M121 closure — feedback_model_checklist.md rule 3 asks for "smoke inference test in wizard" which M121 partially addresses. Or M97 (concrete, HF-mock testable).
+
+## 2026-04-20 iteration 46 — M122 assert-on-binary-format stripped by python -O
+
+**Angle:** Iter 45's forecast listed grep-audit class `shell=True` as a candidate. Grepped all .py — zero hits. Clean class, closed as no-op. Pivoted to bare-`except:` — also zero hits. Clean. Kept grepping "stripped by -O" territory because that's an underexplored class.
+
+**Deep trace walkthrough:**
+1. `grep -nE "^\s*assert\s+"` across `jang-tools/jang_tools/`. 6 files match: `progress.py`, `jangspec/builder.py`, `jangspec/blob.py`, `jangspec/format.py`, `codebook_vq.py`, `gptq.py`.
+2. Triage each call site for "is this the only thing preventing silent corruption?"
+   - `progress.py:89`: `assert level in ("info", "warn", "error")` — programmer-error check inside an event emitter. If stripped, bad-level msgs pass through to JSONL but the Swift parser's `EventType(rawValue: typeStr)` returns nil → ProgressEvent.parseError surfaces anyway. **Self-healing at the Swift layer. Safe.**
+   - `builder.py:215,266,312`: type narrowing + layer-ordering sanity checks. False positives under -O = hidden bugs but not format corruption. **Low priority.**
+   - `blob.py:187`: `assert bits_seen is not None` — same type narrowing class. **Low priority.**
+   - `format.py:44,58,81,94`: size-of-struct constants that gate **binary on-disk layout**. THIS is the high-value class.
+3. **Why format.py is different.** The checks confirm that `struct.calcsize("<IIHHQQ")` returns the exact byte count the readers expect. If a future edit changes the format string but forgets to update the size constant, the check catches it at load. Under -O, the check goes away. Readers later misalign tensors in the expert blob and produce zero-value or garbage weights — no exception, just wrong numbers.
+4. **Why didn't this bite us yet?** Because JANG Studio's embedded Python is NOT invoked with -O (verified: BundleResolver.pythonExecutable → `ls /Users/eric/jang/JANGStudio/JANGStudio/Resources/python/bin/` → no -O flag in any invocation). So in practice today, the asserts work. But (a) the bundle could ship with -O in a future release for startup speed, (b) a dev running the CLI manually with -O would silently bypass the checks, (c) if the asserts are ever "optimized away" by a static analysis pass, corrupted experts would slip into a shipped model.
+5. **Root cause, not band-aid:** Replacing `assert BLOB_HEADER_SIZE == 32` with `if BLOB_HEADER_SIZE != 32: raise ImportError(...)` removes the -O fragility entirely. The check runs at module import regardless of optimization level. Same behavior, stripping-immune.
+6. **Test strategy:** three subprocess tests, one under each `python` / `python -O` / `python -OO`, each asserts the module imports cleanly AND reports the expected constants. A fourth test greps the format.py source for any future `assert BLOB_HEADER_SIZE ==` / `assert TENSOR_HEADER_SIZE ==` / etc. via `inspect.getsource` — this prevents a future regression if someone reverts the fix.
+
+**Meta-lesson (why did this class surface NOW).** Previous grep-audits focused on failure propagation (M100 Task-cancel, M107 silent try?, M111 silent encoder errors). This iter's lens was "safety checks that fail CORRECTLY but can be SKIPPED under certain runtime modes." Same pattern applies to Swift's `precondition()` (always fires) vs `assertionFailure()` (stripped in Release) — worth a future grep-audit class on the Swift side.
+
+**Items touched:**
+- M122 [x] — format.py asserts converted to ImportError raises + test pins behavior + forbidden-pattern regression guard.
+
+**Commit:** (this iteration)
+
+**Verification:** 283 jang-tools tests pass (was 279, +4 for M122 import-under-optimization suite). 132 Swift tests unchanged. 73 ralph_runner tests unchanged.
+
+**Closed-status tally:** 59 (iter 45) + M122 = 60 closed / 94 total = 63.8% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel (iter-30 spawn — still open, non-trivial HF API work)
+- M117 in-wizard inference smoke (feedback_model_checklist.md rule 3)
+- **NEW M123 candidate**: Swift `assertionFailure()` / `precondition(` grep-audit — mirror of this iter's Python class, should find places where Release-build stripping matters.
+- **NEW M124 candidate**: full-suite test hang investigation (InferenceRunnerTests → PythonRunnerTests — both suites pass individually, hang together; surfaced during iter 45 verification).
+- grep-audit classes remaining: bare `except Exception:` in jang-tools (not yet triaged like audit.py was).
+
+**Next iteration should pick:** Swift `assertionFailure()` / `precondition` grep-audit (natural mirror of this iter's Python class) OR M124 test-hang root cause (real CI reliability issue).
