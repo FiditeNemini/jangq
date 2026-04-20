@@ -56,6 +56,14 @@ python3 -m ralph_runner.runner --tier 1
 python3 -m ralph_runner.runner --next
 ```
 
+## Test assets
+
+`fixtures/` ships with:
+- `test_image.png` — 64×64 RGB gradient for A11 (VL preprocessor functional)
+- `test_video_frames.npy` — 16×32×32×3 numpy array for A12 (video preprocessor functional)
+
+Both are deterministic and copyright-free; regenerate with the snippets in `audit.py` docstrings if ever lost.
+
 ## See the full design
 
 `docs/superpowers/specs/2026-04-19-ralph-loop-production-readiness-design.md`

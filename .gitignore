@@ -42,6 +42,9 @@ debug_*
 test_*
 # Allow ralph_runner test suite
 !ralph_runner/tests/test_*.py
+# Allow ralph_runner fixtures (deterministic test assets)
+!ralph_runner/fixtures/test_image.png
+!ralph_runner/fixtures/test_video_frames.npy
 repack_*
 ram_monitor*
 
