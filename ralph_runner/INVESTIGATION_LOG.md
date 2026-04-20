@@ -1639,3 +1639,52 @@ Or a domain item: M87, M97, M106, Cat D.
 - Continue to M117 (in-wizard inference smoke — would close feedback_model_checklist.md rules 3 + 4 in one stroke but requires pulling TestInferenceSheet logic into VerifyStep flow)
 - OR rotate to domain items untouched for many iters (M87 Mistral 4 RoPE live validation, M97 partial HF repo cleanup, M106 DiagnosticsBundle main-thread block)
 - OR a final grep-audit on ralph_runner Python side (Swift saturation detected iter 37; ralph_runner/ Python still unswept since iter 8/12/13/15/16/18)
+
+---
+
+## 2026-04-20 iteration 41 — M118 ralph_runner Python grep-audit: subprocess timeout
+
+**Angle:** Applied iter-30-37's grep-audit meta-loop to ralph_runner's Python side. This was explicitly called out in iter-37's saturation note — Swift saturated but Python ralph_runner hadn't been systematically swept. Track record: iter 37 M112 grep-audited jang_tools and found one real bug (narrow Python except).
+
+**Deep trace walkthrough:**
+1. First grep class: `except Exception` in ralph_runner. Found 28+ sites mostly in audit.py. Spot-checked: all convert subprocess + analysis errors to structured audit-row fail results. Intentional + correct — iter-18's M82 timeout path relies on this pattern (hung audit row returns a fail dict instead of raising). Logged as **M119 (seen-and-verified)**, no fix.
+2. Second grep class: `subprocess.run` without `timeout=` parameter. A blocking system call without a timeout can hang indefinitely. Found FIVE sites:
+   - `remote.run_remote` — HAS `timeout=timeout` (default 3600s). ✓
+   - `audit.py:498` (a17 modelcard) — HAS `timeout=60`. ✓
+   - `audit.py:541` (a18 examples) — HAS `timeout=30`. ✓
+   - `remote.sync_tree` — NO TIMEOUT. Bug.
+   - `remote.pull_tree` — NO TIMEOUT. Bug.
+3. **M118 CONFIRMED.** Both are rsync-over-SSH to macstudio. Pre-fix scenario: network glitch mid-transfer → rsync hangs → Python blocks at `subprocess.run` → Ralph iteration stalls forever.
+4. **iter-12's M55 lock doesn't help** — it prevents concurrent instances but not a single hung one. Once a hang occurs, `cmd_next` is stuck inside `sync_tree`, the lock remains held, and the user's `python -m ralph_runner --next` session just sits forever with no output.
+5. **Fix architecture:**
+   - Both `sync_tree` + `pull_tree` gain `timeout: float = 1800` parameter.
+   - 30 min default matches expected wall-clock for jang-tools tree transfer over Tailscale with headroom for latency spikes.
+   - TimeoutExpired caught + converted to structured RemoteResult with `returncode=124` (conventional timeout exit). Caller treats as retryable failure, not a crash.
+   - Callers can override `timeout=` for short transfers (e.g. audit push).
+6. **Test strategy:**
+   - Mock `subprocess.run` via `unittest.mock.patch` so tests don't require real rsync / network.
+   - Test 1: sync_tree passes the timeout through to subprocess.run.
+   - Test 2: default timeout is in `[300, 3600]` second range — pins against future over-tightening (too short → false timeouts on big transfers) OR over-loosening (too long → defeats the point).
+   - Test 3: TimeoutExpired returns structured RemoteResult with returncode=124, does NOT raise.
+   - Tests 4 + 5: same invariants pinned on pull_tree.
+
+**Items touched:**
+- M118 [x] — sync_tree + pull_tree now have timeouts. Hung rsync no longer stalls Ralph.
+
+**Commit:** (this iteration)
+
+**Verification:** 73 ralph_runner tests (was 68, +5). jang-tools 270 + Swift 128 unchanged.
+
+**Closed-status tally:** 55 (prior) + M118 = 56 closed / 91 total = 62% closure rate.
+
+**ralph_runner Python sweep summary:**
+- 2 grep classes explored (except-handling + subprocess-timeout)
+- 1 real bug found (M118)
+- 1 class verified-as-safe (M119 — audit.py's except pattern is intentional)
+- Python side yields consistently lower than Swift side (iter-37 found 1 Python bug; iter-41 found 1). Swift had more wide-open surface area (streams, actors, SwiftUI lifecycle, UI callbacks). Python ralph_runner is smaller + more linear.
+
+**Next iteration should pick:** 
+- M117 (in-wizard inference smoke — closes remaining 2 feedback_model_checklist rules)
+- Domain items untouched for 10+ iters: M87 Mistral 4 RoPE, M97 partial HF repo cleanup, M106 DiagnosticsBundle main-thread
+- Or spawn a NEW class of grep-audit: `json.loads(` without try/except (silent decode failures)
+- Or iterate another Cat D memory file (iter-22 Mistral 4 was clean; other memory files include `reference_architecture_details.md`, `project_minimax_m27.md`, `project_glm51_jang1l_working.md`)

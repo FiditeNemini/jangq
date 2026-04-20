@@ -47,19 +47,48 @@ def run_remote(command: str, host: str = REMOTE_HOST, timeout: float = 3600) -> 
     return RemoteResult(r.returncode, r.stdout, r.stderr)
 
 
-def sync_tree(local_src: str, remote_subpath: str) -> RemoteResult:
-    """rsync a local directory to macstudio's workspace. local_src should end with /."""
+def sync_tree(local_src: str, remote_subpath: str, timeout: float = 1800) -> RemoteResult:
+    """rsync a local directory to macstudio's workspace. local_src should end with /.
+
+    M118 (iter 41): previously had NO timeout. A hung rsync (network glitch,
+    macstudio becomes unreachable mid-transfer, disk-full on the remote side)
+    stalled the whole Ralph iteration forever — iter 12's M55 lock prevents
+    concurrent instances but doesn't address a single hung one. 30-minute
+    default matches the expected wall-clock for transferring a jang-tools tree
+    (~100 MB) with headroom for Tailscale latency spikes; callers can override
+    for tighter budgets.
+    """
     if not local_src.endswith("/"):
         local_src += "/"
     dst = f"{REMOTE_HOST}:{REMOTE_WORKSPACE}/{remote_subpath}"
-    r = subprocess.run(build_rsync_args(local_src, dst), capture_output=True, text=True)
-    return RemoteResult(r.returncode, r.stdout, r.stderr)
+    try:
+        r = subprocess.run(build_rsync_args(local_src, dst),
+                           capture_output=True, text=True, timeout=timeout)
+        return RemoteResult(r.returncode, r.stdout, r.stderr)
+    except subprocess.TimeoutExpired as e:
+        return RemoteResult(
+            returncode=124,   # conventional timeout exit code
+            stdout=(e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, (bytes, bytearray)) else (e.stdout or "")),
+            stderr=f"[timeout] rsync to {dst} exceeded {timeout}s",
+        )
 
 
-def pull_tree(remote_subpath: str, local_dst: str) -> RemoteResult:
+def pull_tree(remote_subpath: str, local_dst: str, timeout: float = 1800) -> RemoteResult:
+    """rsync a remote subpath down to local_dst. M118: same hang protection
+    as sync_tree. Pulls can be big (full audit result dir) so 30 min default
+    matches; callers override for tighter budgets.
+    """
     src = f"{REMOTE_HOST}:{REMOTE_WORKSPACE}/{remote_subpath}/"
-    r = subprocess.run(build_rsync_args(src, local_dst, excludes=()), capture_output=True, text=True)
-    return RemoteResult(r.returncode, r.stdout, r.stderr)
+    try:
+        r = subprocess.run(build_rsync_args(src, local_dst, excludes=()),
+                           capture_output=True, text=True, timeout=timeout)
+        return RemoteResult(r.returncode, r.stdout, r.stderr)
+    except subprocess.TimeoutExpired as e:
+        return RemoteResult(
+            returncode=124,
+            stdout=(e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, (bytes, bytearray)) else (e.stdout or "")),
+            stderr=f"[timeout] rsync from {src} exceeded {timeout}s",
+        )
 
 
 def remote_free_gb(host: str = REMOTE_HOST) -> float:

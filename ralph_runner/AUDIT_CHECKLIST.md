@@ -486,6 +486,15 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Evidence:** `VerifyCheck.swift:9-10` enum case, `PostConvertVerifier.swift:125-203` row + helper. 128 Swift tests pass (was 122, +6).
       **Commit:** (this iteration)
 - [ ] **M117** — Memory rule 3 says "Speed test — load model, warm up, run 3 prompts at correct temp". PostConvertVerifier doesn't test inference at all (audit.py does via a15 but only as one-shot). Consider a pre-publish inference smoke test in the wizard: 3 prompts, 20 tokens each, surface tok/s and any loops. Would extend VerifyStep. Scope creep; logged for future consideration.
+- [x] **M118** — ralph_runner grep-audit (first time the Python side got an iter-30-37-style sweep). Grepped `subprocess.run` sites + found TWO without timeout: `remote.sync_tree` and `remote.pull_tree`. Both `rsync` over SSH to macstudio. Pre-fix: any rsync hang (network glitch, macstudio mid-transfer lockup, remote disk-full) blocked the Ralph iteration forever. iter-12 M55's lock prevents concurrent instances but doesn't address a single hung one — Ralph just stops making progress with no timeout, no cancel, no visibility.
+      **Fix (iter 41):**
+      - Both functions gained `timeout: float = 1800` parameter (30 min default — matches expected wall-clock for jang-tools tree transfer on Tailscale, generous headroom for network spikes).
+      - TimeoutExpired is caught + converted to a structured RemoteResult with `returncode=124` (conventional timeout exit code) + informative stderr. Caller (cmd_next) sees it as a retryable failure rather than a crash.
+      - Callers can pass shorter `timeout=` for small transfers (e.g. audit push doesn't need 30 min).
+      **Tests (5 new):** sync_tree-passes-timeout, sync_tree-default-timeout-in-[5min,60min]-range (regression guard against future over-tightening), sync_tree-timeout-returns-124-not-raises, pull_tree-also-timeout-pinned, pull_tree-timeout-returns-124.
+      **Evidence:** `remote.py:50-83`. 73 ralph_runner tests pass (was 68, +5).
+      **Commit:** (this iteration)
+- [ ] **M119** — `audit.py` has many `except Exception as e:` sites (28+). Spot-check confirmed they're audit rows converting subprocess+analysis errors to structured fail results — that's intentional + correct. Pattern is safe. Logged as seen-and-verified; no fix needed unless a specific site is flagged by future triage.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button
       - `RunStep.swift:74` — `.desktopDirectory` for "Copy Diagnostics" button
