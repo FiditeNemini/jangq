@@ -256,21 +256,31 @@ struct SourceStep: View {
     private func applyRecommendation(_ rec: Recommendation) {
         let plan = coord.plan
 
-        // Family — replace unconditionally since user hasn't visited Step 3 yet
-        plan.family = (rec.recommended.family == "jangtq") ? .jangtq : .jang
-
-        // Profile — replace if still at the user-configured default.
-        // M143 (iter 65): the "user hasn't manually changed it" signal is
-        // whether plan.profile still matches settings.defaultProfile
-        // (what applyDefaults seeded it with). Pre-fix this was hardcoded
-        // to "JANG_4K", so any user who configured a different default
-        // (e.g., JANG_2L for regular MoE work) never got the per-source
-        // recommendation applied — their Settings default stuck even for
-        // dense LLMs where JANG_4K would have been better.
+        // M144 (iter 66): family was previously overwritten
+        // unconditionally every time the user picked a new source. That
+        // created an INCONSISTENT-STATE bug: user picks source A, goes to
+        // ProfileStep, manually switches to JANGTQ2 (family=.jangtq), then
+        // re-picks source A again (or a similar source). Recommendation
+        // comes back with family=jang → unconditional overwrite sets
+        // family=.jang. Profile preserved as "JANGTQ2" (iter-65 M143 fix
+        // does the right thing). Result: family=.jang but profile=JANGTQ2
+        // — an invalid pair. Pre-M144, the user ended up stuck until they
+        // manually re-synced ProfileStep.
+        //
+        // Fix: couple family + profile. If profile was preserved (user
+        // manually set it), family stays preserved too. If profile was
+        // overwritten, derive family from the new profile name so the
+        // pair is always consistent.
         let seedDefault = settings.defaultProfile.isEmpty ? "JANG_4K" : settings.defaultProfile
         if plan.profile == seedDefault {
+            // User hasn't touched profile → both profile AND family get
+            // overwritten together, derived from the new profile so they
+            // can't disagree.
             plan.profile = rec.recommended.profile
+            plan.family = plan.profile.hasPrefix("JANGTQ") ? .jangtq : .jang
         }
+        // else: user manually picked a profile in ProfileStep. Preserve
+        // BOTH profile and family to keep them in sync.
 
         // Method
         let recMethod: QuantMethod = switch rec.recommended.method {

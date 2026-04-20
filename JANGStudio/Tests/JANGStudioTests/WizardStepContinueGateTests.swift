@@ -181,6 +181,50 @@ final class WizardStepContinueGateTests: XCTestCase {
     // per-source recommendation applied because their plan.profile
     // started at JANG_2L after applyDefaults.
 
+    // MARK: - M144 (iter 66): family + profile must stay coupled
+    //
+    // Pre-M144 applyRecommendation overwrote `family` unconditionally
+    // every time a source was picked, even if the profile was preserved
+    // (because iter-65 M143's seed-default check kept it user-chosen).
+    // Result: user picks source → goes to ProfileStep → switches to
+    // JANGTQ2 (family=.jangtq) → re-picks source → applyRecommendation
+    // preserves profile=JANGTQ2 but overwrites family=.jang →
+    // inconsistent pair, invalid state.
+
+    func test_sourceStep_applyRecommendation_does_not_unconditionally_set_family() throws {
+        let src = try stepSource("SourceStep.swift")
+        // The bare `plan.family = (rec.recommended.family == "jangtq") ? .jangtq : .jang`
+        // that unconditionally overwrote family should be gone. Search
+        // outside of comments.
+        let codeOnly = src.split(separator: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        XCTAssertFalse(
+            codeOnly.contains(#"plan.family = (rec.recommended.family == "jangtq")"#),
+            """
+            SourceStep.applyRecommendation must not unconditionally
+            overwrite plan.family. When profile is preserved, family must
+            stay coupled to profile or the pair becomes inconsistent
+            (e.g. family=.jang + profile=JANGTQ2). See M144 iter 66.
+            """
+        )
+    }
+
+    func test_sourceStep_applyRecommendation_derives_family_from_profile() throws {
+        let src = try stepSource("SourceStep.swift")
+        // The fix derives family from profile after overwriting profile:
+        //   plan.family = plan.profile.hasPrefix("JANGTQ") ? .jangtq : .jang
+        XCTAssertTrue(
+            src.contains(#"plan.profile.hasPrefix("JANGTQ")"#),
+            """
+            After overwriting plan.profile, applyRecommendation must derive
+            plan.family from the profile name so the two fields can never
+            disagree. Expected `plan.profile.hasPrefix("JANGTQ")` check.
+            See M144 iter 66.
+            """
+        )
+    }
+
     func test_sourceStep_applyRecommendation_uses_settings_default() throws {
         let src = try stepSource("SourceStep.swift")
         // The literal hardcoded comparison must be gone.

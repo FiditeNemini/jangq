@@ -2695,3 +2695,57 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 - Extended re-grep: `plan\.(family|method|hadamard|overrides\.forceDtype|overrides\.forceBlockSize)\s*=` to check what applyRecommendation can overwrite unconditionally.
 
 **Next iteration should pick:** M144 audit of applyRecommendation's field-by-field overwrite logic (natural extension of iter-65's find) OR M143 generalization (audit ALL "hardcoded default assumption" checks in Swift).
+
+## 2026-04-20 iteration 66 — M144 applyRecommendation field-overwrite: family+profile decouple
+
+**Angle:** Iter-65 forecast — audit each field's overwrite logic in `applyRecommendation`. Iter-66 does the field-by-field pass.
+
+**Deep trace walkthrough:**
+1. **Field matrix pre-M144:**
+   ```
+   family:         unconditional overwrite
+   profile:        conditional (iter-65 seed-default check) ✓
+   method:         unconditional
+   hadamard:       unconditional
+   forceDtype:     unconditional (if rec supplies one)
+   forceBlockSize: conditional (nil-check) ✓
+   ```
+2. **Pathology identified: family-profile split.** Iter-65 fixed profile preservation but family still got unconditionally reset. The two fields are SEMANTICALLY COUPLED — a JANGTQ-family profile must have family=.jangtq and vice versa. Pre-M144, these could desynchronize.
+3. **Reproduction sequence:**
+   - Pick source A → rec={family=jang, profile=JANG_4K} → plan set accordingly.
+   - ProfileStep: user picks family=.jangtq, profile=JANGTQ2 (valid pair).
+   - Back to SourceStep, pick source B (same arch).
+   - applyRecommendation: 
+     - family = .jang (unconditional — wipes user's .jangtq)
+     - profile preservation: plan.profile="JANGTQ2" vs seedDefault="JANG_4K" → preserved.
+   - Final state: family=.jang + profile=JANGTQ2 — INVALID pair.
+4. **ProfileStep impact:** `Picker("", selection: $coord.plan.profile)` lists jangProfileNames when family=.jang. But current profile is "JANGTQ2" which isn't in that list. Picker selection falls back to nothing / default. User sees inconsistent UI, not sure what to do.
+5. **Fix: derive family from profile.** After overwriting profile, `plan.family = plan.profile.hasPrefix("JANGTQ") ? .jangtq : .jang`. In the preserve branch, family is also not touched. Now family follows profile everywhere.
+6. **Why NOT derive family from rec.recommended.family:** the recommendation comes back with its OWN family opinion. But that opinion is computed from the SOURCE MODEL TYPE. If the user manually switched to JANGTQ (valid because source arch is whitelisted), the recommendation's family opinion is stale — what matters is profile (which we just preserved). Deriving from profile honors the user's manual choice while keeping invariants.
+7. **Edge case:** what if recommendation's profile is JANG_4K but `source_arch isn't in jangtq whitelist`? Then even if the user had previously picked JANGTQ for a different arch, the current source rejects JANGTQ. Here:
+   - plan.profile="JANGTQ2" (preserved), derived family=.jangtq.
+   - Preflight's jangtqArchSupported check fires: source arch not in whitelist → .fail.
+   - ProfileStep's allMandatoryPass returns false → Start Conversion disabled.
+   - User forced to go back to ProfileStep and fix. CORRECT BEHAVIOR — we don't silently overwrite their choice; we surface the conflict.
+
+**Meta-lesson — coupled fields must be updated atomically.** The sibling fields `family` and `profile` in ConversionPlan are semantically coupled (JANGTQ profiles imply family=.jangtq). When one is preserved (user intent signal), the other must also be preserved or derived from the preserved one. Independent "unconditional" updates to coupled fields = split-brain state. Audit class for the future: grep for fields in the same struct with enum-vs-string relationship (like family+profile here) and check for atomic updates at all write sites.
+
+**Items touched:**
+- M144 [x] — `family` no longer unconditionally overwrites user's manual choice; derived from the new profile when profile is overwritten.
+
+**Commit:** (this iteration)
+
+**Verification:** 165 Swift tests pass (was 163, +2 for M144 family/profile coupling pins). Python 314 + ralph 73 unchanged.
+
+**Closed-status tally:** 78 (iter 65) + M144 = 79 closed / 100 total = 79.0% closure rate.
+
+**Forecast pipeline:**
+- M97 partial HF repo cleanup after cancel
+- M117 in-wizard inference smoke
+- M124 full-suite Swift-test hang
+- M126 examples.py error-message polish
+- M128 gate dtype asymmetry (observation)
+- **NEW M145 candidate**: hadamard / method / forceDtype still unconditionally overwrite on re-pick. Less critical than family (no invalid-pair state) but still surprising. If I tackle these, apply the same seed-default comparison used for profile.
+- **NEW**: "coupled fields" audit class — grep the codebase for fields that must change together. family+profile is one; blockSize+method might be another.
+
+**Next iteration should pick:** M145 (hadamard/method/forceDtype user-choice preservation) OR coupled-fields grep-audit.

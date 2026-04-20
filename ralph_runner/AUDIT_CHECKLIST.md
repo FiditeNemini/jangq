@@ -775,6 +775,29 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Tests (+1) in WizardStepContinueGateTests.swift:** `test_sourceStep_applyRecommendation_uses_settings_default` — source-inspection pin that asserts (a) no hardcoded `plan.profile == "JANG_4K"` literal remains, (b) `settings.defaultProfile` is referenced.
       **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift:5-16, 254-270`. 163 Swift tests pass (was 162, +1). Python 314 + ralph 73 unchanged.
       **Commit:** (this iteration)
+- [x] **M144 (applyRecommendation field-overwrite asymmetry: family unconditionally wiped user's JANGTQ choice)** — Iter-65 forecast called for a field-by-field audit of `SourceStep.applyRecommendation`'s overwrite logic. Iter-66 finds the sharpest bug:
+      **Pre-iter-66 field table:**
+      | Field | Overwrite logic |
+      | --- | --- |
+      | `family` | **unconditional** |
+      | `profile` | conditional (iter-65 M143 fix: seed-default check) |
+      | `method` | unconditional |
+      | `hadamard` | unconditional |
+      | `forceDtype` | unconditional (if rec has one) |
+      | `forceBlockSize` | conditional (nil-check) |
+      **The sharpest pathology — family+profile inconsistency.** After iter-65, profile is preserved when user manually picked one in ProfileStep. But family was STILL overwritten. Scenario:
+      1. User picks source → family=.jang, profile=JANG_4K.
+      2. ProfileStep: user manually switches family=.jangtq, profile=JANGTQ2.
+      3. User re-picks source (same or similar).
+      4. applyRecommendation runs: profile preserved as "JANGTQ2" (M143 check fires), BUT family overwritten to `.jang` (unconditional).
+      5. Result: `family=.jang + profile=JANGTQ2`. Invalid pair. ProfileStep's family picker now shows JANG + profile dropdown shows JANGTQ2 — user stuck trying to reconcile.
+      **Fix (iter 66):** Couple family + profile. If profile was preserved (user manually set it), family stays preserved too. If profile was overwritten from the recommendation, derive family from the new profile name (`plan.profile.hasPrefix("JANGTQ") ? .jangtq : .jang`). The two fields now cannot disagree.
+      **Why not also fix method/hadamard/forceDtype this iter:** scope creep + those fields have less user-visible "inconsistent state" impact. A hadamard=true after user toggled it off is annoying but not INVALID. family+profile mismatch IS invalid — JANGTQ2 isn't a JANG-family profile and vice versa.
+      **Tests (+2) in WizardStepContinueGateTests.swift:**
+      - `test_sourceStep_applyRecommendation_does_not_unconditionally_set_family`: source-inspection ensures the bare `plan.family = (rec.recommended.family == "jangtq") ? .jangtq : .jang` pattern is gone from code (comment text ignored).
+      - `test_sourceStep_applyRecommendation_derives_family_from_profile`: ensures the replacement `plan.profile.hasPrefix("JANGTQ")` check is present.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift:253-280`. 165 Swift tests pass (was 163, +2). Python 314 + ralph 73 unchanged.
+      **Commit:** (this iteration)
 - [ ] **M126** — Low-priority polish: `examples.py:detect_capabilities` reads 3 config files (`config.json`, `jang_config.json`, `tokenizer_config.json`) with raw `json.loads`. The top-level `cmd_examples` try/except catches JSONDecodeError and emits `ERROR: JSONDecodeError: ...` — usable but doesn't name which file is bad. Matching M120's file-specific error format would help users diagnose a broken converted model. Scope: ~10 lines, 2 new tests. Deferred — only fires on a legitimate post-convert artifact corruption, not a user-input boundary.
 - [x] **M109 (new grep-audit class: force-unwraps)** — Grepped for `!` in production .swift (excluding tests, comments, != , string literals). Found TWO force-unwraps, both identical pattern: `FileManager.default.urls(for: ..., in: .userDomainMask).first!`.
       - `SettingsWindow.swift:338` — `.libraryDirectory` for "Open logs directory" button
