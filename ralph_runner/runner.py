@@ -46,14 +46,59 @@ def _yaml():
 
 
 def load_state() -> dict[str, Any]:
+    # M70: tolerate a torn read. A concurrent `--status` that happens to hit
+    # state.json mid-save used to raise JSONDecodeError and crash the caller.
+    # Even with atomic-rename saves (see save_state), a reader might catch
+    # the file between unlink+create on rare filesystems. Fall back to empty
+    # state on parse failure rather than crash — the next save_state will
+    # overwrite with the current in-memory state.
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text())
+        raw = STATE_PATH.read_text()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Don't silently eat this — surface to stderr so the user knows
+            # something went sideways, but don't halt cmd_status.
+            print(
+                f"[ralph] WARNING: state.json at {STATE_PATH} is unparseable; "
+                "falling back to empty state. Run --reset to clear.",
+                file=sys.stderr,
+            )
+            return {"combos": {}, "active_tier": None,
+                    "created": dt.datetime.now().isoformat()}
     return {"combos": {}, "active_tier": None, "created": dt.datetime.now().isoformat()}
 
 
 def save_state(state: dict[str, Any]) -> None:
+    """Persist state.json atomically.
+
+    M70 fix (iter 13): the previous `Path.write_text` is NOT atomic —
+    Python opens the file, writes, closes. A concurrent `--status` reader
+    (which doesn't take the Ralph lock) could see a truncated JSON
+    between the open-with-O_TRUNC and the final flush.
+
+    Fix: write to `state.json.tmp.<pid>` in the same directory, then
+    `os.rename` onto the target. POSIX `rename` is atomic WITHIN a single
+    filesystem — both source and destination are in `results/`, so the
+    reader always sees either the old complete JSON or the new complete
+    JSON, never a torn halfway state.
+    """
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2))
+    # pid in the tmp name keeps this safe under multi-process conditions
+    # (even though our lock should prevent them, defence in depth).
+    tmp_path = STATE_PATH.with_suffix(f".json.tmp.{os.getpid()}")
+    try:
+        tmp_path.write_text(json.dumps(state, indent=2))
+        os.rename(str(tmp_path), str(STATE_PATH))
+    except OSError:
+        # Clean up the tmp file on any failure — otherwise stale `.json.tmp.*`
+        # shrapnel accumulates in results/ and the next --status scan has to
+        # filter them out.
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def recover_interrupted(state: dict[str, Any]) -> int:
@@ -374,14 +419,14 @@ def cmd_next() -> int:
     # `--next` invocations would race on state.json AND dispatch two convert
     # subprocesses to macstudio simultaneously (violates no-concurrent-mlx).
     try:
-        acquire_lock()
+        acquire_lock(LOCK_PATH)
     except LockAcquireFailed as e:
         print(f"BLOCKED: lock held by another ralph instance: {e.holder}")
         return 0
     try:
         return _cmd_next_locked()
     finally:
-        release_lock()
+        release_lock(LOCK_PATH)
 
 
 def _cmd_next_locked() -> int:
@@ -472,10 +517,28 @@ def _cmd_next_locked() -> int:
 
 
 def cmd_reset() -> int:
-    if STATE_PATH.exists():
-        STATE_PATH.unlink()
-    print("state reset")
-    return 0
+    # M71: refuse to reset while a --next is running. Nuking state.json
+    # mid-convert would lose the in-flight combo's record AND desync
+    # whatever terminal 1 next tries to write. Lock is the same one cmd_next
+    # acquires, so if it's held we block with a clear message.
+    try:
+        acquire_lock(LOCK_PATH)
+    except LockAcquireFailed as e:
+        print(f"BLOCKED: --reset refused, lock held by {e.holder}")
+        return 0
+    try:
+        if STATE_PATH.exists():
+            STATE_PATH.unlink()
+        # Also clear any stranded tmp-state files from a crashed save_state.
+        for leftover in STATE_PATH.parent.glob("state.json.tmp.*"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+        print("state reset")
+        return 0
+    finally:
+        release_lock(LOCK_PATH)
 
 
 def main() -> None:

@@ -244,3 +244,116 @@ def test_pid_alive_dead():
     while runner._pid_alive(dead):
         dead += 1
     assert not runner._pid_alive(dead)
+
+
+# ────────────────────────────────────────────────────────────────────
+# M70: atomic state.json writes (iter 13)
+# ────────────────────────────────────────────────────────────────────
+
+def test_save_state_is_atomic_via_tmp_rename(state_path, monkeypatch):
+    """save_state must write via a tmp file then os.rename so a concurrent
+    reader never sees a truncated JSON. Verify by monkeypatching os.rename to
+    capture the source+dest paths; the source must be a tmp file in the same
+    directory (so rename stays atomic within one filesystem)."""
+    captured = {}
+
+    real_rename = os.rename
+
+    def spy_rename(src: str, dst: str) -> None:
+        captured["src"] = src
+        captured["dst"] = dst
+        real_rename(src, dst)
+
+    monkeypatch.setattr(runner.os, "rename", spy_rename)
+
+    runner.save_state({"combos": {"a": {"status": "pending"}}})
+    assert state_path.exists()
+    assert captured["dst"] == str(state_path)
+    assert captured["src"].startswith(str(state_path) + ".tmp."), \
+        f"tmp file must live in same dir for atomic rename, got {captured['src']!r}"
+    # tmp file must be gone now (renamed over the target).
+    assert not Path(captured["src"]).exists()
+
+
+def test_save_state_cleans_tmp_on_failure(state_path, monkeypatch):
+    """If rename fails, the tmp file must NOT remain on disk. Otherwise
+    stale state.json.tmp.* accumulate in results/ and future --status runs
+    see shrapnel."""
+    def boom(src: str, dst: str) -> None:
+        raise OSError("rename failure simulated")
+
+    monkeypatch.setattr(runner.os, "rename", boom)
+
+    with pytest.raises(OSError):
+        runner.save_state({"combos": {}})
+    # No tmp files should remain after the failure.
+    tmp_files = list(state_path.parent.glob("state.json.tmp.*"))
+    assert tmp_files == [], f"stale tmp files after failure: {tmp_files}"
+
+
+def test_load_state_tolerates_corrupt_json(state_path, capsys):
+    """A corrupt state.json (torn write, disk corruption, user edit) must not
+    crash --status. Fall back to empty state and print a warning."""
+    state_path.write_text("not valid json {{{")
+    result = runner.load_state()
+    assert result["combos"] == {}
+    assert result["active_tier"] is None
+    captured = capsys.readouterr()
+    assert "unparseable" in captured.err
+
+
+def test_save_load_roundtrip_survives_many_writes(state_path):
+    """Atomic rename loop — save many times, reload each time, verify no
+    torn state ever reaches load_state. This is a smoke test of the
+    write pattern; the real race-free guarantee comes from POSIX atomicity."""
+    for i in range(50):
+        runner.save_state({"combos": {f"k{j}": {"status": "pending"} for j in range(i)}})
+        loaded = runner.load_state()
+        assert len(loaded["combos"]) == i
+
+
+# ────────────────────────────────────────────────────────────────────
+# M71: cmd_reset respects the lock (iter 13)
+# ────────────────────────────────────────────────────────────────────
+
+def test_cmd_reset_refuses_when_lock_held(state_path, tmp_path, monkeypatch, capsys):
+    """--reset while --next is running would nuke state.json mid-convert.
+    Must block with a clear message."""
+    # Point LOCK_PATH at tmp so we don't touch the real results/ralph.lock.
+    lock = tmp_path / "ralph.lock"
+    monkeypatch.setattr(runner, "LOCK_PATH", lock)
+
+    # Pretend another live process holds the lock.
+    holder = {
+        "pid": os.getpid(),   # definitely alive
+        "host": os.uname().nodename,
+        "started_at": "2026-04-19T10:00:00",
+    }
+    lock.write_text(json.dumps(holder))
+
+    # Write a fake state.json — reset must NOT remove it when blocked.
+    state_path.write_text(json.dumps({"combos": {"a": {"status": "running"}}}))
+
+    rc = runner.cmd_reset()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "BLOCKED" in captured.out
+    # state.json must still exist — reset was refused.
+    assert state_path.exists(), "reset must NOT delete state.json when blocked"
+
+
+def test_cmd_reset_clears_tmp_shrapnel(state_path, tmp_path, monkeypatch):
+    """Successful reset cleans up any stranded state.json.tmp.* files left
+    by a crashed save_state."""
+    # Use a tmp lock so the acquire/release in cmd_reset operates on tmp.
+    lock = tmp_path / "ralph.lock"
+    monkeypatch.setattr(runner, "LOCK_PATH", lock)
+    # Put some crashed-tmp files in the results dir.
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    (state_path.parent / "state.json.tmp.99999").write_text("{}")
+    (state_path.parent / "state.json.tmp.99998").write_text("{}")
+    state_path.write_text("{}")
+    rc = runner.cmd_reset()
+    assert rc == 0
+    assert not state_path.exists()
+    assert list(state_path.parent.glob("state.json.tmp.*")) == []

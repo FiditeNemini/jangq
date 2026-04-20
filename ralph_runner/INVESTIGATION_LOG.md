@@ -449,3 +449,46 @@ sub-items in one patch.
 - M71: `--reset` should acquire the lock too — if a `--next` is running and user hits `--reset`, state.json gets deleted mid-convert. Currently no protection.
 
 **Next iteration should pick:** M70 (state.json read-during-write race) would be the natural third-leg of the Ralph reliability theme (iter 8 M54 recovery + iter 12 M55 lock + iter 13 M70 atomic state-write). Alternatively rotate OUT of Ralph-harness work since we've done iter 8 + iter 12 both there — pick Cat B DiagnosticsBundle anonymization (inert setting M62 remainder), or Cat A M42-M45 remaining publish items, or audit.py (765 lines, still untraced).
+
+---
+
+## 2026-04-19 iteration 13 — M70 atomic state-write + M71 reset respects lock
+
+**Angle:** Third leg of the Ralph reliability trilogy. iter 8 recovered interrupted state (M54), iter 12 prevented concurrent --next races (M55), iter 13 closes the remaining two state-integrity gaps in one batch.
+
+**Deep trace walkthrough:**
+1. Re-read `save_state` and `load_state` with a concurrent-reader-on-`--status` scenario in mind:
+   - `save_state` calls `STATE_PATH.write_text(json.dumps(state, indent=2))`. Under the hood: `open(O_TRUNC | O_CREAT | O_WRONLY)`, `write(bytes)`, `close()`. Between the O_TRUNC and the write, the file is EMPTY. Between partial write and close, the file contains HALF the JSON.
+   - `load_state` calls `STATE_PATH.read_text()` then `json.loads(raw)`. A reader hitting between open-O_TRUNC and close would read `""` or `"{\n  \"combos\": {\n    \"a__b\":"` and raise `JSONDecodeError`.
+   - `cmd_status` doesn't take the Ralph lock (reads should be fast and free). So running `--status` while `--next` is saving is a legitimate scenario that can crash the status display.
+2. **BUG M70 CONFIRMED.** Root cause: `Path.write_text` has no atomicity guarantee. Fix: POSIX `rename(2)` is atomic within one filesystem. Write to a sibling tmp file, then `os.rename(tmp, target)` — readers see only the old complete JSON or the new complete JSON, never torn.
+3. **Defence in depth:** Even with atomic rename, make `load_state` resilient to `JSONDecodeError`. Scenarios that could still break an atomic rename: disk corruption, user editing state.json by hand, cross-FS move if someone relocated `results/`, kill -9 during fsync on HFS+. Instead of crashing, return empty state + stderr warning.
+4. **M71 trace.** Scenario: terminal 1 is running `--next` (20-minute convert in progress). User in terminal 2 runs `--reset` to experiment with a different tier. `cmd_reset` calls `STATE_PATH.unlink()`. Terminal 1's next `save_state(info)` creates a FRESH state.json with only this combo's record — the rest of the matrix is lost. If the user also ran `--tier 1` to re-populate, they'd get duplicate records or missing combos depending on timing.
+5. **BUG M71 CONFIRMED.** Reset must respect the same lock as --next. If held, block with the `{pid, host, started_at}` holder info (same message format as cmd_next's BLOCKED). Consistency = one concept of "who owns the runner right now".
+6. **Python default-args gotcha caught during test writing:** `acquire_lock(path: Path = LOCK_PATH)` captures LOCK_PATH at DEFINITION TIME. Monkeypatching `runner.LOCK_PATH` in tests doesn't affect the captured default. Fix: call sites in `cmd_next` and `cmd_reset` now pass `LOCK_PATH` explicitly. Python evaluates module-global lookups at call time, so monkeypatching the module attribute correctly flows through. This is a common Python footgun worth pinning with a test (implicit via `test_cmd_reset_refuses_when_lock_held`).
+7. **Bonus: tmp-shrapnel cleanup.** `save_state` cleans up its tmp file on any rename-path OSError. `cmd_reset` additionally glob-removes any stranded `state.json.tmp.*` from past crashed saves — a nice self-healing behaviour for users who hit an "OSError rename failed" and don't know what to do.
+
+**Items touched:**
+- M70 [x] — atomic tmp-rename + JSONDecodeError-tolerant load
+- M71 [x] — reset now acquires the lock + clears tmp shrapnel on success
+
+**Tests (6 new, 4 M70 + 2 M71):**
+- `test_save_state_is_atomic_via_tmp_rename`: monkeypatches os.rename to inspect src/dst; asserts src is `state.json.tmp.*` in the same directory (so rename stays atomic within one FS).
+- `test_save_state_cleans_tmp_on_failure`: simulates an OSError on rename; asserts no stale tmp files remain after the save_state call raises.
+- `test_load_state_tolerates_corrupt_json`: writes garbage; asserts load_state returns empty state + warning on stderr (no crash).
+- `test_save_load_roundtrip_survives_many_writes`: 50-round smoke.
+- `test_cmd_reset_refuses_when_lock_held`: holds the lock with alive PID, asserts state.json survives + BLOCKED message.
+- `test_cmd_reset_clears_tmp_shrapnel`: plants leftover tmp files, asserts successful reset clears them.
+
+**Commit:** (this iteration)
+
+**Verification:** 44 ralph_runner tests pass (was 38). Python jang-tools + Swift unchanged at 231 + 96.
+
+**Closed-status tally:** 21 (prior) + M70 + M71 = 23 closed / 66 total = 35% closure rate.
+
+**Ralph-reliability trilogy complete:** M54 (iter 8) + M55 (iter 12) + M70 + M71 (iter 13) cover recovery, concurrency, and atomicity. The remaining M67/M68/M69 items (cross-host PID reuse, SIGKILL+PID-reuse, network FS) are genuinely pathological or documentation.
+
+**Next iteration should pick:** Rotate OUT of Ralph-harness work — we've spent 3 of the last 6 iterations there. Candidates in priority order:
+1. **audit.py (765 lines, never traced, Cat K debt since iter 8).** The most impactful untouched surface — Ralph's audit harness is what judges whether a convert passed, and we've never looked at how it does that.
+2. **Cat A remaining publish items (M42 verify cancellation, M43 publish progress streaming, M45 modelcard per-arch coverage).** Adopter journey is 80% done.
+3. **Cat E spawned-M easy picks:** M02 (data-shaped-but-wrong-content HF clone), M07 (non-standard nested model_type), M15 (publish token clear-on-complete), M22 (DiagnosticsBundle race during running convert).
