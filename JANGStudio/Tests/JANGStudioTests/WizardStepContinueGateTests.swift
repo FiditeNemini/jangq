@@ -476,11 +476,15 @@ final class WizardStepContinueGateTests: XCTestCase {
             "ProfileStep must react to profile changes. See M146 iter 68."
         )
         XCTAssertTrue(
-            src.contains("appendingPathComponent(\"\\(src.lastPathComponent)-\\(newProfile)\")"),
+            src.contains("autoOutputURL(for: src, profile: newProfile)"),
             """
             ProfileStep's profile-change handler must regenerate outputURL
             using the NEW profile name when the current URL matches the
-            auto-pattern. See M146 iter 68.
+            auto-pattern. See M146 iter 68. Post-M210 the regeneration
+            goes through autoOutputURL(for:profile:) which honors the
+            settings.outputNamingTemplate + family slot, replacing the
+            earlier literal "\\(src.lastPathComponent)-\\(newProfile)"
+            concatenation.
             """
         )
         XCTAssertTrue(
