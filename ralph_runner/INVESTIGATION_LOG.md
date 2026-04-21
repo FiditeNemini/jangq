@@ -6266,3 +6266,51 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **iter-141 must pick a DIFFERENT angle from F.** J (runtime parity) is the most-unpicked at 0. G/H/I have 1 each; F just hit 1. Prioritize J to catch up, or another angle to keep F/G/H/I on equal footing.
 
 **Next iteration should pick (DIFFERENT from angle F):** angle J (Swift vs Python runtime parity — tokenize the same string with both, diff token IDs), OR a second-round angle G (another adversarial scenario like emoji path, cmd-Q mid-convert, rename output mid-op), OR angle H (byte-verify another artifact like preprocessor_config.json or chat_template.json).
+
+---
+
+## 2026-04-20 iteration 141 — angle J — M208 Swift↔Python tokenizer byte-level parity (verified + regression-guarded)
+
+**Angle rotation:** iter 140 was F, iter 141 picks J (Bundled-runtime parity). Angle tally pre-141: F=1, G=1, H=1, I=1, J=0. J was overdue.
+
+**3 new questions asked:**
+- Q1: What tokenizer does jang-runtime actually use, and does it load the same files as Python's AutoTokenizer?
+- Q2: For real test strings, do Swift and Python emit identical token IDs on the same bundle?
+- Q3: Are there edge cases (numeric tokens, punctuation, multi-word phrasing) where they diverge?
+
+**Deep trace walkthrough:**
+1. **Found the Swift tokenizer implementation.** `jang-runtime/Sources/JANG/JANGTokenizer.swift` (349 lines) — standalone BPE implementation with byte-level encoder, merges table, special tokens, chat template. Loads tokenizer.json + tokenizer_config.json exactly like Python's AutoTokenizer.
+2. **Checked existing test coverage.** `JANGTQTokenizerTests.swift` uses a SYNTHETIC "tiny vocab" fixture — exercises loader code paths but never verifies encoder correctness against a real tokenizer. A BPE bug (wrong merge priority, space-prefix handling, byte-encoder mapping) would ship undetected.
+3. **Captured Python reference IDs.** Ran `python3 -c "from transformers import AutoTokenizer; tok = AutoTokenizer.from_pretrained('/Users/eric/models/Qwen3.6-35B-A3B-JANG_2L'); ..."`. Got token IDs for 3 test strings covering: ASCII+punctuation, multi-word sentence, expression with numbers.
+4. **Wrote `JANGTokenizerPythonParityTests.swift`** with those IDs as hardcoded XCTAssertEqual references. 2 tests: primary parity + out-of-vocab regression guard. XCTSkip when fixture not present (CI-friendly).
+5. **Ran against the real fixture.** 2/2 pass. Swift byte-identical to Python on all strings. Concrete command output captured: both tests green in ~1 second each.
+6. **Full jang-runtime suite runs clean.** 64 tests, 4 pre-existing skips, 0 failures. New tests integrated without disturbing the existing 62.
+
+**Meta-lesson — parity tests need REAL reference data, not synthetic fixtures.** `JANGTQTokenizerTests.swift` buildTinyTokenizerDir exercises the LOADER but nothing about encoder correctness. A synthetic fixture can only verify structural plumbing. A real model's tokenizer.json + a reference capture from the canonical implementation verifies SEMANTIC correctness. **Rule: for runtime-parity tests, the fixture MUST be a real bundle + reference output. Synthetic fixtures give false confidence that encoders produce correct output.**
+
+**Meta-lesson — capture-reference-then-compare > cross-call-at-test-time.** A test that spawns Python from Swift at test-time adds a Python dep + is 15× slower + flaky on CI. Capture once (document the capture command in the test docstring), paste as constants, regenerate on tokenizer version bumps. **Rule: for cross-language parity tests, ONE-SHOT capture-reference beats LIVE cross-call. Fast, reliable, CI-friendly.** Parallels iter-134 M197's substring-in-block pattern — pragmatic evidence beats slow-but-robust infrastructure.
+
+**Meta-lesson — regression guards formalize currently-correct behavior.** The fact Swift MATCHES Python today isn't the interesting property — the test PINS that match against future drift. A BPE refactor 6 months out could introduce a subtle bug; without M208, users see garbage generation before anyone notices. With M208, a failing test fires the instant the refactor lands. **Rule: when you verify a correctness property manually, codify it. "Works today" ≠ "works tomorrow" for anything complex enough that a future contributor might "simplify".** Parallels iter-134 M197's rule.
+
+**Meta-lesson — fixture-skip is the right CI/local split.** XCTSkip on absent fixture → CI without the 10 MB model file passes (skip is neutral, not red). Local dev with the fixture exercises full parity. Better than: checking fixture into git (repo bloat 10+ MB), failing on absence (breaks CI), or only running in manual dev steps (bit-rot). **Rule: for tests requiring a large fixture, use XCTSkip + document the fixture path + acquisition in the test doc comment. Best of both worlds.**
+
+**Meta-lesson — angle J was invaluable even when the result was "it works".** Pre-141 there was zero evidence that Swift's hand-rolled BPE implementation matches Python's reference. "It seems to produce plausible output" is NOT evidence. 30 minutes of real Python capture + real Swift test + byte diff established CONCRETE proof that the parity property holds today + pinned it against future regression. **Rule: angle J isn't only for finding bugs — its primary value is establishing EVIDENCE that parity holds. Absence of evidence is not evidence of absence.**
+
+**Items touched:**
+- M208 [x] — Swift↔Python tokenizer parity verified + regression-guarded. 2 new tests in `JANGTokenizerPythonParityTests.swift` with hardcoded Python reference IDs from live AutoTokenizer capture.
+- M209 [ ] — NEW, spawned: further parity sweep (chat template apply, decode round-trip, sampler temp=0, stop-token multi-EOS, SSE framing, codebook dequant).
+
+**Commit:** (this iteration)
+
+**Verification:** 2 new M208 parity tests pass against real Qwen3.6 fixture. 64/64 jang-runtime tests pass (4 pre-existing skips). 26/26 collectible ralph_runner invariants unchanged (parity test lives in jang-runtime's Swift suite, not ralph_runner Python). `swift test --filter JANGTokenizerPythonParityTests` captured live: 2 passed in ~2 seconds total.
+
+**Closed-status tally:** 157 (iter 140) + M208 = 158 items touched. 5 open (M201, M203, M205, M207, M209).
+
+**Angle tally per completion bar §7:** F=1, G=1, H=1, I=1, J=1. ALL FIVE NEW ANGLES NOW HIT AT LEAST ONCE. Need ≥2 each = 10 iters total; 5 done, 5 to go. Next round: revisit each angle for a second independent finding.
+
+**Forecast pipeline:**
+- M97, M117, M124, M128, M80 (pre-iter-111 deferred)
+- M201/M203/M205/M207/M209 — spawned audits, each its own iter.
+- **iter-142 must pick a DIFFERENT angle from J.** F/G/H/I are all at 1 → any of them is fine. Second-round questions per angle should target a DIFFERENT surface than round 1 (e.g., a different setting for I, a different artifact for H, a different adversarial scenario for G).
+
+**Next iteration should pick (DIFFERENT from angle J):** second-round G (adversarial with emoji/unicode path, cmd-Q mid-convert, parallel job collision), OR second-round F (cold-start beyond Step 1 — ArchitectureStep's empty state), OR second-round H (byte-verify preprocessor_config.json or generation_config.json preservation), OR second-round I (another suspected lie from M201's list — outputNamingTemplate or revealInFinderOnFinish).
