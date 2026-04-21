@@ -41,6 +41,31 @@ struct SourceStep: View {
                     Spacer()
                     Button("Choose Folder…", action: pickFolder)
                 }
+                // M206 (iter 140): always-visible cold-start guidance when
+                // no folder is picked. Pre-M206 a first-time user saw only
+                // "No folder selected" + "Choose Folder…" — the explanation
+                // of WHAT to pick lived exclusively in the header InfoHint
+                // (hover-only). A stranger who doesn't discover the (i)
+                // hover icon gets zero instruction. Now visible without
+                // interaction: what the folder should contain, a concrete
+                // example path, and a link to huggingface.co for users
+                // who don't have a model locally.
+                if coord.plan.sourceURL == nil {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("A HuggingFace model directory contains `config.json` and one or more `.safetensors` files.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Example: `~/Downloads/Qwen3-0.6B-Base/`")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let hfURL = URL(string: "https://huggingface.co/models?sort=downloads") {
+                            Link("Don't have one yet? Browse models on HuggingFace →",
+                                 destination: hfURL)
+                                .font(.caption)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
             } header: {
                 HStack(spacing: 4) {
                     Text("Source model folder")

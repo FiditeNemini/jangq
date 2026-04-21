@@ -6216,3 +6216,53 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **NEW (angle mandate):** iter-140 MUST pick F (cold-start stranger — first launch UX) or J (runtime parity — Swift vs Python on same bundle). Both unpicked.
 
 **Next iteration should pick (DIFFERENT from angle G):** angle F (cold-start stranger — what does JANGStudio look like on fresh install with no memory files, no prior state, 0 seconds in?), OR angle J (Swift/Python runtime parity — tokenize the same string with both and diff the token IDs).
+
+---
+
+## 2026-04-20 iteration 140 — angle F — M206 SourceStep cold-start guidance (always-visible replaces hover-only)
+
+**Angle rotation:** iter 139 was G → iter 140 picks F (Cold-start stranger). Angle tally: F=1, G=1, H=1, I=1, J=0. Still need J (and +1 more on each of F/G/H/I) for completion bar §7.
+
+**3 new questions:**
+- Q1: What does SourceStep show at second 3 on fresh launch, zero prior state?
+- Q2: If the user doesn't hover the (i) InfoHint icon, do they see any instruction?
+- Q3: What if they don't have an HF model locally — is there guidance for that?
+
+**Deep trace walkthrough:**
+1. **Entry path.** `JANGStudioApp.swift:11` → `WizardView()` → `WizardCoordinator.active = .source` default → `SourceStep`. Fresh-launch lands here with `coord.plan.sourceURL == nil`.
+2. **Empty-state content (pre-M206):** Section header "Source model folder" + InfoHint hover-only; row content "No folder selected" in secondary foreground + "Choose Folder…" button. Nothing else.
+3. **Stranger-persona outcome:** at second 3, a first-time user sees "Source model folder / No folder selected / Choose Folder…". No instruction on what to pick. No concrete example. No indication the (i) icon has help. No escape hatch for users without a local model.
+4. **Searched for onboarding.** No WelcomeView, no OnboardingSheet. The app assumes every user arrives knowing what a HuggingFace model directory looks like.
+5. **Fix approach: always-visible inline guidance in the empty state.** Rejected modal onboarding (high-friction, tends to be dismissed). Chose inline `VStack` below the "No folder selected" row, gated by `sourceURL == nil` so it disappears once a folder is picked (no nagging of returning users).
+6. **Three lines chosen carefully:**
+   - Concrete artifacts named: `config.json` + `.safetensors`.
+   - Concrete example path: `~/Downloads/Qwen3-0.6B-Base/` — a small real model a stranger can download in under a minute.
+   - Escape-hatch link: `huggingface.co/models?sort=downloads` — `sort=downloads` specifically targets popular starter models.
+7. **Build clean, 4 source-inspection invariants pin the guidance shape:** empty-state gate, required-filename mentions, concrete example path (regex match for `~/Downloads/`), and clickable Link (not just Text) to HF.
+
+**Meta-lesson — hover-only help is invisible to strangers.** `InfoHint` is a lovely UX affordance for users who know the icon grammar. Strangers at second 3 don't hover random icons. **Rule: for every Step-1-equivalent entry view, if the user-facing text is insufficient to explain the next action WITHOUT mouseover, the view fails its stranger-proof bar. Move critical hints out of hover-only surfaces into always-visible inline text.** Parallels iter-135 M198's "pin CAPTURE and RENDER" at a UX scale: the RENDER must be visible, not latent behind interaction.
+
+**Meta-lesson — one concrete example beats three abstract sentences.** `"HuggingFace model directory"` = abstract, means nothing to strangers. `~/Downloads/Qwen3-0.6B-Base/` = visually pattern-matchable against their Finder. **Rule: for cold-start guidance, prefer one concrete example path over three sentences of abstract description. Examples cost ~10 characters; omitting them costs users minutes of confusion.** Unix docs wisdom: "show the command, not the man page, when the reader's goal is to run the thing".
+
+**Meta-lesson — escape hatches matter.** A stranger who doesn't have a local HF model gets stuck at step 0 if the guidance just says "pick a HuggingFace model directory". The `Link(... huggingface.co/models?sort=downloads)` provides the escape. Without it, that user closes the app and gives up. **Rule: for any workflow whose first step requires a precondition users might not meet, include a link or button pointing at how to meet it. Don't assume readers arrive pre-configured.**
+
+**Meta-lesson — angle F catches bugs of ABSENCE that code audits can't see.** 100+ iters of angle-C security work, angle-H output audits, angle-I setting-lie audits — none would have surfaced the cold-start gap. Angle F is SPECIFICALLY about asking "what's missing from the stranger's perspective?" **Rule: angle F must be run regularly, not just to satisfy the completion bar. Bugs of absence are by-definition invisible to code scanning alone.**
+
+**Items touched:**
+- M206 [x] — always-visible cold-start guidance on SourceStep empty state. 4 invariants pin the guidance shape.
+- M207 [ ] — NEW, spawned: apply the M206 pattern to other empty-state views (ArchitectureStep, ProfileStep, RunStep pre-start, VerifyStep post-finish, PublishToHFSheet).
+
+**Commit:** (this iteration)
+
+**Verification:** 4 new M206 invariants pass. 26/26 collectible ralph_runner invariants total (was 22, +4). `xcodebuild build-for-testing` clean. `SourceStep.swift:33-75` shows the new always-visible block in the empty state.
+
+**Closed-status tally:** 156 (iter 139) + M206 = 157 items touched. 4 open (M201, M203, M205, M207).
+
+**Angle tally per completion bar §7:** F=1, G=1, H=1, I=1, J=0. Target ≥2 per angle = 10 iters total; 4 done, 6 to go.
+
+**Forecast pipeline:**
+- M97, M117, M124, M128, M80 (pre-iter-111 deferred)
+- M201 Settings lies (8 candidates) / M203 HF card claims (5) / M205 preflight gaps (4) / M207 cold-start sweep (5 views)
+- **iter-141 must pick a DIFFERENT angle from F.** J (runtime parity) is the most-unpicked at 0. G/H/I have 1 each; F just hit 1. Prioritize J to catch up, or another angle to keep F/G/H/I on equal footing.
+
+**Next iteration should pick (DIFFERENT from angle F):** angle J (Swift vs Python runtime parity — tokenize the same string with both, diff token IDs), OR a second-round angle G (another adversarial scenario like emoji path, cmd-Q mid-convert, rename output mid-op), OR angle H (byte-verify another artifact like preprocessor_config.json or chat_template.json).
