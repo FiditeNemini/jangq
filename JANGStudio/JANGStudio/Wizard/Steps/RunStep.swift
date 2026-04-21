@@ -4,6 +4,10 @@ import SwiftUI
 struct RunStep: View {
     @Bindable var coord: WizardCoordinator
     @Environment(AppSettings.self) private var settings
+    // M204 (iter 139): inject ProfilesService so start() can re-estimate
+    // output size for the final disk-space re-check. Matches the
+    // ProfileStep injection pattern (same service, same usage).
+    @Environment(ProfilesService.self) private var profilesSvc
     @State private var phase: (n: Int, total: Int, name: String) = (0, 5, "idle")
     @State private var tick: (done: Int, total: Int, label: String)? = nil
     @State private var logs: [String] = []
@@ -181,6 +185,33 @@ struct RunStep: View {
 
     private func start() async {
         guard coord.plan.run != .running else { return }
+        // M204 (iter 139): cheap final disk-space re-check BEFORE spawning
+        // the Python subprocess. The Step-3 preflight can be minutes stale
+        // (user reads the preview card, disk fills via a concurrent
+        // download or Time Machine snapshot). Pre-M204, a user whose disk
+        // filled between preflight-green and Start ran convert for 20+
+        // minutes before ENOSPC mid-shard, then had to clean up partial
+        // output. The re-check reuses PreflightRunner's estimator so
+        // "we have N GB / need M GB" math is consistent with Step 3.
+        if let dst = coord.plan.outputURL {
+            let parent = dst.deletingLastPathComponent()
+            let rv = try? parent.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            let free = Int64(rv?.volumeAvailableCapacityForImportantUsage ?? 0)
+            let estimated = PreflightRunner.estimateOutputBytes(
+                plan: coord.plan,
+                profiles: profilesSvc.profiles
+            )
+            if estimated > 0 && free < estimated {
+                coord.plan.run = .failed
+                logs.append(
+                    "[preflight] Disk space dropped below the estimated "
+                    + "output size since preflight. Need ~\(estimated / 1_000_000_000) GB, "
+                    + "have \(free / 1_000_000_000) GB free on the output volume. "
+                    + "Free up space or pick a different output folder, then retry."
+                )
+                return
+            }
+        }
         coord.plan.run = .running
         cancelRequested = false
         sawSuccessfulDone = false   // M138: reset for the new run.

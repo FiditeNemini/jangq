@@ -6165,3 +6165,54 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **NEW:** verify the generated Python snippet is executable: copy to a scratch dir, `python3 snippet.py`, assert no ImportError / NameError.
 
 **Next iteration should pick (DIFFERENT from angle H):** angle F (cold-start stranger — what is the first-launch UX like?), OR angle G (adversarial — cancel mid-convert, emoji path, disk full, rename mid-op), OR angle J (Swift/Python runtime parity — tokenization, sampler, stop-token on same bundle).
+
+---
+
+## 2026-04-20 iteration 139 — angle G — M204 RunStep disk-space re-check before convert spawn
+
+**Angle rotation:** iter 138 was H → iter 139 picks G (Adversarial user). Angle tally so far: F=0, G=1, H=1, I=1, J=0. Completion bar requires ≥ 2 per angle — F and J remain fully unpicked.
+
+**3 new questions asked:**
+- Q1: Does JANGStudio (the Mac app) have a disk-space preflight independent of jang-server's 507 check? (Yes — `PreflightRunner.swift:170`.)
+- Q2: Between preflight (Step 3) and convert spawn (Step 4), can disk state drift? (Yes — arbitrary wall-clock.)
+- Q3: Is there a final re-check inside RunStep.start() before the subprocess fires? (NO — confirmed via `grep` of `start()` body.)
+
+**Deep trace walkthrough:**
+1. **Mapped the existing disk preflight.** `PreflightRunner.diskSpace` uses `volumeAvailableCapacityForImportantUsageKey` (APFS + purgeable-cache aware) and `estimateOutputBytes` (profile-aware, dtype-aware, 1.05× overhead). Called from `ProfileStep.refresh()` on profile selection.
+2. **Mapped the spawn site.** `RunStep.swift:163-167` → `.onAppear { if idle { Task { await start() } } }`. `start()` pre-M204: guard running-state → `coord.plan.run = .running` → build args → `PythonRunner(...)` → stream events. NO disk re-verification.
+3. **Concrete adversarial scenario:** user picks source (60 GB output estimated), Step 3 preflight green with 100 GB free. User spends 5 minutes reading the preview card while a concurrent download consumes 50 GB. Continue → Step 4 auto-starts. 20 minutes into convert, ENOSPC at shard 7/15. User sees PythonRunner.swift:38-40's translated "Out of disk space" — good message — but 20 minutes of compute wasted + partial output cleanup.
+4. **Fix decision: cheap re-check in start() using the EXISTING estimator.** Rejected (a) re-running the entire PreflightRunner (too heavy), (b) re-implementing the math (creates a drift-prone third formula), (c) ignoring it (real user-hostile outcome). Chose (d) reuse `PreflightRunner.estimateOutputBytes` at the top of `start()`.
+5. **Implementation:**
+   - Injected `ProfilesService` into RunStep via `@Environment` (matches ProfileStep pattern).
+   - Added disk re-check at the top of `start()` — BEFORE state transition, BEFORE any subprocess activity.
+   - On failure: `run = .failed`, append a remediation-pattern log message (symptom + numbers + next-action), return.
+6. **Built + tested.** `xcodebuild build-for-testing` clean. `PreflightRunnerTests` all pass (the estimator is unchanged). 5 new source-inspection invariants in `ralph_runner/tests/test_runstep_disk_recheck.py`: existence of ProfilesService injection, call to `estimateOutputBytes`, use of `volumeAvailableCapacityForImportantUsage`, ORDERING (disk check BEFORE state transition AND subprocess spawn), and log message shape.
+
+**Meta-lesson — time-decay between checks and actions is a bug class unto itself.** A preflight check is a SNAPSHOT, not a guarantee. The longer the gap between check-time and action-time, the more stale the check becomes. For cheap re-checks (< 10 ms), there's no reason not to re-verify immediately before the action. **Rule: for every preflight that gates an expensive action, add a final cheap re-check AT THE ACTION'S CALL SITE. The preflight is for user feedback; the at-site re-check is for actual safety.** Parallels iter-113 M178's "validate at submission AND at fire time" for webhook URLs — same shape.
+
+**Meta-lesson — ordering pins are crucial for state-transition invariants.** `test_start_fn_compares_free_vs_estimated_before_running` pins not just "the check exists" but "before state transition AND before subprocess spawn". Without that pin, a well-meaning refactor could move the check post-`.running`, causing brief UX flashes + potential partial-state leaks on failure. **Rule: when a check is composed with state transitions or spawns, pin both existence AND ordering. `disk_compare_idx < running_assign_idx < runner_create_idx` is the shape.** Parallels iter-132 M195's startup-backfill-before-load ordering pin.
+
+**Meta-lesson — reuse the earlier step's formula, don't reimplement.** A naive fix would inline a fresh disk formula in `start()`. That creates a third place-of-truth (PreflightRunner + Python estimate_model.predict + the re-check). Three formulas drift. By calling `PreflightRunner.estimateOutputBytes` directly, Step-3 gate and Step-4 re-check use literally the same code — consistency guaranteed. **Rule: when a cross-step check needs math the earlier step already implemented, CALL the earlier step's function. One formula-point-of-truth is cheaper + closes drift bugs before they start.**
+
+**Meta-lesson — angle G consistently finds subtler bugs than angle C.** Angle C (security) catches "this endpoint is unprotected" or "this secret leaks". Angle G catches "this workflow assumes something that's not true after N minutes". The latter is more insidious because there's no bug TODAY unless specific environmental conditions line up. **Rule: rotate through adversarial/stranger-persona angles regularly. They catch state-dependent bugs that static code audits (angle C) miss.** This reinforces iter-137/138's meta-lessons about angle-rotation value.
+
+**Items touched:**
+- M204 [x] — RunStep final disk-space re-check. ProfilesService injection + cheap re-verification + remediation-pattern log. 5 source-inspection invariants including ordering pin.
+- M205 [ ] — NEW, spawned: audit other preflight checks for the same "check → time passes → act" gap (RAM, outputUsable, sourceReadable, bundledPythonHealthy).
+
+**Commit:** (this iteration)
+
+**Verification:** 5 new M204 invariants pass. PreflightRunnerTests pass. 360/360 jang-tools, 69/69 jang-server, 22/22 collectible ralph_runner invariants green. `xcodebuild build-for-testing` clean.
+
+**Closed-status tally:** 155 (iter 138) + M204 = 156 items touched. 3 open (M201, M203, M205).
+
+**Angle tally (per completion bar §7):** F=0, G=1, H=1, I=1, J=0. Need ≥ 2 per angle = 10 total iters across F-J. 3 down, 7 to go.
+
+**Forecast pipeline:**
+- M97, M117, M124, M128, M80 (pre-iter-111 deferred items)
+- M201 Settings-lie audit (8 candidates)
+- M203 HF card output-correctness (5 claims)
+- M205 preflight→action re-check gaps (4 check types)
+- **NEW (angle mandate):** iter-140 MUST pick F (cold-start stranger — first launch UX) or J (runtime parity — Swift vs Python on same bundle). Both unpicked.
+
+**Next iteration should pick (DIFFERENT from angle G):** angle F (cold-start stranger — what does JANGStudio look like on fresh install with no memory files, no prior state, 0 seconds in?), OR angle J (Swift/Python runtime parity — tokenize the same string with both and diff the token IDs).
