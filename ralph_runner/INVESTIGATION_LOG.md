@@ -6661,3 +6661,59 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 **Critical path:** only §8 (and §1-6 if any are not satisfied) remain. §8 is the heaviest — a real stranger-persona walk through folder-pick → preflight → convert → verify → load → test-inference → HF upload → fresh-device re-download. This is multi-iter scope.
 
 **Next iteration should pick (DIFFERENT from angle A):** start §8 work via angle F round-3 (cold-start ProfileStep — next wizard step beyond the M206/M218 fixes), OR angle G round-3 (cmd-Q mid-convert cleanup verification — concrete adversarial scenario), OR angle B (data-flow trace through the convert subprocess JSONL pipe), OR a §1-6 audit pass.
+
+---
+
+## 2026-04-20 iteration 149 — angle F round-3 — M223 TestInferenceSheet sample prompts + reasoning-model hint
+
+**Angle rotation:** iter 148 was A, iter 149 picks F round-3. Targets §8 stage #6 (test-inference). Walking the stranger-walk one stage at a time — this is the moment a user hits "Test Inference" in Step 5.
+
+**3 new questions asked:**
+- Q1: TestInferenceSheet empty state — self-documenting prompt field?
+- Q2: For VL models, does the image drop zone explain itself?
+- Q3: Does the sheet hint at temperature/max-tokens defaults?
+
+**Deep trace walkthrough:**
+1. **Empty state pre-M223** (TestInferenceSheet.swift:143-159) showed only "No messages yet" + a one-line variant of "Type a prompt to see how your converted model responds". No example. No demonstration of model capabilities.
+2. **Reasoning-model failure mode invisible.** Memory M121 (iter 45) documents: Qwen3.6 / GLM-5.1 / MiniMax M2.7 wrap prompts in `<think>...</think>` blocks consuming 100+ tokens before answering. A 150-token smoke test on these models returns no visible answer. The "Skip thinking" Settings toggle fixes this — but it's buried in a gear-icon popover (line 252) that strangers don't think to open.
+3. **Concrete cold-start consequence:** stranger picks Qwen3.6 model, hits Test Inference, types "Hello", sees blank assistant response, assumes model is broken, loses trust. This is exactly the "stranger-proof" failure §8 is designed to eliminate.
+4. **Fix applied:**
+   - Three sample-prompt buttons: factual ("capital of France"), reasoning ("why is sky blue"), creativity ("poem about Apple Silicon"). Each prefills (doesn't auto-send) so user can tweak before committing.
+   - Conditional reasoning-model hint banner: appears when `isReasoningModelType(modelType) && !vm.skipThinking`. Orange-foreground caption explaining the failure mode + naming the EXACT toggle to fix it. Disappears once user toggles Skip-thinking on (no nag).
+   - Both helpers extracted to private functions for testability.
+5. **Tests:** 5 source-inspection invariants including a NEW PATTERN: escape-hatch-hint pin (`test_skip_thinking_toggle_exists_in_settings_popover`). The hint sends users to Settings → Skip thinking; if that toggle ever vanishes, the hint sends users on a wild goose chase. The invariant pins BOTH ends of the user's path.
+
+**Meta-lesson — escape-hatch hints must point at REAL escapes.** When a hint or error message tells the user "do X", write a paired invariant pinning that X actually exists. **Rule: hints are promises. Pin both the hint text AND the destination it references. Refactors that delete the destination must update the hint OR reintroduce the destination.** Generalizes iter-135 M198's "pin CAPTURE and RENDER" — both ends of the user-action path must be guaranteed.
+
+**Meta-lesson — conditional hints respect the audience.** An always-visible "this might be a reasoning model" caption would be irrelevant noise for non-reasoning users. Gating on `(isReasoning && !alreadyFixed)` makes the hint appear only when actionable. **Rule: cold-start hints fire at the exact moment they're useful — when the user could hit the failure mode AND hasn't already worked around it. Otherwise the hint becomes UI noise that erodes trust.** Inverse of M206/M218's "always-visible default" — those framed first-step purpose; this one is for situational gotchas.
+
+**Meta-lesson — sample buttons > placeholder text for variety.** A `TextField` placeholder shows ONE example. Three buttons demonstrate THREE distinct prompt styles, making it visceral that the model can do all three. **Rule: when empty state could benefit from concrete examples, prefer 2-3 buttons over a single placeholder. Friction of clicking a button is lower than friction of typing the same text from memory.**
+
+**Items touched:**
+- M223 [x] — TestInferenceSheet sample-prompt buttons + reasoning-model conditional hint. 5 invariants including escape-hatch-pin pattern.
+- M224 [ ] — NEW, spawned: continue §8 stranger-walk at remaining stages (#7 HF upload first-visit, #8 fresh-device re-download, #5 load progress feedback).
+
+**Commit:** (this iteration)
+
+**Verification:** 5 new M223 invariants pass. 52/52 collectible ralph_runner invariants (was 47, +5). xcodebuild build-for-testing clean.
+
+**Closed-status tally:** 165 (iter 148) + M223 = 166 items touched. 12 open (M201, M203, M205, M207, M209, M211, M213, M215, M217, M219, M222, M224).
+
+**Completion bar snapshot:**
+- §1-6 (PROMPT.md criteria) — not explicitly assessed.
+- §7 (F-J each ≥2) ✅ since iter 146.
+- §8 (stranger end-to-end walk) — STAGE-BY-STAGE PROGRESS:
+  - stage #1 folder-pick: M206 ✅
+  - stage #2 preflight: M204 ✅
+  - stage #3 convert: M212 ✅
+  - stage #4 bundle-validate: M208/M216 ✅
+  - stage #5 load: PENDING (M224 spawn)
+  - stage #6 test-inference: M223 ✅ this iter
+  - stage #7 HF upload: M214 partial (sanitizer); first-visit framing PENDING (M224 spawn)
+  - stage #8 fresh-device re-download: PENDING (M224 spawn — most expensive stage)
+- §9 ✅ since iter 147.
+- §10 ✅ since iter 148.
+
+**Critical path: §8 stages #5, #7, #8.** Stage #8 is heaviest; stages #5 + #7 are tractable in 1-2 iters each.
+
+**Next iteration should pick (DIFFERENT from angle F):** §8 stage #7 via angle F round-4 — wait no, can't repeat F. Pick angle G round-3 OR H round-3 OR I round-3 OR J round-3 OR a non-F-G-H-I-J angle (A/B/C/D/E from PROMPT.md). Recommended: angle B (data-flow) for §8 stage #5 (load) — trace what happens when a stranger picks a freshly-downloaded model directory and hits Test Inference cold-start, including the load-time phase.

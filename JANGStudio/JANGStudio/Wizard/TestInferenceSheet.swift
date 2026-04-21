@@ -141,7 +141,7 @@ struct TestInferenceSheet: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 12) {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 36))
                 .foregroundStyle(.tertiary)
@@ -153,9 +153,71 @@ struct TestInferenceSheet: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
+
+            // M223 (iter 149): suggested-prompt buttons + reasoning-model
+            // hint. Pre-M223 a stranger arriving at an empty Test Inference
+            // sheet had no example of what a good test prompt looks like —
+            // they'd type "Hello" and see a generic response, learning
+            // nothing about model capabilities. The 3 suggested prompts
+            // demonstrate (a) factual recall, (b) reasoning, (c) creativity
+            // in one click each. For reasoning models (Qwen3.6 / GLM-5.1 /
+            // MiniMax M2.7), an additional hint surfaces the documented
+            // failure mode where 150-token smoke tests are eaten by
+            // <think>...</think> blocks → user sees no answer + assumes
+            // model is broken. The hint points at the existing "Skip
+            // thinking" Settings toggle which fixes this.
+            VStack(spacing: 6) {
+                Text("Try a sample prompt:")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    samplePromptButton("What is the capital of France?")
+                    samplePromptButton("Explain why the sky is blue.")
+                    samplePromptButton("Write a short poem about Apple Silicon.")
+                }
+            }
+            .padding(.top, 4)
+
+            if Self.isReasoningModelType(modelType) && !vm.skipThinking {
+                Text("Reasoning model detected. If your first answer looks empty or cut off, open Settings (⚙) and turn on \"Skip thinking\" — this model wraps prompts in `<think>…</think>` by default which eats short test budgets.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 6)
+            }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 40)
+        .padding(.vertical, 32)
+    }
+
+    /// M223 (iter 149): one-click sample prompt. Tapping prefills the
+    /// prompt field; user can edit before sending or just hit Send.
+    /// Stays as a Button (not Send-on-tap) because a stranger may
+    /// want to read the suggested prompt before committing — and may
+    /// realize they want to tweak the wording.
+    private func samplePromptButton(_ prompt: String) -> some View {
+        Button(prompt) {
+            vm.promptText = prompt
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .font(.caption2)
+        .lineLimit(1)
+    }
+
+    /// M223 (iter 149): identify reasoning models that need the
+    /// Skip-thinking toggle to be useful for short smoke tests. The
+    /// list mirrors the comment block in TestInferenceViewModel's
+    /// `--no-thinking` flag handling (M121 iter 45) — Qwen3.6,
+    /// GLM-5.1, MiniMax M2.7. Future reasoning models added to JANG
+    /// should be added here too. Match is substring-based on
+    /// model_type to handle dotted variants ("qwen3_5_moe" matches
+    /// "qwen3_5", etc.).
+    private static func isReasoningModelType(_ modelType: String) -> Bool {
+        let mt = modelType.lowercased()
+        return mt.contains("qwen3_5") || mt.contains("qwen3_6") ||
+               mt.contains("glm") || mt.contains("minimax")
     }
 
     // MARK: - Footer
