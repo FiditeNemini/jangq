@@ -6600,3 +6600,64 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - §10 (README-USER.md spot-check with command evidence) — PENDING.
 
 **Next iteration should pick (DIFFERENT from angle D):** §8 stranger-persona end-to-end walkthrough audit (PROMPT.md angle A or a round-3 F), OR §10 README-USER.md spot-check (angle H-adjacent), OR close any remaining spawned M-item.
+
+---
+
+## 2026-04-20 iteration 148 — angle A (user-journey) — M221 §10 README-USER.md command-output verification + drift-prevention invariants
+
+**Angle rotation:** iter 147 was D, iter 148 picks A (user-journey) targeting completion-bar §10. §10 wants README-USER.md spot-check backed by command-output evidence, not visual read.
+
+**3 new questions asked:**
+- Q1: What numeric/factual claims does README-USER.md make that a stranger would verify?
+- Q2: Can each be checked with a live command producing expected output?
+- Q3: Are there outdated counts / dead links / wrong commands that would confuse strangers?
+
+**Deep trace walkthrough:**
+1. **Inventoried claims.** README-USER.md has ~20 verifiable claims (subcommand count, audit row count, profile names, Settings tabs/fields, doc paths, PyPI package, Python imports, preflight check count).
+2. **Live-verified each claim:**
+   - `python -m jang_tools --help` → 16 subcommands. **README said 15. DRIFT.**
+   - `VerifyID` enum cases → 14. **README said 12. DRIFT.**
+   - `pip install 'jang[mlx]'` → live PyPI check confirms `jang` 2.3.2 + mlx extra exists. ✓
+   - `from jang_tools.loader import load_jang_model` → importable. ✓
+   - `from jang_tools.load_jangtq_vlm import load_jangtq_vlm_model` → importable. ✓
+   - `SettingsWindow.swift` → 5 tabs. ✓
+   - `AppSettings.swift` → 27 stored vars (post-M200 count). ✓
+   - `VALID_PROFILES` → 15 JANG + 3 JANGTQ; all in README cheat sheet. ✓
+   - `docs/adoption/{README.md, PORTING.md, EXAMPLES/}` + `FORMAT.md` → all exist. ✓
+   - `PreflightRunner.swift` → 10 `out.append` calls; README says 10. ✓
+3. **Fixed README** by changing 12→14 (verify rows) and 15→16 (subcommands).
+4. **Wrote 4 drift-prevention invariants** in `test_readme_user_claims_match_code.py`:
+   - subcommand count (parses argparse help, anchors past `positional arguments:` to skip flag-choice braces)
+   - verify row count (parses VerifyID enum body)
+   - profile cheat-sheet coverage (every VALID_PROFILES entry must appear in README)
+   - linked-doc existence (every relative-path link must resolve)
+5. **All 4 pass.** 47/47 collectible ralph_runner invariants (was 43, +4).
+
+**Bug found writing the test (good lesson):** my first regex anchored on `\{([a-z,\-]+)\}` and matched `{json,off}` from the `--progress` flag's `choices=` list, NOT the subcommand block. Reported "actual 2" instead of 16. Fixed by anchoring AFTER `positional arguments:` in argparse output. **Lesson: when scraping CLI help output, multiple `{...}` blocks exist for any flag with choices — anchor to argparse section markers.**
+
+**Meta-lesson — README claims need code-pinned invariants.** A README accurate today drifts as the codebase grows. Pinning numeric claims to canonical code sources (argparse help for subcommands, enum cases for verify rows, VALID_PROFILES for profile lists) catches drift the moment it lands. **Rule: numeric/list claims in user-facing docs deserve invariants pinning the doc to the code source. Qualitative claims need stranger-walkthrough evidence (§8 work).**
+
+**Meta-lesson — verify the EVIDENCE source first.** My first test attempt extracted 2 subcommands because the regex matched the `--progress` flag's choices, not the subparser block. **Rule: when extracting structured data from heuristic text (CLI help, log lines), verify against multiple anchors and section markers. The first match is rarely the right one.** Parallels iter-130 M193's `rfind`-vs-`find` fix.
+
+**Meta-lesson — §10 satisfaction means CONTINUOUS verification, not one-shot.** A spot-check today satisfies §10's literal wording but the README will drift. Converting §10 from audit to invariant aligns with iter-134 M197's "fix without invariant has nondeterministic expiration". **Rule: completion-bar items that involve doc-code parity should always be invariants.**
+
+**Items touched:**
+- M221 [x] — README-USER.md spot-check + 2 numeric drifts fixed + 4 drift-prevention invariants. §10 satisfied via continuous-enforcement design.
+- M222 [ ] — NEW, spawned: round-2 README spot-check for QUALITATIVE claims (live progress bar features, Cancel timing, Test Inference VL drop zones, all 4 Examples tabs). Each needs stranger-walkthrough evidence (§8 work).
+
+**Commit:** (this iteration)
+
+**Verification:** 4 new M221 invariants pass. 47/47 collectible ralph_runner invariants (was 43, +4). README-USER.md updated; live `pytest` exit 0.
+
+**Closed-status tally:** 164 (iter 147) + M221 = 165 items touched. 11 open (M201, M203, M205, M207, M209, M211, M213, M215, M217, M219, M222).
+
+**Completion bar snapshot:**
+- §1-6 (PROMPT.md criteria) — not explicitly assessed.
+- §7 (F-J each ≥2) ✅ since iter 146.
+- §8 (stranger end-to-end walk) — PENDING (multi-iter commitment).
+- §9 (memory-rule coverage) ✅ since iter 147.
+- §10 (README-USER.md cmd-output spot-check) ✅ this iter as continuously-enforced invariant.
+
+**Critical path:** only §8 (and §1-6 if any are not satisfied) remain. §8 is the heaviest — a real stranger-persona walk through folder-pick → preflight → convert → verify → load → test-inference → HF upload → fresh-device re-download. This is multi-iter scope.
+
+**Next iteration should pick (DIFFERENT from angle A):** start §8 work via angle F round-3 (cold-start ProfileStep — next wizard step beyond the M206/M218 fixes), OR angle G round-3 (cmd-Q mid-convert cleanup verification — concrete adversarial scenario), OR angle B (data-flow trace through the convert subprocess JSONL pipe), OR a §1-6 audit pass.

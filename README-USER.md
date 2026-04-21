@@ -12,7 +12,7 @@ JANG (Jang Adaptive N-bit Grading) is a mixed-precision quantization format for 
 
 - Converts any HuggingFace model to JANG or JANGTQ format (dense, MoE, VL, video-VL, MLA, hybrid-SSM — every architecture).
 - Ships a self-contained Python 3.11 + MLX runtime inside the `.app` — no Python install needed.
-- Runs a 12-row post-convert audit so you know the output is real before you use it.
+- Runs a 14-row post-convert audit so you know the output is real before you use it.
 - Lets you chat with the converted model inside the app.
 - Generates Python/Swift/Server/HuggingFace code snippets for your use case.
 - Generates a HuggingFace model card and pushes to Hub in one click.
@@ -157,7 +157,7 @@ export HF_HUB_TOKEN=...
 python -m jang_tools publish --model /path/to/output --repo org/model-JANG_4K
 ```
 
-All 15 subcommands are documented via `python -m jang_tools --help`.
+All 16 subcommands are documented via `python -m jang_tools --help`.
 
 ## Using JANG models in your own Swift app
 
