@@ -6548,3 +6548,55 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - Spawned audits (M201/M203/.../M219) — 10 open; work them between completion-bar checks.
 
 **Next iteration should pick (DIFFERENT from angle F):** a round-3 check of any angle (G/H/I/J now safe to revisit), OR pivot to the completion-bar work (§8 stranger walk audit, §9 memory rules, §10 README spot-check). With §7 satisfied, the critical path shifts to §8-10. Recommend §8 for iter-147 (stranger-persona end-to-end walkthrough audit).
+
+---
+
+## 2026-04-20 iteration 147 — angle D (memory-cross-ref) — M220 §9 memory-rule coverage matrix
+
+**Angle rotation:** iter 146 was F. §7 is satisfied; iter 147 pivots to completion-bar §9. Picking angle D (memory-cross-ref) from PROMPT.md — distinct from F-J, directly targets §9's memory-rule coverage requirement.
+
+**3 new questions asked:**
+- Q1: Which memory rules touching code behavior have paired invariants + file:line evidence?
+- Q2: Can I produce a single machine-readable coverage table §9 can be measured against?
+- Q3: For any gap, is the rule already honored in code (needs an evidence pin) or silently unenforced (needs a fix)?
+
+**Deep trace walkthrough:**
+1. **Inventoried memory dir.** 36 `feedback_*.md` files in `~/.claude/projects/-Users-eric-jang/memory/`.
+2. **Classified each** as code-behavior-relevant or workflow-only. Result: 20 code-behavior + 16 workflow (governance rules like `ask_before_changes`, `verify_before_bg`, `no_sleep_polling`).
+3. **Mapped each code-behavior rule** to its enforcement mechanism: dedicated invariant file (10 rules), or AUDIT_CHECKLIST_PIN (10 rules honored by checklist entries referencing specific code file:line).
+4. **Wrote `test_memory_rule_coverage.py`** with 3 tests:
+   - classification completeness (every feedback_*.md is in EXACTLY ONE of CODE_BEHAVIOR_COVERAGE or WORKFLOW_ONLY);
+   - covering-file existence (every covering file path resolves on disk);
+   - AUDIT_CHECKLIST_PIN consistency (each pinned rule's stem must appear in AUDIT_CHECKLIST.md).
+5. **First run surfaced 6 gaps:** rules marked AUDIT_CHECKLIST_PIN but without stems referenced in AUDIT_CHECKLIST.md. Fixed by adding a dedicated §9 coverage section to AUDIT_CHECKLIST.md explicitly naming each pin-rule + its enforcement mechanism (file:line evidence per-rule).
+6. **Also corrected one wrong coverage file reference** (had `test_auth_enforcement.py` for chat_template_rules; fixed to `test_generation_config_eos_fix.py` — M212 eos-fix invariant is the correct pin).
+7. **All 3 tests pass.** §9 now has an executable coverage matrix + 20 explicit rule→evidence mappings.
+
+**Meta-lesson — explicit enumeration beats filesystem-derivation for compliance matrices.** Alternative approaches (one-test-per-rule, filename-matching conventions, free-form checklist) all have drawbacks. The explicit dict with 3-test invariant gives: paired-commit discipline (adding a new rule forces a matching coverage entry), file-existence enforcement (caught typos/moves), and flexibility across mechanical and governance rules. **Rule: for compliance matrices, explicit enumeration + per-entry invariant beats automatic derivation. Makes rule addition an intentional paired commit.** Parallels iter-134 M197's parity-invariant taxonomy.
+
+**Meta-lesson — classification-error tests are the cheapest "something's wrong" signal.** The `test_every_memory_rule_is_classified` test fires when a new feedback_*.md is added without deciding code-behavior vs workflow. Intentional design — it's doing its job reminding the author to classify. **Rule: treat completeness-check test failures as intended design signals. The test is reminding you to decide; don't silence it.**
+
+**Meta-lesson — workflow-only rules must still be listed.** Explicitly listing "out-of-scope" rules forces the "yes this is governance, no it doesn't need a code invariant" conclusion to be DELIBERATE. Without listing, someone could silently miss a rule that SHOULD be code-behavior-enforceable. **Rule: for coverage matrices, scope-exclusions should be as explicit as inclusions. "Out of scope" is a classification, not a silence.**
+
+**Meta-lesson — §9 is foundational for completion-bar trust.** Without this matrix, §9 was a vague hand-wave ("for every memory rule..."). Now it's executable. Future iters that add new memory rules or move invariants will hit this test FIRST, forcing coverage updates. **Rule: vague completion criteria are hard to measure; transform them into executable invariants whenever possible. §9 done well turns "does the code respect the memory?" into a green/red test.**
+
+**Items touched:**
+- M220 [x] — §9 memory-rule coverage matrix with 3 enforcing tests + AUDIT_CHECKLIST.md §9 coverage section pinning each of 20 code-behavior rules to its evidence.
+- No NEW items spawned this iter — the matrix itself IS the net-add, and it enumerates future gap-closure items as needed.
+
+**Commit:** (this iteration)
+
+**Verification:** 3 M220 tests pass. 43/43 collectible ralph_runner invariants (was 40, +3). `python3 -m pytest tests/test_memory_rule_coverage.py` exits 0.
+
+**Closed-status tally:** 163 (iter 146) + M220 = 164 items touched. 10 open (M201, M203, M205, M207, M209, M211, M213, M215, M217, M219) — M220 spawned 0 new since the matrix itself is the coverage.
+
+**Angle tally per §7:** F=2, G=2, H=2, I=2, J=2 (all at ≥2). §7 remains satisfied. Angle D (memory-cross-ref) was used this iter — D is one of the PROMPT.md A-E angles, not one of the F-J angles that §7 counts. Angle-rotation-no-repeats still holds (iter 146 F → iter 147 D).
+
+**Completion bar snapshot:**
+- §1-6 (PROMPT.md criteria) — not explicitly assessed this iter.
+- §7 (F-G-H-I-J each ≥ 2) ✅ as of iter 146.
+- §8 (stranger end-to-end walk) — PENDING.
+- §9 (memory-rule coverage) — ✅ executable matrix landed this iter. All 20 code-behavior rules have evidence pinned; WORKFLOW_ONLY set documents the scope exclusion.
+- §10 (README-USER.md spot-check with command evidence) — PENDING.
+
+**Next iteration should pick (DIFFERENT from angle D):** §8 stranger-persona end-to-end walkthrough audit (PROMPT.md angle A or a round-3 F), OR §10 README-USER.md spot-check (angle H-adjacent), OR close any remaining spawned M-item.
