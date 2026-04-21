@@ -6501,3 +6501,50 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **iter-146 MUST pick F** (cold-start stranger — only angle still at 1). Target: a non-SourceStep surface (iter-140 M206 already covered SourceStep). Candidates from M207's spawn: ArchitectureStep empty state, ProfileStep pre-pick state, RunStep pre-start summary, VerifyStep post-finish explanation, PublishToHFSheet first-visit walkthrough.
 
 **Next iteration should pick F round-2:** ArchitectureStep cold-start guidance, OR Settings-window first-visit walkthrough, OR PublishToHFSheet first-timer banner explaining the `org/name` format + what a token is.
+
+---
+
+## 2026-04-20 iteration 146 — angle F round-2 — M218 ArchitectureStep cold-start plain-English guidance
+
+**Angle rotation:** iter 145 was J, iter 146 picks F round-2 (F was the LAST angle at 1 per §7). Target: Step 2 stranger-friction — extend M206's "always-visible, not hover-only" pattern to ArchitectureStep.
+
+**3 new questions asked:**
+- Q1: What does ArchitectureStep show at second 3 after arriving from Step 1?
+- Q2: If MoE with 256 experts, does stranger understand the number or just see raw jargon?
+- Q3: Is there a "why am I on this step?" framing, or just fields + Continue button?
+
+**Deep trace walkthrough:**
+1. **Pre-M218 state:** 4 technical LabeledContent rows (Model type, Layout, dtype, VL), a conditional large-expert info line, DisclosureGroup for advanced overrides, "Looks right → Profile" button. Zero Section-top explanation. No plain-English beside jargon values.
+2. **Applied M206's always-visible pattern:**
+   - Section-top caption: purpose + typical action ("JANG Studio inspected your model... usually no change is needed. Expand Advanced overrides if...").
+   - Per-value caption below Layout: MoE → "Mixture-of-Experts..." / Dense → "all weights active...".
+   - Per-value caption below Source dtype: new `dtypeHint(_:)` helper with exhaustive switch over all SourceDtype cases.
+3. **Each label-caption pair wrapped in a VStack** so they visually associate. Captions use `.font(.caption2) + .foregroundStyle(.secondary)` — subordinate but legible.
+4. **Tests:** 5 source-inspection invariants including a NEW PATTERN: exhaustive-switch invariant. `test_dtype_hint_helper_exists_and_covers_all_cases` asserts every `SourceDtype` enum case has a `case .X:` in dtypeHint's switch. Catches the "Swift default: branch silently handles a new enum case with empty output" gap.
+5. **Build clean.** 5/5 M218 invariants pass. 40/40 collectible ralph_runner invariants total (was 35, +5).
+
+**Meta-lesson — exhaustive-switch invariant catches default-through-default-case gaps.** Swift's exhaustiveness check requires every case to be handled — but a `default:` branch satisfies the compiler while giving new enum cases empty output. The invariant `case .X:` substring check forces explicit handling per case, turning compiler-tolerated gaps into loud test failures. **Rule: for user-facing switches whose case handling affects UX (error messages, hints, labels), write a source-inspection test asserting every enum case appears as a literal `case .X:`. Complements the compiler's exhaustiveness check at the UX layer.** Parallels iter-127 M190's structural-anchor lesson at switch-scale.
+
+**Meta-lesson — cold-start guidance must answer "what do I do?" not just "what is this?"** M206 named the files a SourceStep user needed to pick. M218 extends that by ALSO naming the typical action ("usually no change is needed. Expand Advanced overrides if..."). Strangers need both: what the step represents AND the confidence that the DEFAULT action is correct. **Rule: cold-start guidance answers two questions: (1) what is this step? (2) what should I click? Naming only (1) is half the job.** Second corollary of iter-140 M206's "escape hatches matter" — the escape hatch answers "if default ISN'T right, here's where".
+
+**Meta-lesson — codify recurring patterns as app-wide design rules.** M206 + M218 have converged on a reusable structure: `VStack { LabeledContent(...); Text(plainEnglishCaption).font(.caption2) }`. Remaining wizard steps (ProfileStep, RunStep, VerifyStep, sheets) should follow the same shape. **Rule: once you've applied the same UX pattern to 2+ views, document it as the app convention. Makes future contributions consistent without per-view design debates.** Parallels iter-134 M197's "parity invariant" — capture repeated structures as invariants.
+
+**Items touched:**
+- M218 [x] — ArchitectureStep cold-start guidance (section caption + MoE/Dense/dtype plain-English captions + new dtypeHint helper). 5 source-inspection invariants.
+- M219 [ ] — NEW, spawned: apply M206+M218 pattern to remaining wizard steps (ProfileStep, RunStep pre-start, VerifyStep, TestInferenceSheet, PublishToHuggingFaceSheet first-visit intro).
+
+**Commit:** (this iteration)
+
+**Verification:** 5 new M218 invariants pass. 40/40 collectible ralph_runner invariants (was 35, +5). xcodebuild build-for-testing clean.
+
+**Closed-status tally:** 162 (iter 145) + M218 = 163 items touched. 10 open (M201, M203, M205, M207, M209, M211, M213, M215, M217, M219).
+
+**Angle tally per §7: F=2 ✅, G=2 ✅, H=2 ✅, I=2 ✅, J=2 ✅ — ALL FIVE ANGLES NOW AT ≥2.** Completion bar §7 is SATISFIED. Remaining completion criteria (1-6 from PROMPT.md + §8 stranger-persona end-to-end + §9 memory rules mapped + §10 README-USER.md spot-check with command evidence) still to verify.
+
+**Forecast pipeline:**
+- §8 end-to-end stranger walk: folder-pick → preflight → convert → verify → load → test-inference → HF upload → fresh-device re-download. Each step must be friction-free. This is a multi-iter commitment; start with a walkthrough audit.
+- §9 memory-rules coverage: each `feedback_*.md` that touches code behavior needs a closed checklist item with file:line evidence. Inventory these next iter.
+- §10 README-USER.md spot-check with command-output evidence.
+- Spawned audits (M201/M203/.../M219) — 10 open; work them between completion-bar checks.
+
+**Next iteration should pick (DIFFERENT from angle F):** a round-3 check of any angle (G/H/I/J now safe to revisit), OR pivot to the completion-bar work (§8 stranger walk audit, §9 memory rules, §10 README spot-check). With §7 satisfied, the critical path shifts to §8-10. Recommend §8 for iter-147 (stranger-persona end-to-end walkthrough audit).
