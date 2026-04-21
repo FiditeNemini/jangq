@@ -59,6 +59,7 @@ jang-tools/build/
 
 # Environment & config
 .env
+.env.*
 .DS_Store
 .claude/
 .playwright-mcp/
