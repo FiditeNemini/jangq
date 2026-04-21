@@ -225,6 +225,41 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M225 (TestInferenceSheet load-label honesty: distinguish load from generate + cite elapsed + calibrate with prior run)** — Iter-150 angle-B (data-flow trace) targeting §8 stage #5 (load). Traced the Send → Python subprocess chain to see what a stranger SEES during the wait.
+      **Pre-M225 trace (confirmed via read):**
+      - `TestInferenceSheet.swift:120` showed a hardcoded `Text("Generating...")` whenever `vm.isGenerating == true`.
+      - `InferenceRunner.generate()` is ONE-SHOT: spawns a fresh `python -m jang_tools inference` subprocess per call, which loads the model from disk + generates + exits.
+      - `jang-tools/jang_tools/inference.py:252-278` does ZERO progress telemetry during load: `t_load = time.time()` → `_load_llm(model_dir)` → blocking wait → ... → eventually `print(json.dumps(result))`. No stdout/stderr during the 15-30s load phase.
+      **Concrete stranger-experience for a 30GB MoE on M2 Max:**
+      1. User clicks Send.
+      2. `isGenerating = true`, spinner + `"Generating..."` appear.
+      3. Python subprocess fires, loads model (~20s of disk I/O + tensor allocation).
+      4. Python finishes load, runs generate for ~2-5s.
+      5. Python exits; Swift receives JSON.
+      6. `isGenerating = false`, assistant message appears.
+      **Total wall-clock: 22-25s. Label says "Generating..." the entire time.** User's mental model: "this model is VERY slow at generation". Reality: loading dominates, generation is fast. The UI is actively misleading.
+      **Compounding problem:** EVERY Send re-loads the model. A 3-prompt smoke test = 3× cold loads = 60-90s of load for ~10s of actual generation. Each "turn" in the chat is a fresh subprocess.
+      **Fix (iter 150):** made the UI honest, left the architectural fix (persistent subprocess / streaming) for a future iter:
+      - `TestInferenceViewModel` gains `lastLoadTimeS: Double?` captured from `InferenceResult.loadTimeS` after every successful generate.
+      - `TestInferenceViewModel` gains `generateStartedAt: Date?` captured when each Send begins.
+      - New computed method `workingStatusLabel() -> String`:
+        - First send (no `lastLoadTimeS`): `"Loading model + generating (Ns elapsed)… large MoE models can take 30s+ on first run."`
+        - Subsequent sends: `"Loading model + generating (Ns elapsed)… previous run loaded in Ms. Each Send reloads the model."`
+      - `TestInferenceSheet.swift:117-132` replaces the hardcoded `"Generating..."` label with `Text(vm.workingStatusLabel())`.
+      **Why cite EACH Send reloads:** strangers who've seen one 22s Send and are about to hit Send again need to know this isn't a once-off cost. The label subtly tells them "yes, it's going to take that long again". Surfaces architectural reality instead of hiding it.
+      **Why not SOLVE the cold-load cost:** architectural change — would require making `InferenceRunner` maintain a long-running Python subprocess with a bidirectional JSON protocol, or switching to `mlx_lm`'s streaming generate. Real work, multi-iter scope. Honest-labeling is the decoupled step that unblocks users NOW and surfaces the issue for the future architectural work.
+      **Evidence:** `JANGStudio/JANGStudio/Wizard/TestInferenceViewModel.swift:14-32` (new state), `:51-92` (new method), `:102-106` (lastLoadTimeS capture). `JANGStudio/JANGStudio/Wizard/TestInferenceSheet.swift:117-132` (label uses `vm.workingStatusLabel()`).
+      **Invariants (+6) in new `ralph_runner/tests/test_test_inference_load_label_honesty.py`:**
+      - `test_sheet_no_longer_hardcodes_generating_label` — negative pin: the old `Text("Generating...")` literal cannot return.
+      - `test_sheet_uses_view_model_working_status_label` — pin `vm.workingStatusLabel()` call site.
+      - `test_view_model_has_working_status_label_method` — pin the method signature.
+      - `test_view_model_captures_load_time_and_start_timestamp` — pin the two state vars.
+      - `test_working_status_label_cites_elapsed_seconds` — pin that the label references `elapsed`.
+      - `test_working_status_label_references_first_run_vs_subsequent` — pin BOTH branches (first-run hint `30s+` / `large MoE` + subsequent-run hint `previous run` / `lastLoadTimeS`).
+      **Meta-lesson — honest labels are a crucial bridge between rough UX today and architectural fix tomorrow.** Alternative fixes are 10× the work (persistent subprocess, streaming pipeline) and can take weeks. A 2-hour honest-label change unblocks users immediately AND surfaces the architectural issue for future work. **Rule: when real UX improvement requires big refactor, ship honest labeling NOW as the stepping stone. Labels are cheap; trust recovery from misleading labels is not.** Parallels iter-123's `feedback_dont_lie_to_user.md` meta rule — a UI that tells you "Generating" when it's really "Loading" is lying.
+      **Meta-lesson — cite real numbers, not ranges, whenever possible.** The first-send label falls back to "30s+" because we don't know the specific model's load time. The subsequent-send label cites the EXACT previous load time ("previous run loaded in 18s"). Strangers calibrate faster on concrete numbers than on ranges. **Rule: when your UI shows an estimate or duration, prefer actual historical numbers over ranges. Ranges communicate "this is uncertain"; numbers communicate "this is what happened last time". Ranges are OK as a fallback but not as a primary.**
+      **Meta-lesson — elapsed-time is the "am I stuck?" sentinel.** A silent spinner with no elapsed-time hint leaves strangers wondering whether the app is frozen. An elapsed-seconds counter says "yes still working, now at 14s". Even when the user can't do anything, knowing the work is still progressing is valuable. **Rule: for any UI state that shows a spinner for > 5 seconds, include an elapsed-time counter. Distinguishes "still working" from "hung".** Parallels iter-115's SSE cap invariants — real-time progress signal prevents user confusion.
+      **Commit:** (this iteration)
 - [x] **M223 (TestInferenceSheet cold-start: sample-prompt buttons + reasoning-model hint)** — Iter-149 angle-F round-3, targeting §8 stage #6 (test-inference). Walked the stranger-walk one stage at a time; this iter audits the moment a user clicks "Test Inference" in Step 5 with no prior knowledge.
       **Pre-M223 trace of empty state:** "No messages yet" / "Type a prompt to see how your converted model responds" / blank prompt field. Two real friction points:
       1. **No example prompt.** Stranger types "Hello", gets generic response, learns nothing about model capabilities. Doesn't discover the model can do reasoning, factual recall, or creative writing.
@@ -593,6 +628,11 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Meta-lesson — remove > plumb when the downstream support is missing.** Temptation on discovering a disconnected setting is to "wire it up" — a natural 80-line diff that adds argparse + threading + UI. But that introduces new surface, new tests, new maintenance. If the quant method truly doesn't need the setting (current state: MSE on weights, no data-dependent calibration), REMOVING it is a smaller, safer diff: fewer lines of code, fewer lies, clear reintroduction protocol for the future. **Rule: when a disconnected setting is found, first ask: "is this setting needed at all right now?" Remove by default; plumb only if current behavior genuinely needs user control. A Settings panel with fewer honest knobs is a better UX than one with many lying knobs.**
       **Meta-lesson — document REINTRODUCTION protocols, not just removals.** The `test_settings_lies_removed.py` module docstring has a 6-step protocol for reintroducing the field IF a future quant method legitimately needs it. Without this, the next contributor who thinks "calibration samples would be nice to tune" would re-ship the same lie. With it, the path is clear: plumb Python FIRST, prove end-to-end, THEN add Swift UI. **Rule: for every "removed because dead" item, document the reintroduction protocol in the removal's regression test. Prevents the removal from being seen as a prohibition rather than a placeholder.**
       **Commit:** (this iteration)
+- [ ] **M226** — Architectural fix for cold-load cost (spawned from M225). M225 made the label HONEST about each Send re-loading the model, but the underlying cost remains: a 30GB MoE reloads 15-30s on EVERY send. Options:
+      - **Persistent InferenceRunner subprocess:** Swift keeps the Python subprocess alive between Sends, uses stdin/stdout JSON protocol to send prompts + receive responses. Load happens once per sheet-open.
+      - **Streaming generate:** switch to `mlx_lm.stream_generate` or similar to stream tokens as they come. Load still per-send, but user sees first-token latency drop from 22s to 20s + streaming.
+      - **Switch Test Inference to an embedded MLX runtime:** bypass the subprocess entirely; load model in-process via PythonKit or a Swift-native MLX inference path. Highest complexity, best UX.
+      Pick one based on user research: if users often run 1 smoke prompt and close the sheet, streaming is better; if they chat iteratively, persistent subprocess is better.
 - [ ] **M224** — Continue the §8 stranger-walk audit at the next stages (spawned from M223). M223 closed stage #6 (test-inference) cold-start; remaining stranger-walk stages still need verification:
       - **stage #7 HF upload** — PublishToHuggingFaceSheet first-visit experience (M214 fixed prefill sanitization but no first-timer banner explaining what `org/name` IS, what an HF token is, where to get one). Same M206/M218 pattern but on a sheet.
       - **stage #8 fresh-device re-download + re-load** — what happens when a stranger downloads the bundle on a NEW Mac? Does PostConvertVerifier rerun? Does Test Inference work on a freshly-downloaded folder with no prior state? Does the chat template apply correctly? This requires real cross-machine evidence — the most expensive remaining stage.

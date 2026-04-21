@@ -15,6 +15,18 @@ final class TestInferenceViewModel {
     var lastError: String?
     var lastTokensPerSec: Double = 0
     var lastPeakRssMb: Double = 0
+    /// M225 (iter 150): last observed load time in seconds. Populated
+    /// from `InferenceResult.loadTimeS` on every successful generate.
+    /// Used by the working-status label to calibrate user expectations:
+    /// on subsequent sends, show the actual previous load time ("loading
+    /// model… (last run took 18s)") so the user knows what to expect.
+    var lastLoadTimeS: Double? = nil
+    /// M225 (iter 150): wall-clock start of the current generate() call.
+    /// Drives the elapsed-seconds counter in the working-status label so
+    /// a stranger sees "Loading model… (14s elapsed)" rather than a
+    /// silent spinner. Without this, users watching a 30GB MoE load
+    /// can't tell if the app is stuck or still making progress.
+    var generateStartedAt: Date? = nil
     /// M121: opt-in toggle for reasoning models (GLM-5.1 / Qwen3.6 / MiniMax
     /// M2.7). When true, passes --no-thinking to jang_tools inference so the
     /// chat template doesn't wrap the prompt with <think>…</think>. Default
@@ -37,6 +49,7 @@ final class TestInferenceViewModel {
         messages.append(userMsg)
         promptText = ""
         isGenerating = true
+        generateStartedAt = Date()   // M225 (iter 150): start of wall-clock for "Loading… (Ns elapsed)" label.
         lastError = nil
 
         // Build prompt — for chat models we'd apply the template here; for v1
@@ -64,6 +77,10 @@ final class TestInferenceViewModel {
             messages.append(msg)
             lastTokensPerSec = result.tokensPerSec
             lastPeakRssMb = result.peakRssMb
+            // M225 (iter 150): record actual load time so the NEXT send's
+            // working-status label can cite a real number ("last run took
+            // 18s to load") rather than a generic "could take 30s".
+            lastLoadTimeS = result.loadTimeS
             pendingImagePath = nil
             pendingVideoPath = nil
         } catch let e as InferenceError {
@@ -77,6 +94,30 @@ final class TestInferenceViewModel {
             lastError = "\(error)"
         }
         isGenerating = false
+        generateStartedAt = nil
+    }
+
+    /// M225 (iter 150): honest working-status label that distinguishes
+    /// model LOAD (15-30s for large MoE) from GENERATION (a few seconds).
+    /// Pre-M225 the UI always said "Generating..." which misled users
+    /// into thinking the model was slow at generation when in fact
+    /// loading dominated. Each `Send` spawns a fresh InferenceRunner
+    /// subprocess that reloads the model from disk — so every send has
+    /// this cost. When we know the previous load time, cite it ("last
+    /// run took 18s") so the user calibrates expectations.
+    func workingStatusLabel() -> String {
+        let elapsed: Int = {
+            guard let start = generateStartedAt else { return 0 }
+            return Int(Date().timeIntervalSince(start))
+        }()
+        let elapsedPart = elapsed > 0 ? " (\(elapsed)s elapsed)" : ""
+        // First Send of the session — no prior load time to cite.
+        if lastLoadTimeS == nil {
+            return "Loading model + generating\(elapsedPart)… large MoE models can take 30s+ on first run."
+        }
+        // Subsequent sends — cite the previous load time to calibrate.
+        let prev = Int(lastLoadTimeS!.rounded())
+        return "Loading model + generating\(elapsedPart)… previous run loaded in \(prev)s. Each Send reloads the model."
     }
 
     func cancel() async {

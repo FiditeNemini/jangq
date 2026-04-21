@@ -117,7 +117,15 @@ struct TestInferenceSheet: View {
                     if vm.isGenerating {
                         HStack {
                             ProgressView().controlSize(.small)
-                            Text("Generating...").foregroundStyle(.secondary)
+                            // M225 (iter 150): use the ViewModel's
+                            // workingStatusLabel() which distinguishes
+                            // load vs. generate + cites elapsed wall-
+                            // clock. Pre-M225 the label was a constant
+                            // "Generating..." which misled users into
+                            // thinking the model was slow at generation
+                            // when loading was the real cost.
+                            Text(vm.workingStatusLabel()).foregroundStyle(.secondary)
+                                .font(.caption)
                             Spacer()
                         }.padding(.horizontal, 8)
                     }

@@ -6717,3 +6717,45 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 **Critical path: §8 stages #5, #7, #8.** Stage #8 is heaviest; stages #5 + #7 are tractable in 1-2 iters each.
 
 **Next iteration should pick (DIFFERENT from angle F):** §8 stage #7 via angle F round-4 — wait no, can't repeat F. Pick angle G round-3 OR H round-3 OR I round-3 OR J round-3 OR a non-F-G-H-I-J angle (A/B/C/D/E from PROMPT.md). Recommended: angle B (data-flow) for §8 stage #5 (load) — trace what happens when a stranger picks a freshly-downloaded model directory and hits Test Inference cold-start, including the load-time phase.
+
+---
+
+## 2026-04-20 iteration 150 — angle B (data-flow) — M225 TestInferenceSheet load-label honesty (distinguish load vs generate phases)
+
+**Angle rotation:** iter 149 was F, iter 150 picks B. Targets §8 stage #5 (load). Traces Send click → subprocess spawn → load → generate → JSON return.
+
+**3 new questions asked:**
+- Q1: Does UI show ANY feedback during model load before first token?
+- Q2: Load time for 30GB MoE on M2 Max is 15-30s. Progress indicator or silent "Generating..." for half a minute?
+- Q3: Does InferenceRunner or Python emit load-time telemetry?
+
+**Deep trace walkthrough:**
+1. **`TestInferenceSheet.swift:117-123`** shows `Text("Generating...")` whenever `vm.isGenerating == true`. Single hardcoded label for the entire work phase.
+2. **`InferenceRunner.generate()`** is ONE-SHOT: spawns fresh `python -m jang_tools inference` subprocess per call. Subprocess loads model from disk + generates + exits.
+3. **`jang-tools/jang_tools/inference.py:252-278`** has ZERO progress telemetry during load. `t_load = time.time()` captures the start; `_load_llm` blocks until model is loaded; generate runs; JSON printed at end. No stdout/stderr during load.
+4. **Stranger experience:** click Send → spinner + "Generating..." for 20s → few tokens generated → full response appears. User's mental model: "model is slow at generation". Reality: 95% of time was LOADING.
+5. **EACH Send reloads the model from disk.** A 3-prompt smoke test = 3 × cold load = 60-90s load for ~10s actual generation. Every chat turn pays the full cost.
+6. **Fix decision: HONEST LABELING, not architectural refactor.** The real fix (persistent subprocess or streaming) is multi-iter work. The honest-label fix is 2 hours and unblocks users immediately. Spawn the architectural work as M226.
+7. **Implementation:** added `lastLoadTimeS` (captured from `InferenceResult.loadTimeS` after each successful generate) + `generateStartedAt` (Date captured at each Send start) + `workingStatusLabel()` method. Label differentiates first send ("can take 30s+") from subsequent sends ("previous run loaded in 18s") and always shows `(Ns elapsed)`.
+
+**Meta-lesson — honest labels bridge rough UX to eventual architectural fix.** The architectural fix (persistent subprocess or streaming) takes weeks. Honest labels take hours. Ship the label NOW as a stepping stone; capture the architectural debt as a spawned item (M226). **Rule: when real UX improvement requires big refactor, ship honest labeling FIRST. Labels are cheap; trust recovery from misleading labels is not.** Parallels iter-123 `feedback_dont_lie_to_user.md` — a UI that says "Generating" during load is lying.
+
+**Meta-lesson — concrete numbers beat ranges.** First-send label falls back to "30s+" because we don't know THIS model's load time. Subsequent-send label cites the exact previous load time ("previous run loaded in 18s"). Concrete numbers = faster stranger calibration. **Rule: when displaying durations, prefer actual historical numbers over ranges. Ranges are OK as fallback; numbers are primary.**
+
+**Meta-lesson — elapsed-time counter is the "am I stuck?" sentinel.** Silent spinner = user wondering if app is frozen. Elapsed counter = "still working, now 14s". Even without cancel option, knowing work is progressing is valuable. **Rule: for any UI spinner > 5s, include an elapsed-time counter. Distinguishes "still working" from "hung".**
+
+**Items touched:**
+- M225 [x] — TestInferenceSheet honest load-vs-generate label via `vm.workingStatusLabel()`. 6 invariants including negative pin for the old hardcoded string.
+- M226 [ ] — NEW, spawned: architectural fix for cold-load cost (persistent subprocess, streaming, or in-process MLX).
+
+**Commit:** (this iteration)
+
+**Verification:** 6 new M225 invariants pass. 58/58 collectible ralph_runner invariants (was 52, +6). xcodebuild build-for-testing clean.
+
+**Closed-status tally:** 166 (iter 149) + M225 = 167 items touched. 13 open (M201, M203, M205, M207, M209, M211, M213, M215, M217, M219, M222, M224, M226).
+
+**Completion bar snapshot:**
+- §7 ✅ iter 146 • §9 ✅ iter 147 • §10 ✅ iter 148.
+- §8 stranger-walk: stages #1,2,3,4,5,6 ✅. Stages #7 (HF upload first-visit) and #8 (fresh-device re-download) PENDING.
+
+**Next iteration should pick (DIFFERENT from angle B):** angle H round-3 (byte-verify another artifact like chat_template.json preservation), OR angle G round-3 (cmd-Q during generate cleanup), OR angle I round-3 (another suspected Settings lie from M201's list: preAllocateRam, metalPipelineCacheEnabled, etc.), OR any of A/C/D/E/F/J variants. §8 stages #7-#8 remain the critical-path work but need a non-B angle to cover.
