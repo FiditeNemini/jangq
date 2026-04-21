@@ -6314,3 +6314,52 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **iter-142 must pick a DIFFERENT angle from J.** F/G/H/I are all at 1 → any of them is fine. Second-round questions per angle should target a DIFFERENT surface than round 1 (e.g., a different setting for I, a different artifact for H, a different adversarial scenario for G).
 
 **Next iteration should pick (DIFFERENT from angle J):** second-round G (adversarial with emoji/unicode path, cmd-Q mid-convert, parallel job collision), OR second-round F (cold-start beyond Step 1 — ArchitectureStep's empty state), OR second-round H (byte-verify preprocessor_config.json or generation_config.json preservation), OR second-round I (another suspected lie from M201's list — outputNamingTemplate or revealInFinderOnFinish).
+
+---
+
+## 2026-04-20 iteration 142 — angle I round-2 — M210 two Settings lies WIRED (outputNamingTemplate + defaultOutputParentPath)
+
+**Angle rotation:** iter 141 was J, iter 142 picks I round-2. Angle tally pre-142: F=1, G=1, H=1, I=1, J=1. Round-2 must target a DIFFERENT surface than round-1 (iter 137 hit `defaultCalibrationSamples`).
+
+**3 new questions asked:**
+- Q1: Is `renderOutputName` called anywhere other than the SettingsWindow preview?
+- Q2: Does ProfileStep's output-picker use the template, or hardcode the name?
+- Q3: Does `defaultOutputParentPath` affect the actual output path when non-empty?
+
+**Deep trace walkthrough:**
+1. **Grep'd `renderOutputName` across JANGStudio.** 4 hits: its definition in AppSettings, its live-preview in SettingsWindow, 2 unit tests of the method itself. ZERO convert-path consumers.
+2. **Grep'd `defaultOutputParentPath`.** Same pattern: UI + persist + preview, no consumer.
+3. **Found the hardcoded lie site.** `ProfileStep.swift:99` `coord.plan.outputURL = src.deletingLastPathComponent().appendingPathComponent("\(src.lastPathComponent)-\(coord.plan.profile)")`. Also at lines 85-89 for the profile-change regeneration path. Both hardcode `<srcParent>/<basename>-<profile>` ignoring both settings.
+4. **Verdict:** two Settings UI lies. Changing Template text from `{basename}-{profile}` to `{basename}_q{profile}` has zero effect. Setting defaultOutputParentPath to `/Volumes/ModelDrive/` has zero effect.
+5. **Fix decision: PLUMB, don't remove.** Unlike M200 (removed because convert doesn't use calibration samples), these settings have legitimate power-user value. Plumb via a new `autoOutputURL(for:profile:)` helper that: validates `settings.defaultOutputParentPath` (must exist and be a dir) with fallback to source's parent, and routes the folder name through `settings.renderOutputName(...)`.
+6. **Consolidated both hardcoded sites.** Both the `onAppear` initial auto-path AND the `onChange(profile)` regeneration now call `autoOutputURL`. Drift-proof: if a future edit only updates one site, the two sides of the UX remain consistent.
+7. **Tests.** `renderOutputName` already has 2 unit tests (iter-137 checkin). Added 5 source-inspection invariants pinning the wiring: AppSettings injection, renderOutputName call, defaultOutputParentPath read, no-hardcoded-interpolation negative pin, helper-exists pin.
+8. **Verified:** `xcodebuild build-for-testing` clean. 33/33 AppSettingsTests pass. 5/5 new M210 invariants pass. 31/31 collectible ralph_runner invariants green.
+
+**Meta-lesson — round-2 audits should work the backlog.** M201's candidate-lies list from iter-137 gave a prioritized queue. Iter-142 closed 2/8 candidates (outputNamingTemplate + defaultOutputParentPath). That's faster than random breadth-first exploration because the spawned `[ ]` items already filtered the high-suspicion fields. **Rule: when a previous iter spawns a candidate list, iterate through it before exploring fresh territory. Backlog > greedy.** Parallels standard agile "work through the backlog" discipline made explicit for Ralph.
+
+**Meta-lesson — plumb-vs-remove is a user-value question, not an implementation-cost question.** M200 removed calibrationSamples because no user actually benefits (MSE convert doesn't use calibration data). M210 plumbed these two because power users DO benefit — organizing output on a dedicated SSD, templating names with date/user tokens. The right answer differs per setting. **Rule: for each lie, the decision framework is "would removing this surprise a user who depended on it?" — if yes, plumb; if no, remove. Default to remove when in doubt; re-add with plumbing if real feedback shows users want it.**
+
+**Meta-lesson — centralize shared logic in a helper, even for a 2-call-site case.** Two identical hardcoded auto-path sites pre-M210 happened to be consistent — copy-paste drift just hadn't happened yet. Extracting `autoOutputURL` makes consistency a structural guarantee, not a lucky accident. **Rule: when two call sites must produce identical output for identical inputs, extract a shared helper. 2 copies of 5 lines = 10 lines of drift risk; 1 helper + 2 call sites = drift-proof.** 
+
+**Meta-lesson — validate consumed user input even from Settings.** `defaultOutputParentPath` is a free-form text string the user types. It might point to a deleted dir, a file (not a dir), or be a typo. The helper's `fileExists + isDirectory` check with fallback to source's parent turns invalid-input into graceful degradation. **Rule: when reading user-configured paths as consumed-input, validate at read time. Invalid values fall through to the default; don't propagate errors up the stack.** Parallels M192's JANG_CORS_ORIGINS default pattern.
+
+**Items touched:**
+- M210 [x] — 2 Settings lies WIRED: outputNamingTemplate + defaultOutputParentPath. `autoOutputURL` helper + 5 source-inspection invariants.
+- M201 — updated: 2/8 candidates closed (outputNamingTemplate + defaultOutputParentPath struck through); 6 remaining for round-3+ iters.
+- M211 [ ] — NEW, spawned: SettingsWindow preview-vs-real-path drift audit. The preview uses renderOutputName; post-M210 the real path also uses it, but nothing pins the two against each other. If a future refactor diverges them, the preview silently lies about real behavior.
+
+**Commit:** (this iteration)
+
+**Verification:** `xcodebuild -scheme JANGStudio -quiet build-for-testing` exits 0. 33/33 AppSettingsTests pass. 5/5 new M210 invariants pass. 31/31 collectible ralph_runner invariants (was 26, +5).
+
+**Closed-status tally:** 158 (iter 141) + M210 = 159 items touched. 6 open (M201 [6/8 left], M203, M205, M207, M209, M211).
+
+**Angle tally per completion bar §7:** F=1, G=1, H=1, **I=2** ✅ (first angle to hit 2), J=1. 4 angles at 1, 1 angle at 2. Still need +1 on F/G/H/J each = 4 more iters.
+
+**Forecast pipeline:**
+- M97, M117, M124, M128, M80 (pre-iter-111 long-deferred)
+- M201 (6 remaining Settings lies) / M203 / M205 / M207 / M209 / M211 — spawned audits
+- **iter-143 must pick a DIFFERENT angle from I.** F, G, H, J all at 1 round; any is fine. Pick the staleness-maximizer: whichever of F/G/H/J is last in my iter-tally order. Iter-140 was F, 139 was G, 138 was H, 141 was J. So F is stalest of the round-1 angles by iter count.
+
+**Next iteration should pick (DIFFERENT from angle I):** F round-2 (cold-start beyond Step 1 — ArchitectureStep empty state?), OR G round-2 (adversarial like emoji path / parallel-convert collision / cmd-Q mid-convert-cleanup), OR H round-2 (byte-verify preprocessor_config.json preservation OR generation_config.json copying OR safetensors shard metadata), OR J round-2 (chat template apply, decode round-trip, sampler temp=0).

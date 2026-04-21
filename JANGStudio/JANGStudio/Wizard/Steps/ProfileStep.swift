@@ -5,6 +5,14 @@ struct ProfileStep: View {
     @Bindable var coord: WizardCoordinator
     @Environment(ProfilesService.self) private var profilesSvc
     @Environment(CapabilitiesService.self) private var capsSvc
+    // M210 (iter 142): inject AppSettings so the auto-generated output
+    // path honors Settings → General → Default output parent path AND
+    // Settings → General → Output naming template. Pre-M210 both
+    // fields were Settings-UI lies: the UI persisted the values but
+    // ProfileStep's auto-path code hardcoded `<basename>-<profile>` at
+    // `src.deletingLastPathComponent()`. Flipping either setting had
+    // zero effect on what dir got created.
+    @Environment(AppSettings.self) private var settings
     @State private var preflight: [PreflightCheck] = []
 
     private var jangProfileNames: [String] {
@@ -80,13 +88,16 @@ struct ProfileStep: View {
             // generated it, not the user), regenerate for the NEW profile.
             // If outputURL was user-picked via pickOutput(), it won't match
             // the auto-pattern and we leave it alone.
+            //
+            // M210 (iter 142): both the "is this auto-generated?" check
+            // AND the regeneration now route through autoOutputURL()
+            // so Settings → defaultOutputParentPath + outputNamingTemplate
+            // are honored consistently.
             if let src = coord.plan.sourceURL,
                let cur = coord.plan.outputURL {
-                let autoOld = src.deletingLastPathComponent()
-                    .appendingPathComponent("\(src.lastPathComponent)-\(oldProfile)")
+                let autoOld = autoOutputURL(for: src, profile: oldProfile)
                 if cur == autoOld {
-                    coord.plan.outputURL = src.deletingLastPathComponent()
-                        .appendingPathComponent("\(src.lastPathComponent)-\(newProfile)")
+                    coord.plan.outputURL = autoOutputURL(for: src, profile: newProfile)
                 }
             }
             refresh()
@@ -96,10 +107,48 @@ struct ProfileStep: View {
         .onChange(of: coord.plan.hadamard) { _, _ in refresh() }
         .onAppear {
             if coord.plan.outputURL == nil, let src = coord.plan.sourceURL {
-                coord.plan.outputURL = src.deletingLastPathComponent().appendingPathComponent("\(src.lastPathComponent)-\(coord.plan.profile)")
+                coord.plan.outputURL = autoOutputURL(for: src, profile: coord.plan.profile)
             }
             refresh()
         }
+    }
+
+    /// M210 (iter 142): compute the auto-generated output URL honoring
+    /// both `settings.defaultOutputParentPath` (non-empty overrides the
+    /// source's parent dir) and `settings.outputNamingTemplate` (token
+    /// substitution for basename/profile/family/date/time/user).
+    ///
+    /// Parent resolution:
+    ///   1. If `settings.defaultOutputParentPath` is non-empty and
+    ///      points at a valid directory, use it.
+    ///   2. Otherwise fall back to `src.deletingLastPathComponent()`
+    ///      (the source's parent) — matches pre-M210 hardcoded behavior.
+    ///
+    /// Basename resolution:
+    ///   `settings.renderOutputName(basename:profile:family:)` applies
+    ///   the template. Default template `{basename}-{profile}`
+    ///   reproduces pre-M210 naming for users who haven't touched the
+    ///   setting. Power users who set e.g. `{basename}_q{profile}` or
+    ///   `{date}-{basename}-{profile}` now see the template actually
+    ///   take effect on the auto-generated folder name.
+    private func autoOutputURL(for source: URL, profile: String) -> URL {
+        let parent: URL = {
+            let configured = settings.defaultOutputParentPath
+            if !configured.isEmpty {
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: configured, isDirectory: &isDir),
+                   isDir.boolValue {
+                    return URL(fileURLWithPath: configured)
+                }
+            }
+            return source.deletingLastPathComponent()
+        }()
+        let name = settings.renderOutputName(
+            basename: source.lastPathComponent,
+            profile: profile,
+            family: coord.plan.family.rawValue
+        )
+        return parent.appendingPathComponent(name)
     }
 
     private func refresh() {
