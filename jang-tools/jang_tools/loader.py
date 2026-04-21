@@ -1515,6 +1515,16 @@ def _fix_quantized_bits(model, weights):
         quant_types = (nn.QuantizedLinear, nn.QuantizedEmbedding, QuantizedSwitchLinear)
     except ImportError:
         quant_types = (nn.QuantizedLinear, nn.QuantizedEmbedding)
+    # MLA models (GLM-5.1, Mistral 4, DeepSeek V3) use QuantizedMultiLinear for embed_q/unembed_out.
+    # sanitize() re-quantizes the split kv_b_proj at bits/group_size inferred from its raw shape
+    # (bits=8 gs=64 for GLM-5.1) but never updates the module's runtime bits/group_size, which
+    # stays at the global default (bits=2 for JANG_1L). Without this import, _fix_quantized_bits
+    # silently skips the mismatch and L>1 prefill crashes at mla.py:76 quantized_matmul.
+    try:
+        from mlx_lm.models.mla import QuantizedMultiLinear
+        quant_types = quant_types + (QuantizedMultiLinear,)
+    except ImportError:
+        pass
 
     for name, module in model.named_modules():
         if not isinstance(module, quant_types):
