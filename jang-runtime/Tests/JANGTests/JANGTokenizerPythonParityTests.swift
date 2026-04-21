@@ -108,4 +108,77 @@ final class JANGTokenizerPythonParityTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - M216 (iter 145): Swift decode parity with Python
+    //
+    // M208 (iter 141) pinned ENCODE parity: same string → same IDs.
+    // M216 pins the complementary DECODE parity: same IDs → same
+    // string. Without this, Swift could:
+    //   - Round-trip (decode(encode(s)) == s) but produce different
+    //     output than Python on the SAME IDs (e.g. leaking special
+    //     tokens as text, getting byte-fallback wrong, mis-assembling
+    //     multi-byte chars).
+    //   - Or fail round-trip but match Python's broken output (hiding
+    //     a shared bug behind a "looks identical" test).
+    //
+    // The capture was taken iter-145 against the same fixture as M208
+    // — the Python output is guaranteed to round-trip on these strings
+    // (verified live: all 3 reference pairs round-tripped). So Swift
+    // MUST produce identical decode output, which implies Swift MUST
+    // round-trip too.
+    //
+    // Captured 2026-04-20 by:
+    //   python3 -c "from transformers import AutoTokenizer;
+    //               tok = AutoTokenizer.from_pretrained(FIXTURE);
+    //               for s in STRINGS: print(repr(tok.decode(
+    //                   tok.encode(s, add_special_tokens=False),
+    //                   skip_special_tokens=True)))"
+
+    /// The Python reference from M208 ALREADY round-trips
+    /// (verified live). So for each (text, ids) pair, Python
+    /// `tok.decode(ids) == text`. Swift must produce the same.
+    func test_swift_decode_matches_python_on_same_ids() throws {
+        try skipIfNoFixture()
+        let tokPath = Self.fixturePath.appendingPathComponent("tokenizer.json")
+        let tok = try JANGTokenizer(tokenizerPath: tokPath)
+
+        for (expected, ids) in Self.pythonReference {
+            let decoded = tok.decode(ids)
+            XCTAssertEqual(
+                decoded, expected,
+                "Swift decode diverged from Python on ids=\(ids). "
+                + "Python.decode(ids) == \(expected.debugDescription). "
+                + "Swift.decode(ids) == \(decoded.debugDescription). "
+                + "This is a M216 parity regression — same IDs, different "
+                + "text output. User-visible symptom: model output rendered "
+                + "differently in Swift UI vs. the Python test-inference "
+                + "path. Fix in JANGTokenizer.swift decode() before shipping."
+            )
+        }
+    }
+
+    /// Round-trip: encode then decode must recover the original
+    /// string. Complementary to the cross-language test — catches
+    /// bugs where Swift encode AND decode both drift but happen to
+    /// cancel each other out against Python (implausible but
+    /// worth pinning).
+    func test_swift_encode_decode_roundtrips() throws {
+        try skipIfNoFixture()
+        let tokPath = Self.fixturePath.appendingPathComponent("tokenizer.json")
+        let tok = try JANGTokenizer(tokenizerPath: tokPath)
+        for (original, _) in Self.pythonReference {
+            let ids = tok.encode(original)
+            let roundTripped = tok.decode(ids)
+            XCTAssertEqual(
+                roundTripped, original,
+                "Swift encode→decode round-trip lost content: "
+                + "\(original.debugDescription) → ids → "
+                + "\(roundTripped.debugDescription). "
+                + "Byte-level BPE + byte-fallback must be inverse "
+                + "operations. Divergence means either the byteEncoder "
+                + "map or the merges table is asymmetric vs. the "
+                + "canonical HF tokenizer."
+            )
+        }
+    }
 }

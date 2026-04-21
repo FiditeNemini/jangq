@@ -225,6 +225,34 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Note:** The ORIGINAL M22 question (race on @State array) is a non-issue given SwiftUI's MainActor isolation, but the broader "is Copy Diagnostics safe mid-convert" audit surfaced 3 real bugs.
       **Evidence:** `DiagnosticsBundle.swift:45-102` (millisecond stamp, anonymize dispatch, scrubbed writes), `RunStep.swift:64-71` (setting plumbed through), 10 new Swift tests.
       **Commit:** (this iteration)
+- [x] **M216 (Swift `JANGTokenizer.decode` parity with Python `tokenizer.decode`)** — Iter-145 angle-J round-2 (iter-144 was G; J was the stalest unfinished round-1 angle). Complements M208's encode-parity invariant: M208 pinned "same string → same IDs" (encode direction); M216 pins "same IDs → same string" (decode direction). Without decode parity, Swift's test-inference UI could render model output differently than Python's inference CLI even when the model emits identical IDs — a user-visible trust breaker.
+      **Live evidence captured iter-145:**
+      ```
+      python3 -c "from transformers import AutoTokenizer; tok = ...
+        for s in STRINGS:
+            ids = tok.encode(s, add_special_tokens=False)
+            decoded = tok.decode(ids, skip_special_tokens=True)
+            print(s, ids, decoded, s == decoded)"
+      ```
+      Output against Qwen3.6-35B-A3B-JANG_2L:
+      - `'Hello, world!'` → `[9419, 11, 1814, 0]` → `'Hello, world!'` (roundtrip=True)
+      - `'The quick brown fox jumps over the lazy dog.'` → 10-token list → original (roundtrip=True)
+      - `'What is 2 + 2?'` → `[3710, 369, 220, 17, 478, 220, 17, 30]` → original (roundtrip=True)
+      All 3 Python references round-trip cleanly. Any Swift decode output that DIFFERS from these is a parity bug.
+      **Fix (iter 145):** added two regression tests to `jang-runtime/Tests/JANGTests/JANGTokenizerPythonParityTests.swift`:
+      - `test_swift_decode_matches_python_on_same_ids` — for each (string, ids) pair from the Python reference, assert `Swift.decode(ids) == Python.decode(ids)`. Cross-language decode invariant.
+      - `test_swift_encode_decode_roundtrips` — assert `Swift.decode(Swift.encode(s)) == s`. Same-language round-trip invariant. Complementary safety net: a Swift encoder AND decoder that drift in mutually-canceling ways would pass the cross-language test if both matched the Python IDs but produced different strings — but would fail round-trip. Both tests together close that gap.
+      **Test result: 2/2 M216 tests pass.** Swift `JANGTokenizer.decode` produces byte-identical output to Python on all 3 reference pairs. The BPE byte-encoder/decoder map is inverse-consistent.
+      **Design parity with M208:**
+      - Same fixture path (`/Users/eric/models/Qwen3.6-35B-A3B-JANG_2L`).
+      - Same XCTSkip-when-fixture-missing pattern for CI friendliness.
+      - Same hardcoded Python-reference approach (no cross-call at test time).
+      - Same test-strings choice — pins that encode AND decode match Python on identical inputs.
+      **Evidence:** `jang-runtime/Tests/JANGTests/JANGTokenizerPythonParityTests.swift:120-175` (new tests). 66/66 jang-runtime tests pass (was 64, +2). `swift test --filter JANGTokenizerPythonParityTests` captures concrete output: "Executed 4 tests, with 0 failures in 3.999 seconds".
+      **Meta-lesson — round-2 of a parity angle expands COVERAGE, not technique.** M208 established the pattern (capture Python reference, hardcode as XCTAssertEqual targets, XCTSkip on missing fixture). M216 applies the SAME technique to the inverse operation. Same code shape, same test-design choices, different covered behavior. **Rule: when a parity-testing infrastructure is working for one direction, the round-2 extension should reuse the same pattern for the complementary direction rather than inventing a new technique. Consistency of test shape across parity directions makes the pair cheaper to maintain + clearer for future contributors.** Parallels iter-133 M196's "widen tuple rather than invent convention" — reuse pattern, extend scope.
+      **Meta-lesson — encode parity and decode parity are independent invariants, not redundant.** If Swift encoder AND decoder both had mutually-canceling bugs (unlikely but possible), `decode(encode(s)) == s` could pass while both directions diverged from Python. Only the CROSS-LANGUAGE check catches that. Conversely, cross-language parity on a single direction (encode or decode) doesn't prove round-trip — the Swift encoder could agree with Python while Swift decoder silently mangles. Both checks needed. **Rule: for bijective parity across implementations (encoder/decoder, compressor/decompressor, serializer/deserializer), write TWO invariant families: cross-language parity in each direction + same-language round-trip. All three together are redundant in the happy case but catch distinct failure modes.**
+      **Meta-lesson — decode parity is a UX invariant, not just a correctness one.** A Swift UI showing model output via `decode(...)` that differs from the Python test-inference CLI is confusing and erodes trust even if both outputs are "valid". Users comparing two runtimes should see identical strings. **Rule: when a runtime has multiple presentation surfaces (Swift UI, Python CLI, remote inference API), decode/format parity is load-bearing for trust. Users who notice differences will assume the app is buggy, whether it technically is or not.** Applies beyond tokenization — any formatter that touches user-visible output.
+      **Commit:** (this iteration)
 - [x] **M214 (HF repo-name prefill sanitizer — unicode/space auto-slug with user-visible hint)** — Iter-144 angle-G round-2 (iter-143 was H). Adversarial-user scenario: strangers with non-ASCII filesystem names (`~/café-model/`, `~/📁models/`, `~/my model (final)/`) who click Publish and get a cryptic `HFRepoValidator` error on the auto-prefilled repo name.
       **Live trace (iter 144):**
       - Built a real unicode-path fixture: `mkdir -p "/tmp/🍕-model-test"`, copied config.json from a real Qwen3.6 bundle.
@@ -453,6 +481,12 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Meta-lesson — remove > plumb when the downstream support is missing.** Temptation on discovering a disconnected setting is to "wire it up" — a natural 80-line diff that adds argparse + threading + UI. But that introduces new surface, new tests, new maintenance. If the quant method truly doesn't need the setting (current state: MSE on weights, no data-dependent calibration), REMOVING it is a smaller, safer diff: fewer lines of code, fewer lies, clear reintroduction protocol for the future. **Rule: when a disconnected setting is found, first ask: "is this setting needed at all right now?" Remove by default; plumb only if current behavior genuinely needs user control. A Settings panel with fewer honest knobs is a better UX than one with many lying knobs.**
       **Meta-lesson — document REINTRODUCTION protocols, not just removals.** The `test_settings_lies_removed.py` module docstring has a 6-step protocol for reintroducing the field IF a future quant method legitimately needs it. Without this, the next contributor who thinks "calibration samples would be nice to tune" would re-ship the same lie. With it, the path is clear: plumb Python FIRST, prove end-to-end, THEN add Swift UI. **Rule: for every "removed because dead" item, document the reintroduction protocol in the removal's regression test. Prevents the removal from being seen as a prohibition rather than a placeholder.**
       **Commit:** (this iteration)
+- [ ] **M217** — Further runtime-parity sweep beyond tokenization (spawned from M208+M216). Tokenization now has byte-level parity in BOTH directions. Other runtime behaviors where Swift+Python must agree on the same bundle:
+      - **Sampler at temperature=0 (greedy):** for identical logits, `argmax` should pick the same token in Swift + Python. Test against a small fixture that dumps logits.
+      - **Multi-EOS stop-token handling:** if `eos_token_id = [248046, 248044]`, both runtimes must stop on FIRST match. Any runtime that requires ALL matches would hang.
+      - **Chat template apply:** `JANGTokenizer.encodeChatPrompt(system:user:)` vs Python `tokenizer.apply_chat_template(messages, add_generation_prompt=True)`. Non-trivial because templates are Jinja-rendered Python-side, hand-assembled Swift-side.
+      - **Codebook dequant result:** JANGTQ's vector quantization — Swift load + dequant vs Python reference must produce bit-identical weight tensors.
+      - **SSE framing:** if JANGStudio/jang-runtime consumes SSE from jang-server, frame boundary handling (split on `\n\n`, strip `data: ` prefix, parse JSON) must match.
 - [ ] **M215** — Further unicode-path sweep (spawned from M214). Other surfaces that consume filesystem names as identifiers:
       - `outputNamingTemplate` rendering — M210 wired `renderOutputName`; if `{basename}` has emoji/accents, the output folder has them too. That's fine on APFS but HF publish of such output would hit M214. Does the convert → publish flow apply sanitization?
       - Diagnostics bundle filenames (`JANGStudio-diagnostics-<timestamp>.zip`) — timestamp-based, no unicode risk. OK.

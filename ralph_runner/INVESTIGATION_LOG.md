@@ -6457,3 +6457,47 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **iter-145 must pick F or J** (only angles still at 1).
 
 **Next iteration should pick (DIFFERENT from angle G):** F round-2 (ArchitectureStep empty-state guidance beyond SourceStep's M206 fix, or a Settings-window first-visit walkthrough) OR J round-2 (chat-template apply parity, decode round-trip, sampler temp=0 next-token parity on the Qwen3.6 fixture).
+
+---
+
+## 2026-04-20 iteration 145 — angle J round-2 — M216 Swift decode parity with Python (complements M208 encode parity)
+
+**Angle rotation:** iter 144 was G, iter 145 picks J round-2 (J was the stalest unfinished round-1 angle). Target: Swift `JANGTokenizer.decode` parity with Python `tokenizer.decode` — the inverse of M208's encode parity.
+
+**3 new questions asked:**
+- Q1: Does Swift `decode(encode(s))` round-trip the original string?
+- Q2: For IDs captured from Python, does Swift produce identical decoded strings?
+- Q3: Do multi-byte chars (emoji spanning multiple tokens) reassemble correctly in Swift?
+
+**Deep trace walkthrough:**
+1. **Captured Python reference (live):** `python3 -c "... tok.decode(tok.encode(s, add_special_tokens=False), skip_special_tokens=True) ..."` against Qwen3.6-35B-A3B-JANG_2L. All 3 M208 test strings round-trip cleanly in Python. So any Swift decode output that differs from the original string is a parity bug.
+2. **Reused M208 infrastructure.** Same fixture path, same XCTSkip-when-missing pattern, same hardcoded-reference approach. No new cross-call-at-test-time dep.
+3. **Added 2 tests to `JANGTokenizerPythonParityTests.swift`:**
+   - `test_swift_decode_matches_python_on_same_ids` — cross-language decode invariant. For each (string, ids) pair from M208's reference, assert `tok.decode(ids) == string`.
+   - `test_swift_encode_decode_roundtrips` — same-language round-trip. Assert `tok.decode(tok.encode(s)) == s` for each test string.
+4. **Ran tests.** `swift test --filter JANGTokenizerPythonParityTests` → 4/4 pass (was 2, +2 M216). Full jang-runtime suite: 66/66 (was 64, +2).
+
+**Meta-lesson — round-2 of a parity angle reuses round-1's TECHNIQUE, expands COVERAGE.** M208 established hardcoded-Python-reference + XCTSkip pattern. M216 applies the SAME pattern to the decode direction. Same code shape, different behavior covered. **Rule: when a parity-testing infrastructure is working for one direction, the round-2 extension should reuse the pattern rather than invent a new technique. Consistency across parity directions = cheaper maintenance + clearer intent.**
+
+**Meta-lesson — encode parity + decode parity + round-trip are 3 independent invariants.** If Swift encoder AND decoder both had mutually-canceling bugs, round-trip could pass while both directions diverged from Python. Only CROSS-LANGUAGE checks catch that. Conversely, cross-language parity in one direction doesn't prove round-trip. **Rule: for bijective parity across implementations, write THREE invariant families: cross-language parity in each direction (2) + same-language round-trip (1). Redundant in happy case but each catches a distinct failure mode.** Builds on M197 "parity taxonomy" lesson but specific to bijective operations.
+
+**Meta-lesson — decode parity is a UX/TRUST invariant, not just correctness.** A Swift UI showing model output that differs from the Python CLI is confusing even if both are "valid". Users comparing runtimes expect identical strings; divergence erodes trust. **Rule: when a runtime has multiple presentation surfaces (Swift UI vs. Python CLI vs. remote inference), output-formatting parity is load-bearing for trust. Users notice differences and assume bugs, whether or not there technically is one.** Applies beyond tokenization — any formatter touching user-visible output.
+
+**Items touched:**
+- M216 [x] — Swift decode parity (cross-language + round-trip). 2 new tests extending M208's infrastructure.
+- M217 [ ] — NEW, spawned: further runtime-parity sweep (sampler temp=0, multi-EOS, chat-template apply, codebook dequant, SSE framing).
+
+**Commit:** (this iteration)
+
+**Verification:** 2 new M216 tests pass. 4/4 parity tests pass (was 2, +2). 66/66 full jang-runtime suite (was 64, +2). Live Python reference shows identical round-trip on all 3 test strings against the real Qwen3.6 fixture.
+
+**Closed-status tally:** 161 (iter 144) + M216 = 162 items touched. 9 open (M201, M203, M205, M207, M209, M211, M213, M215, M217).
+
+**Angle tally per §7:** F=1, G=2, H=2, I=2, **J=2 ✅** (all angles except F now at ≥2). F is the ONLY remaining angle at 1 — iter-146 MUST be F for completion-bar §7 progress.
+
+**Forecast pipeline:**
+- M97/M117/M124/M128/M80 (pre-iter-111 long-deferred)
+- M201/M203/M205/M207/M209/M211/M213/M215/M217 spawned audits
+- **iter-146 MUST pick F** (cold-start stranger — only angle still at 1). Target: a non-SourceStep surface (iter-140 M206 already covered SourceStep). Candidates from M207's spawn: ArchitectureStep empty state, ProfileStep pre-pick state, RunStep pre-start summary, VerifyStep post-finish explanation, PublishToHFSheet first-visit walkthrough.
+
+**Next iteration should pick F round-2:** ArchitectureStep cold-start guidance, OR Settings-window first-visit walkthrough, OR PublishToHFSheet first-timer banner explaining the `org/name` format + what a token is.
