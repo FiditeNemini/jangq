@@ -47,8 +47,54 @@ import mlx.nn as nn
 from jang_tools.turboquant.tq_kernel import TurboQuantLinear, TurboQuantSwitchLinear
 
 
+def _apply_wired_limit_safe_default():
+    """Set mx.wired_limit to ~70% of total RAM if the caller hasn't already.
+
+    Why: for per-expert JANGTQ bundles (e.g. GLM-5.1-JANGTQ_1L, ~190 GB),
+    the loader's `mx.stack(packed_list)` at inference-time creates fresh
+    non-mmap-backed stacked expert tensors. If MLX's wired_limit is too
+    high (e.g. 240 GB on a 256 GB machine), macOS has no pagecache
+    headroom to spill the materialization spike and SIGKILLs the process
+    silently (no OOM traceback — just vanishes).
+
+    Ralph iter-14 measurement: setting wired_limit=180 GB on 256 GB
+    Mac Studio let the forward complete in 80 s (cold I/O) instead of
+    SIGKILL. 70% of total RAM is a safe general-case default; callers
+    who have already set their own limit (higher or lower) are respected.
+
+    Enabled only on Apple Silicon macOS where psutil is available.
+    No-op elsewhere.
+    """
+    try:
+        import psutil, sys, mlx.core as _mx
+        if sys.platform != "darwin":
+            return
+        total_gb = psutil.virtual_memory().total / 1e9
+        target_gb = int(total_gb * 0.70)
+        # Clamp to reasonable range: at least 32 GB, at most 220 GB
+        # (leaving enough headroom even on very-large-RAM machines).
+        target_gb = max(32, min(target_gb, 220))
+        target_bytes = target_gb * 1000 * 1000 * 1000
+        _mx.set_wired_limit(target_bytes)
+        print(f"  [wired_limit] auto-set to {target_gb} GB "
+              f"(~70% of {total_gb:.0f} GB total RAM; ralph iter-14 tuning)",
+              flush=True)
+    except Exception as _e:
+        # Non-fatal: older MLX, no psutil, non-Apple OS, etc.
+        pass
+
+
 def load_jangtq_model(model_path, skip_params_eval=False):
-    """Load JANGTQ model with TurboQuantLinear (Metal kernel, no dequant)."""
+    """Load JANGTQ model with TurboQuantLinear (Metal kernel, no dequant).
+
+    Automatically caps MLX's wired_limit at ~70% of total RAM to avoid the
+    forward-pass OOM seen on large per-expert bundles (GLM-5.1-JANGTQ_1L)
+    where non-mmap stacked expert tensors need pagecache headroom to
+    materialize on first forward. See `_apply_wired_limit_safe_default`
+    for the Ralph iter-14 investigation.
+    """
+    _apply_wired_limit_safe_default()
+
     model_path = Path(model_path)
     # M125 (iter 48): context-manage reads so fds close deterministically.
     with open(model_path / "config.json") as f:
