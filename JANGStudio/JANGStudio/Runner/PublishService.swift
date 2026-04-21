@@ -75,6 +75,68 @@ enum HFRepoValidator {
         }
         return nil
     }
+
+    /// M214 (iter 144): sanitize an arbitrary filesystem basename into
+    /// something that might pass `validationError` as an HF name
+    /// segment. Pre-M214 `PublishToHuggingFaceSheet.init` prefilled the
+    /// repo field with `modelPath.lastPathComponent` as-is — so a user
+    /// whose model lives at `~/café-model/` or `~/📁Qwen3/` or
+    /// `~/Downloads/my model (final)/` got a prefill GUARANTEED to
+    /// fail the ASCII-only `^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$` regex.
+    /// The subsequent validation error message is cryptic ("Invalid
+    /// name segment 'café-model': start with a letter/digit...")
+    /// and strangers don't know which character is the problem.
+    ///
+    /// Strategy:
+    ///   1. Apply Unicode NFD decomposition + ASCII-strip to handle
+    ///      precomposed accented chars (é → e).
+    ///   2. Replace anything outside `[A-Za-z0-9._-]` with `-`.
+    ///   3. Collapse consecutive `--` / `..` (validation rejects both).
+    ///   4. Trim leading/trailing `-` `.` (validation rejects trailing).
+    ///   5. If first char isn't `[A-Za-z0-9]`, prefix with `m-`.
+    ///   6. If the result is empty, return `"model"`.
+    /// Output is guaranteed to pass `validationError`'s regex for the
+    /// name segment. Org segment still needs the user to supply it.
+    ///
+    /// Returns a Sanitized struct with `sanitized` (the output) and
+    /// `wasChanged` (true if any sanitization actually happened, so
+    /// callers can show a hint to the user).
+    struct Sanitized: Equatable {
+        let sanitized: String
+        let wasChanged: Bool
+    }
+
+    static func sanitizeForRepoName(_ raw: String) -> Sanitized {
+        if raw.isEmpty { return Sanitized(sanitized: "model", wasChanged: true) }
+        // Step 1: NFD decomposition + ASCII-strip diacritics.
+        let decomposed = raw.decomposedStringWithCanonicalMapping
+        let asciiOnly = decomposed.unicodeScalars
+            .filter { $0.isASCII }
+            .map { Character($0) }
+        var working = String(asciiOnly)
+        // Step 2: replace disallowed chars with `-`.
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
+                                   "abcdefghijklmnopqrstuvwxyz" +
+                                   "0123456789._-")
+        let mapped = working.unicodeScalars.map { scalar -> Character in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        working = String(mapped)
+        // Step 3: collapse runs of `--` and `..`.
+        while working.contains("--") { working = working.replacingOccurrences(of: "--", with: "-") }
+        while working.contains("..") { working = working.replacingOccurrences(of: "..", with: ".") }
+        // Step 4: trim leading/trailing `-` `.`.
+        working = working.trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        // Step 5: ensure first char is [A-Za-z0-9]; else prefix with "m-".
+        if let first = working.first,
+           !first.isLetter && !first.isNumber {
+            working = "m-" + working
+        }
+        // Step 6: empty → "model" (covers input of all-non-ASCII /
+        // all-punctuation).
+        if working.isEmpty { working = "model" }
+        return Sanitized(sanitized: working, wasChanged: working != raw)
+    }
 }
 
 /// Sendable holder for the publish subprocess's `Process` reference so the

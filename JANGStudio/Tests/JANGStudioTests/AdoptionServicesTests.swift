@@ -335,4 +335,89 @@ final class AdoptionServicesTests: XCTestCase {
                 repo: "x/y", isPrivate: false, token: "tok")
         _ = stream   // silence unused-warning
     }
+
+    // MARK: - M214 (iter 144): sanitizeForRepoName — unicode/space prefill
+    //
+    // Pre-M214 PublishToHuggingFaceSheet's init prefilled the repo
+    // field with modelPath.lastPathComponent AS-IS. A user whose source
+    // was `~/café-model/` got a prefill that failed HF's ASCII-only
+    // regex with a cryptic error. M214's sanitizer turns arbitrary
+    // basenames into something the validator accepts.
+
+    @MainActor
+    func test_sanitize_ascii_preserves_unchanged() {
+        // Already HF-valid — no sanitization needed.
+        let r = HFRepoValidator.sanitizeForRepoName("Qwen3-0.6B-Base")
+        XCTAssertEqual(r.sanitized, "Qwen3-0.6B-Base")
+        XCTAssertFalse(r.wasChanged,
+            "ASCII-valid basename must pass through unchanged; "
+            + "wasChanged would trigger a misleading 'we sanitized' banner.")
+    }
+
+    @MainActor
+    func test_sanitize_accents_stripped() {
+        // NFD decomposition + ASCII-only filter drops combining marks.
+        let r = HFRepoValidator.sanitizeForRepoName("café-model")
+        XCTAssertEqual(r.sanitized, "cafe-model",
+            "`é` must decompose (NFD) then strip the combining acute, "
+            + "leaving `e`. 'café-model' → 'cafe-model'.")
+        XCTAssertTrue(r.wasChanged)
+        XCTAssertNil(HFRepoValidator.validationError("org/" + r.sanitized),
+            "Sanitized output MUST pass validation as a name segment.")
+    }
+
+    @MainActor
+    func test_sanitize_emoji_replaced() {
+        // Emoji isn't in allowed set → replaced with `-`. Leading `-`
+        // stripped in trim step.
+        let r = HFRepoValidator.sanitizeForRepoName("🍕-pizza")
+        XCTAssertFalse(r.sanitized.contains("🍕"))
+        XCTAssertEqual(r.sanitized, "pizza",
+            "Emoji → `-`; leading-`-` trimmed; result is 'pizza'.")
+        XCTAssertNil(HFRepoValidator.validationError("org/" + r.sanitized))
+    }
+
+    @MainActor
+    func test_sanitize_spaces_to_dashes() {
+        let r = HFRepoValidator.sanitizeForRepoName("my model (final)")
+        XCTAssertFalse(r.sanitized.contains(" "))
+        XCTAssertNil(HFRepoValidator.validationError("org/" + r.sanitized),
+            "Spaces + parens must sanitize to something that passes "
+            + "validation. Got: \(r.sanitized)")
+    }
+
+    @MainActor
+    func test_sanitize_collapses_double_dashes() {
+        // Consecutive disallowed chars would turn into `--` / `..`, both
+        // rejected by the validator. Collapse step must fire.
+        let r = HFRepoValidator.sanitizeForRepoName("a  b")   // two spaces
+        XCTAssertFalse(r.sanitized.contains("--"),
+            "Consecutive replaced chars must be collapsed to a single `-`.")
+        XCTAssertNil(HFRepoValidator.validationError("org/" + r.sanitized))
+    }
+
+    @MainActor
+    func test_sanitize_leading_non_alphanum_prefixed() {
+        // Segment regex requires first char [A-Za-z0-9]. If sanitized
+        // would start with `.` or `-` or `_`, prefix with `m-`.
+        let r = HFRepoValidator.sanitizeForRepoName("_underscore-start")
+        XCTAssertTrue(r.sanitized.first!.isLetter || r.sanitized.first!.isNumber,
+            "First char must be a letter or digit after sanitization.")
+        XCTAssertNil(HFRepoValidator.validationError("org/" + r.sanitized))
+    }
+
+    @MainActor
+    func test_sanitize_all_invalid_returns_fallback() {
+        // Input with NO ASCII alphanumerics → fallback "model".
+        let r = HFRepoValidator.sanitizeForRepoName("🍕🍕🍕")
+        XCTAssertEqual(r.sanitized, "model")
+        XCTAssertTrue(r.wasChanged)
+    }
+
+    @MainActor
+    func test_sanitize_empty_input_returns_fallback() {
+        let r = HFRepoValidator.sanitizeForRepoName("")
+        XCTAssertEqual(r.sanitized, "model")
+        XCTAssertTrue(r.wasChanged)
+    }
 }

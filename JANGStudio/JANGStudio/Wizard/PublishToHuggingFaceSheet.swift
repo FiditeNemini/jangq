@@ -43,13 +43,34 @@ struct PublishToHuggingFaceSheet: View {
 
     init(modelPath: URL, defaultRepoName: String = "") {
         self.modelPath = modelPath
-        self._repoName = State(initialValue: defaultRepoName.isEmpty
-                               ? modelPath.lastPathComponent
-                               : defaultRepoName)
+        // M214 (iter 144): sanitize prefill. Pre-M214 the prefilled
+        // repoName was `modelPath.lastPathComponent` as-is. Sources
+        // with unicode (`~/café-model/`, `~/📁Qwen3/`) or spaces
+        // (`~/my model (final)/`) generated prefills that deterministically
+        // failed HFRepoValidator with a cryptic "start with letter/digit"
+        // message. Now we run the basename through
+        // HFRepoValidator.sanitizeForRepoName which ASCII-slugifies it,
+        // so the prefill at least STARTS valid; the banner below the
+        // TextField (rendered when wasSanitized) tells the user what
+        // we changed so they can tweak if they want a different name.
+        let bn = modelPath.lastPathComponent
+        let sanitized = HFRepoValidator.sanitizeForRepoName(bn)
+        let prefill: String = defaultRepoName.isEmpty ? sanitized.sanitized : defaultRepoName
+        self._repoName = State(initialValue: prefill)
+        self._sanitizedHint = State(
+            initialValue: (defaultRepoName.isEmpty && sanitized.wasChanged)
+                ? "Repo name auto-sanitized from '\(bn)' → '\(sanitized.sanitized)' (HuggingFace requires ASCII letters/digits/.-_). Edit if you'd prefer a different name."
+                : nil
+        )
         self._token = State(initialValue: ProcessInfo.processInfo.environment["HF_HUB_TOKEN"]
                             ?? ProcessInfo.processInfo.environment["HUGGING_FACE_HUB_TOKEN"]
                             ?? "")
     }
+
+    /// M214 (iter 144): user-visible hint shown when the repo-name
+    /// prefill was auto-sanitized. nil = the basename was already
+    /// HF-valid; no banner needed.
+    @State private var sanitizedHint: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -129,6 +150,18 @@ struct PublishToHuggingFaceSheet: View {
                 TextField("org/model-name", text: $repoName)
                     .textFieldStyle(.roundedBorder)
                     .disableAutocorrection(true)
+                // M214 (iter 144): user-visible banner when the prefill
+                // was auto-sanitized (unicode/space stripped). Without
+                // this, users whose source had emoji/accents would see
+                // a mysteriously-different prefill and either mistype
+                // "back" to the original (which then fails validation)
+                // or just not know what happened.
+                if let hint = sanitizedHint {
+                    Text(hint)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                }
                 Toggle("Private repository", isOn: $isPrivate)
             }
             Section("Authentication") {

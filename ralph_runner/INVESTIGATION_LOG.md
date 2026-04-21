@@ -6410,3 +6410,50 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **iter-144 must pick F, G, or J.**
 
 **Next iteration should pick (DIFFERENT from angle H):** G round-2 (adversarial — emoji path, parallel convert collision, cmd-Q cleanup verification), OR F round-2 (ArchitectureStep empty-state guidance, ProfileStep first-visit empty state), OR J round-2 (chat-template apply, decode round-trip, sampler temp=0, codebook dequant byte-parity).
+
+---
+
+## 2026-04-20 iteration 144 — angle G round-2 — M214 HF repo-name prefill sanitizer for unicode/space sources
+
+**Angle rotation:** iter 143 was H, iter 144 picks G round-2. Target: unicode filesystem paths — common in real user environments but rarely tested.
+
+**3 new questions asked:**
+- Q1: Does `jang-tools inspect-source` crash with an emoji path?
+- Q2: Does Python subprocess argv correctly transport unicode?
+- Q3: Do log lines / error messages / prefilled UI fields display unicode cleanly?
+
+**Deep trace walkthrough:**
+1. **Live unicode-path fixture** built at `/tmp/🍕-model-test`. Ran `inspect-source` → success. Ran `recommend` → success. Ran `convert` → got through architecture detection, failed only at missing safetensors (not a unicode bug).
+2. **Confirmed APFS normalization-insensitivity:** Python's `os.path.isdir(nfc) and os.path.isdir(nfd)` both True. The macOS filesystem handles both decomposed and precomposed unicode names.
+3. **Found the real bug: repo-name prefill.** `PublishToHuggingFaceSheet.swift:47` prefills `modelPath.lastPathComponent` AS-IS. A source at `~/café-model/` → prefill `café-model` → fails `HFRepoValidator`'s ASCII-only regex with a cryptic "start with letter/digit" error. Stranger doesn't know which char is bad, what HF wants, or how to fix.
+4. **Designed sanitizer:** NFD decomposition + ASCII-only filter (`é` → `e`) + disallowed-char replacement (emoji → `-`) + consecutive-collapse (`--`/`..`) + trim + leading-prefix fallback + empty-fallback. Returns `(sanitized, wasChanged)` so callers can show a hint when transformation happened.
+5. **Wired into prefill.** Init runs basename through sanitizer; stores `wasChanged` in a new `@State sanitizedHint: String?`; Repository section renders a banner when non-nil.
+6. **Banner content:** explicit — names both before/after forms + the HF constraint ("requires ASCII letters/digits/.-_") + tells user they can edit. Stranger-friendly.
+7. **Tests (+8) in AdoptionServicesTests.** Each asserts the sanitizer output + that the DOWNSTREAM validator accepts it. Coverage: ASCII passthrough, accents, emoji, spaces+parens, consecutive-char collapse, leading non-alphanum, all-invalid fallback, empty fallback. 31/31 pass (was 23, +8).
+
+**Meta-lesson — adversarial scenarios fall out of real-world locale diversity.** Every user outside US-ASCII English will have filesystem names the app never tested. US-centric dev setups never surface these. **Rule: when auditing any code that consumes filesystem names, test with a non-ASCII fixture BEFORE shipping. A single `🍕-model` in /tmp catches most of the class.** Builds on iter-143's "test byte-AND-semantic" — preservation claims must survive non-ASCII.
+
+**Meta-lesson — slugify at the PREFILL point, not the validation point.** Alternate fix would be improving the error message. Worse UX: forces user to manually edit an auto-prefill that's "wrong". Fix the prefill so it STARTS valid; banner explains what happened when transformation was non-trivial. **Rule: for validation-gated input fields, sanitize at prefill time. Errors are for what the user TYPED, not for what the app prefilled.** Parallels iter-131 M194 "response body redaction" — fix at the producer, not the consumer.
+
+**Meta-lesson — surface the transform, don't hide it.** A silent prefill of `cafe-model` (when source was `café-model`) feels magical and untrustworthy when discovered. The banner names the exact transformation + reason + edit-option. **Rule: when the app transforms user input automatically, show the transform inline. Invisible "helpful" transforms are a trust-breaker.** Third corollary of iter-123's `feedback_dont_lie_to_user.md`.
+
+**Meta-lesson — test the composed invariant, not just the unit.** Each M214 test does BOTH `XCTAssertEqual(r.sanitized, expected)` AND `XCTAssertNil(HFRepoValidator.validationError("org/" + r.sanitized))`. A sanitizer matching a shape check but still failing the real downstream validator would pass a naive unit pin and break in production. **Rule: tests bridging producer → consumer must assert the consumer accepts the producer's output.** Parallels iter-134 M197's consumer-reference pin.
+
+**Items touched:**
+- M214 [x] — HF repo-name prefill sanitizer (NFD + ASCII-only + collapse + fallback) + user-visible hint banner. 8 new unit tests covering all transformation classes + downstream validator acceptance.
+- M215 [ ] — NEW, spawned: further unicode-path sweep (outputNamingTemplate emoji, log-file paths, JANGTokenizer unicode BPE, JSON escape round-trip in SourceDetector).
+
+**Commit:** (this iteration)
+
+**Verification:** Live tested inspect-source + recommend + convert on unicode `/tmp/🍕-model-test` — all handle unicode correctly at the Python layer. 31/31 AdoptionServicesTests pass (was 23, +8 M214 sanitizer tests). `xcodebuild build-for-testing` clean.
+
+**Closed-status tally:** 160 (iter 143) + M214 = 161 items touched. 8 open (M201, M203, M205, M207, M209, M211, M213, M215).
+
+**Angle tally per §7:** F=1, **G=2 ✅** (joins H=2, I=2), H=2, I=2, J=1. Only F and J remain at 1; need +1 each = 2 more iters to hit 10 total.
+
+**Forecast pipeline:**
+- M97/M117/M124/M128/M80 (pre-iter-111 long-deferred)
+- M201/M203/M205/M207/M209/M211/M213/M215 spawned audits
+- **iter-145 must pick F or J** (only angles still at 1).
+
+**Next iteration should pick (DIFFERENT from angle G):** F round-2 (ArchitectureStep empty-state guidance beyond SourceStep's M206 fix, or a Settings-window first-visit walkthrough) OR J round-2 (chat-template apply parity, decode round-trip, sampler temp=0 next-token parity on the Qwen3.6 fixture).
