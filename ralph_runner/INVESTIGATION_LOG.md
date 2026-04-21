@@ -6363,3 +6363,50 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 - **iter-143 must pick a DIFFERENT angle from I.** F, G, H, J all at 1 round; any is fine. Pick the staleness-maximizer: whichever of F/G/H/J is last in my iter-tally order. Iter-140 was F, 139 was G, 138 was H, 141 was J. So F is stalest of the round-1 angles by iter count.
 
 **Next iteration should pick (DIFFERENT from angle I):** F round-2 (cold-start beyond Step 1 — ArchitectureStep empty state?), OR G round-2 (adversarial like emoji path / parallel-convert collision / cmd-Q mid-convert-cleanup), OR H round-2 (byte-verify preprocessor_config.json preservation OR generation_config.json copying OR safetensors shard metadata), OR J round-2 (chat template apply, decode round-trip, sampler temp=0).
+
+---
+
+## 2026-04-20 iteration 143 — angle H round-2 — M212 eos-fix extended to generation_config.json (inference-silent bug)
+
+**Angle rotation:** iter 142 was I, iter 143 picks H round-2 (staleness-max: H last at iter 138). Target: byte-verify `generation_config.json` preservation. Found a real inference-silent bug that the memory rule A07's claim didn't catch: A04's eos-fix was incomplete.
+
+**3 new questions asked:**
+- Q1: Does convert byte-copy `generation_config.json` or transform it?
+- Q2: Do runtime hyperparams (`temperature`, `top_p`) survive?
+- Q3: Does A04's eos-fix touch `generation_config.json`?
+
+**Deep trace walkthrough:**
+1. **Byte-copy path:** `convert.py:1111-1121` lists `generation_config.json` in `extra_configs` → `_safe_copy` does shutil.copy2 with byte-fallback. Bytes preserved.
+2. **eos-fix path:** `convert.py:1007-1034` applies `EOS_FIXES[model_type]` to top-level config + text_config + tokenizer_config.json. **Notably absent: generation_config.json.**
+3. **HF runtime behavior:** `.generate()` reads `model.generation_config.eos_token_id` with PRIORITY over `model.config.eos_token_id`. So a bundle where config.json eos=248046 (fixed) but generation_config.json eos=248044 (byte-copied stale) is INTERNALLY INCONSISTENT → HF picks wrong value.
+4. **Live evidence:** `jq '.eos_token_id' /Users/eric/models/Qwen3.6-35B-A3B-JANG_2L/generation_config.json` → `[248046, 248044]` multi-EOS list form. This happens to be safe (both are stops). BUT scalar form `248044` alone (which some older Qwen3.5 sources ship) directly hits the bug.
+5. **Upstream check via curl:** Qwen3-8B's generation_config has `[151645, 151643]` — list form, standard convention. Scalar-form risk is for Qwen3.5-specific legacy configs.
+6. **Fix:** extend eos-fix block to handle generation_config.json with BOTH scalar (int) AND list form, load/patch/rewrite via json.dumps. Copy-loop skip guard (`_eos_fixed_gen_cfg` flag) prevents the downstream byte-copy from overwriting the fix.
+7. **Tests:** 4 new source-inspection invariants. 360/360 jang-tools tests pass unchanged.
+
+**Meta-lesson — "copied byte-for-byte" ≠ "correct".** Byte-copy of a config is correct only if its SEMANTIC meaning matches the output bundle's overall semantics. Pre-M212 the source bundle's eos was 248044 throughout (self-consistent). After convert fixed config.json to 248046 but byte-copied generation_config.json (still 248044), the bundle was no longer self-consistent. **Rule: when a convert pass MODIFIES fields in one config, audit every other copy-through config for the SAME field. Byte-identical ≠ semantic-identical when surrounding context changed.**
+
+**Meta-lesson — HF runtime priority-order is a silent override surface.** `GenerationMixin` prefers `generation_config.eos_token_id` over `config.eos_token_id`. Users debugging "halts on wrong token" don't know which file wins. **Rule: when HF runtime reads the same field from multiple files with priority, treat the set as a group — any convert-time edit updates ALL or NONE.** Applies to `eos_token_id`, `pad_token_id`, `bos_token_id`, and any transforms on `temperature`/`top_p` defaults.
+
+**Meta-lesson — test byte-AND-semantic for preservation.** M202 byte-verified HF card; M212 byte-verified generation_config AND inter-file consistency post-transform. Future H round-3+ audits must include "bundle remains self-consistent as a whole," not just "each file individually preserved." **Rule: output-correctness includes inter-file consistency. Byte-correct-but-bundle-inconsistent is still a bug.**
+
+**Meta-lesson — load/patch/rewrite > in-place edit for structured configs.** `json.dumps(gc, indent=2)` benefits: JSON round-trip validates structure, atomic write is crash-safe, idempotent. **Rule: for config-transform steps, always JSON round-trip. String-edit-in-place is for unstructured text.**
+
+**Items touched:**
+- M212 [x] — eos-fix extended to generation_config.json (scalar + list forms). Copy-loop skip guard. 4 invariants.
+- M213 [ ] — NEW, spawned: further inter-file consistency audit (pad_token_id / bos_token_id / chat_template triple-location / generation_config sampling defaults).
+
+**Commit:** (this iteration)
+
+**Verification:** 4 new M212 invariants pass. 35/35 collectible ralph_runner invariants (was 31, +4). 360/360 jang-tools tests pass unchanged. Live fixture shows list-form eos (already safe); code now handles both forms for future scalar-form sources.
+
+**Closed-status tally:** 159 (iter 142) + M212 = 160 items touched. 7 open (M201, M203, M205, M207, M209, M211, M213).
+
+**Angle tally per §7:** F=1, G=1, **H=2** ✅ (joins I=2 at 2), I=2, J=1. F, G, J remain at 1; 3 more iters needed for 10 total.
+
+**Forecast pipeline:**
+- M97/M117/M124/M128/M80 (pre-iter-111 deferred)
+- M201/M203/M205/M207/M209/M211/M213 spawned audits
+- **iter-144 must pick F, G, or J.**
+
+**Next iteration should pick (DIFFERENT from angle H):** G round-2 (adversarial — emoji path, parallel convert collision, cmd-Q cleanup verification), OR F round-2 (ArchitectureStep empty-state guidance, ProfileStep first-visit empty state), OR J round-2 (chat-template apply, decode round-trip, sampler temp=0, codebook dequant byte-parity).

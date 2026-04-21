@@ -1032,6 +1032,65 @@ def convert_model(
             tc = tokenizer_files["tokenizer_config.json"]
             if tc.get("eos_token_id") in eos_fix_map:
                 tc["eos_token_id"] = eos_fix_map[tc["eos_token_id"]]
+        # M212 (iter 143): extend the fix to generation_config.json.
+        # Pre-M212 convert.py fixed eos in config.json + tokenizer_config
+        # but NOT generation_config.json. HF's GenerationMixin reads
+        # `generation_config.eos_token_id` at `.generate()` time with
+        # PRIORITY over `config.eos_token_id`, so an un-fixed
+        # generation_config silently undoes the fix we applied to
+        # config. Any Qwen3.5-family source whose generation_config.json
+        # carries the stale scalar 248044 would see the bundle halt on
+        # 248044 at inference despite the fixed config.json. Load,
+        # patch, and rewrite; the plain byte-copy in the extra_configs
+        # loop below will then skip it because the file already exists
+        # at the destination (we rewrite it directly instead of copying).
+        gen_cfg_src = model_path / "generation_config.json"
+        if gen_cfg_src.exists():
+            try:
+                gc = json.loads(gen_cfg_src.read_text(encoding="utf-8"))
+            except Exception as _e:
+                print(f"  WARNING: couldn't parse generation_config.json "
+                      f"for eos-fix ({type(_e).__name__}: {_e}); copying "
+                      f"verbatim may leave stale eos_token_id.")
+                gc = None
+            if isinstance(gc, dict):
+                gc_changed = False
+                old_eos = gc.get("eos_token_id")
+                if isinstance(old_eos, int) and old_eos in eos_fix_map:
+                    gc["eos_token_id"] = eos_fix_map[old_eos]
+                    gc_changed = True
+                    print(f"  eos_token_id fix: {old_eos} → "
+                          f"{eos_fix_map[old_eos]} (generation_config)")
+                elif isinstance(old_eos, list):
+                    new_list = [
+                        eos_fix_map.get(e, e) if isinstance(e, int) else e
+                        for e in old_eos
+                    ]
+                    if new_list != old_eos:
+                        gc["eos_token_id"] = new_list
+                        gc_changed = True
+                        print(f"  eos_token_id fix: {old_eos} → "
+                              f"{new_list} (generation_config, list form)")
+                if gc_changed:
+                    # Write directly to output; skip this file in the
+                    # extra_configs copy loop by removing the source
+                    # path from the copy list. Simpler: write to output
+                    # now; the loop's `extra_path.exists()` check runs
+                    # against SOURCE not dest, so it would try to copy
+                    # over our write. Guard by deleting source-path
+                    # from the copy list via a new local name.
+                    (output_path / "generation_config.json").write_text(
+                        json.dumps(gc, indent=2), encoding="utf-8"
+                    )
+                    _eos_fixed_gen_cfg = True
+                else:
+                    _eos_fixed_gen_cfg = False
+            else:
+                _eos_fixed_gen_cfg = False
+        else:
+            _eos_fixed_gen_cfg = False
+    else:
+        _eos_fixed_gen_cfg = False
 
     # ── Osaurus / swift-transformers compatibility fix ───────────
     # Some HF sources ship `tokenizer_class: "TokenizersBackend"` which
@@ -1115,6 +1174,15 @@ def convert_model(
     for extra_file in extra_configs:
         extra_path = model_path / extra_file
         if extra_path.exists():
+            # M212 (iter 143): if we already patched + wrote
+            # generation_config.json via the eos-fix path above, skip
+            # the byte-copy here — otherwise we'd overwrite the fixed
+            # file with the stale source bytes. `_eos_fixed_gen_cfg`
+            # was set True only on the exact write path so this
+            # guard is tight.
+            if extra_file == "generation_config.json" and _eos_fixed_gen_cfg:
+                extras_copied.append(f"{extra_file} (eos-patched)")
+                continue
             _safe_copy(extra_path, output_path / extra_file)
             extras_copied.append(extra_file)
     if extras_copied:
