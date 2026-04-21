@@ -1,8 +1,8 @@
 # Modern Model Architectures and Attention Mechanisms for Quantization
 
-This document catalogs the attention types, model architectures, weight naming conventions, and quantization considerations observed across 15+ models during the CRACK abliteration research project (Feb-Mar 2026). The focus is on practical details that affect weight surgery and quantization pipelines on Apple Silicon (MLX/Metal).
+This document catalogs the attention types, model architectures, weight naming conventions, and quantization considerations observed across 15+ models during the prior quantization research project (Feb-Mar 2026). The focus is on practical details that affect weight surgery and quantization pipelines on Apple Silicon (MLX/Metal).
 
-Source: `/Users/eric/CRACK_abliteration/` -- docs, research, CLAUDE.md, HANDOFF_NOTES.md, and per-model findings.
+Source: `/Users/eric/prior-quantization-research/` -- docs, research, CLAUDE.md, HANDOFF_NOTES.md, and per-model findings.
 
 ---
 
@@ -131,7 +131,7 @@ Properties:
 - All layers have attention projections (`q_proj`, `k_proj`, `v_proj`, `o_proj`)
 - All layers have MoE expert routing
 - No SSM bypass channel
-- Refusal signal (for abliteration) concentrates in residual stream -- no alternative pathway
+- Refusal signal (for weight-surgery) concentrates in residual stream -- no alternative pathway
 
 ### 2.2 Hybrid SSM + Full Attention MoE
 
@@ -462,7 +462,7 @@ Standard MoE transformer. 46 layers, 5120 hidden, 128 experts (8 active). No SSM
 
 ## 5. Weight Naming Conventions
 
-Six MoE weight naming patterns are supported by the CRACK surgeon:
+Six MoE weight naming patterns are supported by the weight surgeon:
 
 | Architecture | Down Projection Pattern |
 |---|---|
@@ -499,7 +499,7 @@ Across all architectures, certain tensors must NOT be aggressively quantized:
 | Attention biases | Input bias terms | GPT OSS, GLM |
 | `fc1/fc2_latent_proj` | MoE latent compression | Nemotron |
 
-For Q2 quantization: the CRACK streaming quantizer keeps these 122 critical tensors at bf16 via an `is_critical_precision()` check. Q3 (8 vals/group) survives with quantized gates; Q2 (4 vals/group) does NOT.
+For Q2 quantization: the prior streaming quantizer keeps these 122 critical tensors at bf16 via an `is_critical_precision()` check. Q3 (8 vals/group) survives with quantized gates; Q2 (4 vals/group) does NOT.
 
 ### 6.2 mxfp4 vs Affine Quantization
 
@@ -534,7 +534,7 @@ Cross-model pattern: finer quantization (Q6/Q8) preserves the original safety in
 | Step 3.5 Flash 121B | s=4.0 | s=6.0 | 1.5x |
 | Step 3.5 Flash 149B | s=4.0 | s=6.20 | 1.55x |
 | MiniMax 172B | s=2.50 | s=3.00 | 1.2x |
-| Qwen 122B CRACK-X Q4 | s=7.50 | Q6: s=8.60, Q8: s=7.90 | 1.05-1.15x |
+| Qwen 122B reference quantizer Q4 | s=7.50 | Q6: s=8.60, Q8: s=7.90 | 1.05-1.15x |
 
 Exception: Nemotron Q6 needed LOWER strength than Q4 (s=1.00 vs s=1.10) because the Q6 model was built from Q4 (re-quantization), not from FP16 source. The surgery signal was already baked into Q4 weights, and Q6's finer grid preserved it more precisely.
 
@@ -547,7 +547,7 @@ GPT OSS 120B was trained in BF16 (range up to 3.4e38). Converting to FP16 (max 6
 Two approaches with different tradeoffs:
 
 **Surgery-before-quantization** (`streaming_quantizer.py` approach):
-- Apply CRACK formula to FP16/BF16 weights, then quantize at target bit width
+- Apply empirical formula to FP16/BF16 weights, then quantize at target bit width
 - No mixed quantization needed, no per-tensor overrides
 - Surgery signal permanently baked in regardless of quantization level
 - Used for Qwen 397B Q2/Q3/Q4/Q5 builds
@@ -556,10 +556,10 @@ Two approaches with different tradeoffs:
 - Dequantize target tensors, modify, requantize with fresh scales/biases
 - Preserves original quantization grid for unmodified tensors
 - Risk: requantization grid doesn't match original, can destroy surgery signal
-- Used for Qwen 397B Q4 CRACK REAP (binary patch of proven Q4 bytes)
+- Used for Qwen 397B Q4 reference REAP (binary patch of proven Q4 bytes)
 
 **Cross-quantization** (MiniMax Q6/Q8 solution):
-- Dequantize Q4 CRACK weights (proven surgery) to FP32
+- Dequantize Q4 reference weights (proven surgery) to FP32
 - Requantize at Q6/Q8 precision
 - Binary patch into Q6/Q8 base shards
 - Only working approach for MiniMax Q6/Q8 where direct toolkit surgery at Q6/Q8 produced gibberish
@@ -580,7 +580,7 @@ Using `mx.save_safetensors()` to save modified safetensor files strips metadata 
 
 ### 6.11 RepE (PCA) vs Mean-Diff for Non-Standard Architectures
 
-Standard CRACK uses mean-diff vectors (average of harmful - harmless activations). On Nemotron's LatentMoE architecture, the mean-diff was orthogonal to the actual dominant safety direction (PC1) in critical middle layers. RepE PCA extraction (SVD on difference matrix) found the correct direction, achieving 12/12 compliance where standard CRACK maxed out at 1-2/8.
+Standard approach uses mean-diff vectors (average of harmful - harmless activations). On Nemotron's LatentMoE architecture, the mean-diff was orthogonal to the actual dominant safety direction (PC1) in critical middle layers. RepE PCA extraction (SVD on difference matrix) found the correct direction, achieving 12/12 compliance where standard prior-quantizer maxed out at 1-2/8.
 
 This matters for quantization because the surgery direction vector affects how much each weight tensor changes, which in turn affects quantization grid selection.
 
@@ -653,7 +653,7 @@ A quantization engine must handle at minimum six different weight naming convent
 
 ### 8.2 3D Batched Expert Tensors Need Special Handling
 
-After MLX `sanitize()` stacking, expert weights are 3D: `[num_experts, out_dim, in_dim]`. Operations (abliteration, quantization analysis) must be vectorized across the expert dimension (axis 0). GPU Metal may timeout on very large 3D tensors (512 experts) -- CPU fallback needed.
+After MLX `sanitize()` stacking, expert weights are 3D: `[num_experts, out_dim, in_dim]`. Operations (weight-surgery, quantization analysis) must be vectorized across the expert dimension (axis 0). GPU Metal may timeout on very large 3D tensors (512 experts) -- CPU fallback needed.
 
 ### 8.3 mxfp4 Is Structurally Different from Affine
 
@@ -691,9 +691,9 @@ At certain quantization levels, the Q4 grid aligns differently with modified wei
 
 ## Sources
 
-All information is from files under `/Users/eric/CRACK_abliteration/`:
+All information is from files under `/Users/eric/prior-quantization-research/`:
 
-- `README.md` -- CRACK tool architecture and math
+- `README.md` -- prior-quantizer tool architecture and math
 - `CLAUDE.md` -- Agent onboarding, MoE support, hybrid SSM/FA details, model matrix
 - `HANDOFF_NOTES.md` -- MiniMax pipeline, cross-quantization, tokenizer bugs
 - `docs/MEMORY_INDEX.md` -- Architecture quick reference, surgery strengths, speed reference

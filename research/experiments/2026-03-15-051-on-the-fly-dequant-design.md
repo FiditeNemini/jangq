@@ -12,7 +12,7 @@ JANG dequant-at-load expands models to full float16 size in memory:
 
 ## Constraint: MLX Per-Tensor Quant Speed Regression
 
-From CRACK research (Finding #75):
+From prior quantization research (Finding #75):
 - Uniform Q_BITS for all tensors: ~38-50 tok/s
 - Per-tensor quantization config: ~9.4 tok/s (60% regression)
 - Cause: mlx_lm uses slow `class_predicate` loading path when per-tensor overrides exist
@@ -51,7 +51,7 @@ without massive speed loss.
 - Pro: Reuses MLX Metal kernels, model stays quantized
 - Con: Need to verify speed with mixed configs
 
-## Key Insight from CRACK Research
+## Key Insight from prior-quantizer Research
 
 The speed regression happens because of `class_predicate` in the LOADING path, not in
 the inference path. If we can load the model correctly (bypassing class_predicate) and
@@ -76,7 +76,7 @@ JANG block_size=64 → mlx group_size=64
 
 Verified: `mx.dequantize()` produces identical results with repacked data.
 
-## Architecture Notes from CRACK (Qwen 3.5)
+## Architecture Notes from prior-quantizer (Qwen 3.5)
 
 - All Qwen 3.5: `full_attention_interval=4` (FA at L3, L7, L11, ...)
 - 122B: 48 layers, 12 FA layers, 36 GDN layers, 256 experts (top-8)

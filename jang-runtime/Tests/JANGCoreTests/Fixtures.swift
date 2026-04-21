@@ -5,7 +5,15 @@ import Foundation
 /// `/tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec` and reused
 /// across test runs as long as the manifest is present.
 enum Fixtures {
-    static let sourceModelPath = "/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M"
+    /// Override with JANG_TEST_GEMMA4_BUNDLE env var. Otherwise resolves to
+    /// `~/jang/models/Gemma-4-26B-A4B-it-JANG_4M` and skips the test if absent.
+    static let sourceModelPath: String = {
+        if let env = ProcessInfo.processInfo.environment["JANG_TEST_GEMMA4_BUNDLE"] {
+            return env
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent("jang/models/Gemma-4-26B-A4B-it-JANG_4M").path
+    }()
     static let cacheDir = URL(fileURLWithPath: "/tmp/jangcore-fixtures")
     static let bundleURL = cacheDir.appendingPathComponent("Gemma-4-26B-A4B-it-JANG_4M.jangspec")
 

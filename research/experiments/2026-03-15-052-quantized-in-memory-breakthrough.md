@@ -18,7 +18,7 @@ compressed in GPU memory and dequantizes on-the-fly during `quantized_matmul`.
 
 ### Key Discovery: MLX Per-Layer Mixed Bits Has NO Speed Regression
 
-The CRACK research (Finding #75) showed 60% speed regression with per-tensor
+The prior quantization research (Finding #75) showed 60% speed regression with per-tensor
 quantization via `class_predicate`. But testing showed the regression is in the
 LOADING path only — `quantized_matmul` itself runs at full speed regardless of
 per-layer bit differences.

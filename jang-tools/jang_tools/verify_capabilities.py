@@ -25,7 +25,7 @@ from jang_tools.capabilities import verify_directory
 
 
 _DEFAULT_ROOTS = [
-    Path("/Users/eric/models"),
+    Path.home() / "models",
     Path.home() / ".mlxstudio",
 ]
 # `~/.cache/huggingface/hub` is intentionally NOT in the default roots.

@@ -1,6 +1,6 @@
 # JANG Model Reference — Architecture & Quantization Notes
 
-> Sourced from CRACK abliteration research. Critical info for JANG quantization quality.
+> Sourced from prior quantization research. Critical info for JANG quantization quality.
 
 ## Critical Rules
 

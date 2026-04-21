@@ -5,7 +5,10 @@ final class HotCoreLoaderTests: XCTestCase {
     /// Prefer the MiniMax bundle for this test; fall back to the Gemma
     /// fixture if MiniMax isn't present. Skip entirely if neither is there.
     private func resolveBundleURL() throws -> URL {
-        let minimax = URL(fileURLWithPath: "/Users/eric/models/MiniMax-M2.7-JANG_2L.jangspec")
+        let envOverride = ProcessInfo.processInfo.environment["JANG_TEST_MINIMAX_JANGSPEC"]
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let minimax = envOverride.map { URL(fileURLWithPath: $0) }
+            ?? home.appendingPathComponent("models/MiniMax-M2.7-JANG_2L.jangspec")
         if FileManager.default.fileExists(
             atPath: minimax.appendingPathComponent(JangSpecFormat.manifestFilename).path
         ) {

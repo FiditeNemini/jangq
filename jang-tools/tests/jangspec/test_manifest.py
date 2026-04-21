@@ -11,7 +11,7 @@ def test_manifest_roundtrip(tmp_path: Path):
     m = Manifest(
         bundle_version=1,
         source_jang="Gemma-4-26B-A4B-it-JANG_4M",
-        source_jang_dir="/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M",
+        source_jang_dir="/path/to/models/Gemma-4-26B-A4B-it-JANG_4M",
         target_arch="gemma4_moe",
         n_layers=48,
         n_experts_per_layer=128,

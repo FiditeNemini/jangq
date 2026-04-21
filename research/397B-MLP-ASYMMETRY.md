@@ -5,7 +5,7 @@ Created by Jinho Jang (eric@jangq.ai) — 2026-03-19
 ## Executive Summary
 
 Qwen3.5-397B-A17B produces NaN at both 2-bit and 3-bit JANG profiles. After exhaustive
-investigation comparing GGUF internals, CRACK abliteration research (162 GB working Q4),
+investigation comparing GGUF internals, prior quantization research (162 GB working Q4),
 MLX Metal kernel behavior, and our own experiment logs, we identified two root causes
 and a concrete fix.
 
@@ -193,9 +193,9 @@ If gate_proj is also 2-bit, both errors amplify → catastrophe.
 **hidden_size=4096 is the killer.** Each dot product sums 4096 quantized weights.
 More terms = more accumulated quantization error = higher chance of overflow.
 
-### 4.2 What CRACK Research Tells Us
+### 4.2 What prior-quantizer Research Tells Us
 
-The working CRACK 397B (162 GB, 36.8 tok/s) used:
+The working reference 397B (162 GB, 36.8 tok/s) used:
 - **Uniform Q4** (4-bit everything) with gs=64
 - mlx-community quantizer (standard `mx.quantize`)
 - Binary shard patching to preserve `{"format":"mlx"}` metadata
@@ -274,7 +274,7 @@ Size estimated from verified average bpw (test output).
 | JANG_1L (old)  | 2    | 2   | 2    | ~2.0    | ~100 GB   | Yes (NaN!)  |
 | **JANG_1L-fix**| **4**| **2**| **3**| **3.0** | **~150 GB** | **Yes** |
 | JANG_4M (ref)  | 4    | 4   | 4    | ~4.0    | ~200 GB   | Tight       |
-| CRACK Q4 (ref) | 4    | 4   | 4    | 4.0     | 162 GB    | Yes (works) |
+| prior Q4 (ref) | 4    | 4   | 4    | 4.0     | 162 GB    | Yes (works) |
 
 ### 5.4 Implementation (DONE — 2026-03-19)
 
@@ -373,7 +373,7 @@ One is a hardware/framework limit (float16 vs float32) that the sub-classificati
 |----------|--------|---------|
 | 397B NaN at layer 22 | JANG experiment (2026-03-18) | gate_proj 3-bit → 45x error → float16 overflow |
 | 397B NaN at 2-bit routed experts | JANG experiment (2026-03-18) | Even with shared_expert=CRITICAL, routed experts overflow |
-| CRACK 397B Q4 works (162 GB) | CRACK_abliteration proven-pipeline.md | Uniform Q4 with gs=64, 36.8 tok/s |
+| reference 397B Q4 works (162 GB) | prior-quantization-research reference-pipeline.md | Uniform Q4 with gs=64, 36.8 tok/s |
 | GGUF Q2_K = ~2.56 bpw | llama.cpp PR #4872 (ikawrakow) | Mixed precision, not uniform 2-bit |
 | GGUF upgrades down_proj to Q3_K | llama.cpp quantize.cpp source | Residual projection always protected |
 | GGUF uses float32 compute | llama.cpp architecture | All intermediates float32 |

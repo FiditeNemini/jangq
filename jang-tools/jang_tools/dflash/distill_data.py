@@ -18,9 +18,9 @@ and its mlx_lm runtime). It does NOT run on the MacBook dev loop.
 
 Usage:
     python -m jang_tools.dflash.distill_data \\
-        --model /Users/eric/models/MiniMax-M2.7-JANG_2L \\
+        --model /path/to/MiniMax-M2.7-JANG_2L \\
         --prompts prompts-5k.txt \\
-        --out /Volumes/External/dflash-distill-v1 \\
+        --out /path/to/dflash-distill-v1 \\
         --max-tokens 256
 """
 from __future__ import annotations

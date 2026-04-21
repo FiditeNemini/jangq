@@ -31,8 +31,17 @@ from jang_tools.calibrate import _load_bf16_tensor
 from jang_tools.turboquant.linear import tq_quantize_weight
 
 # === Config ===
-SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/Volumes/EricsLLMDrive/MiniMax-M2.7-FP8")
-OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/Volumes/EricsLLMDrive/MiniMax-M2.7-JANGTQ2")
+if len(sys.argv) < 3:
+    print(
+        "usage: python -m jang_tools.convert_minimax_jangtq <src_fp8_dir> <out_dir> [profile]\n"
+        "  <src_fp8_dir>  path to a MiniMax M2-family FP8 source model directory\n"
+        "  <out_dir>      output directory for the JANGTQ bundle\n"
+        "  [profile]      JANGTQ2 (default), JANGTQ3, or JANGTQ4",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+SRC = Path(sys.argv[1])
+OUT = Path(sys.argv[2])
 PROFILE = sys.argv[3] if len(sys.argv) > 3 else "JANGTQ2"
 SEED = 42
 

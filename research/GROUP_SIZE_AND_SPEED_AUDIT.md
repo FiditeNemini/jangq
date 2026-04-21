@@ -37,7 +37,7 @@ The current code applies ONE group_size to everything. This causes:
 
 ### 4. Speed verification — PENDING (needs MiniMax v2 to finish converting)
 - [ ] Benchmark tok/s on MiniMax JANG_2L with gs=128 + router gs=64
-- [ ] Compare with CRACK reference speeds (Q4: ~50 tok/s)
+- [ ] Compare with reference speeds (Q4: ~50 tok/s)
 
 ## Math: Why group_size Matters for Speed
 
@@ -88,7 +88,7 @@ The current code applies ONE group_size to everything. This causes:
 4. [x] `_fix_quantized_bits` infers both bits AND group_size from tensor shapes
 5. [x] Router-aware: prefers gs=64 for `.gate` tensors to resolve shape ambiguity
 
-## MiniMax-Specific Rules (from CRACK research)
+## MiniMax-Specific Rules (from prior quantization research)
 
 ### Architecture
 - 62 layers, ALL standard attention (no SSM/hybrid)
@@ -98,7 +98,7 @@ The current code applies ONE group_size to everything. This causes:
 - Source format: FP8 (float8_e4m3fn) with block-wise 128×128 scaling
 - model_type: `minimax_m2` → mlx_lm `models/minimax.py`
 
-### group_size by quant level (CRACK-verified)
+### group_size by quant level (reference-verified)
 | Quant Level | Expert MLP gs | Router gs | Reference |
 |-------------|---------------|-----------|-----------|
 | 2-bit | 128 | 64 (Q8) | JANG JANG_2L |

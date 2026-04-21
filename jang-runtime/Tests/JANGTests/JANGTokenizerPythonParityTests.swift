@@ -30,8 +30,14 @@ final class JANGTokenizerPythonParityTests: XCTestCase {
 
     /// The path to a real Qwen3.6-35B-A3B-JANG_2L bundle with a
     /// tokenizer.json + tokenizer_config.json. Skip if not present.
-    private static let fixturePath = URL(fileURLWithPath:
-        "/Users/eric/models/Qwen3.6-35B-A3B-JANG_2L")
+    /// Override with JANG_TEST_QWEN36_BUNDLE env var.
+    private static let fixturePath: URL = {
+        if let env = ProcessInfo.processInfo.environment["JANG_TEST_QWEN36_BUNDLE"] {
+            return URL(fileURLWithPath: env)
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent("models/Qwen3.6-35B-A3B-JANG_2L")
+    }()
 
     /// Reference token IDs captured from Python's transformers
     /// AutoTokenizer.encode(text, add_special_tokens=False) against

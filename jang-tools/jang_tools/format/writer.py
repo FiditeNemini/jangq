@@ -130,7 +130,6 @@ def write_jang_v2_model(
 
         # CRITICAL: metadata={"format":"mlx"} tells mlx_lm to use the fast
         # loader path. Without this, speed drops 67% (50→15 tok/s).
-        # Discovered via CRACK abliteration research (Mar 4 2026).
         save_file(shard_data, str(shard_path), metadata={"format": "mlx"})
 
     # Rename all shard files with correct total count

@@ -125,7 +125,7 @@ def _get_tensor_group_size(tensor_name: str, default_gs: int, num_experts: int =
     """
     Get the optimal group_size for a specific tensor.
 
-    Rules (from CRACK abliteration research on MiniMax, Mar 2026):
+    Rules (empirically verified on MiniMax, Mar 2026):
     - MoE router/gate: ALWAYS gs=64 (precision-critical, tiny tensor)
     - Expert MLP with 150+ experts at 2-4 bit: gs=128 (gather_qmm cache pressure)
     - Everything else: gs=64 (standard, best precision)
@@ -221,7 +221,6 @@ def convert_model(
     # Auto-detect optimal group_size for MoE models with many experts.
     # Models with 150+ experts suffer 15-25% speed regression at group_size=64
     # due to gather_qmm kernel cache pressure. group_size=128 eliminates this.
-    # Discovered via CRACK abliteration research (Mar 5 2026).
     num_experts = getattr(arch_config, 'num_experts', 0)
     has_shared_mlp = getattr(arch_config, 'has_shared_mlp', False)
     if has_shared_mlp:

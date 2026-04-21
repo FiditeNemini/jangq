@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-DEFAULT_FIXTURE = "/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M"
+DEFAULT_FIXTURE = str(Path.home() / "jang" / "models" / "Gemma-4-26B-A4B-it-JANG_4M")
 
 
 @pytest.fixture(scope="session")

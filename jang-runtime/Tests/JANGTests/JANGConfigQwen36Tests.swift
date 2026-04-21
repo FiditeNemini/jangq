@@ -114,9 +114,12 @@ final class JANGConfigQwen36Tests: XCTestCase {
     }
 
     /// Extra: load the real Qwen3.6 config from disk if available (CI may skip).
+    /// Override with JANG_TEST_QWEN36_CONFIG env var.
     func testDecodeRealQwen36ConfigIfAvailable() throws {
-        let p = URL(fileURLWithPath:
-            "/Users/eric/.cache/huggingface/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/7da1103448ba36029c34ce1a9a741dfe93ee0c50/config.json")
+        let envOverride = ProcessInfo.processInfo.environment["JANG_TEST_QWEN36_CONFIG"]
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let p = envOverride.map { URL(fileURLWithPath: $0) }
+            ?? home.appendingPathComponent(".cache/huggingface/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/7da1103448ba36029c34ce1a9a741dfe93ee0c50/config.json")
         guard FileManager.default.fileExists(atPath: p.path) else {
             throw XCTSkip("Qwen3.6 source not downloaded locally")
         }
