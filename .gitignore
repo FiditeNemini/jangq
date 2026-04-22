@@ -91,3 +91,6 @@ ralph_runner/results/
 ralph_runner/baselines/
 ralph_runner/.venv/
 ralph_runner/*.log
+
+# Worktrees (local isolated workspaces)
+.worktrees/
