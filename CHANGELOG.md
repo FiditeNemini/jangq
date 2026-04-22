@@ -2,6 +2,26 @@
 
 All notable changes to JANG Studio.
 
+## [1.0.1] — Advanced overrides wired through + public JANGTQ runtime
+
+### Fixed
+
+- **JANGTQ runtime import failure on `pip install jang[mlx]`** — 4 turboquant kernels (`tq_kernel`, `gather_tq_kernel`, `fused_gate_up_kernel`, `linear`) were present in the DMG-bundled Python but never tracked in git, so users installing `jang` from PyPI or GitHub hit `ModuleNotFoundError: No module named 'jang_tools.turboquant.tq_kernel'` at `load_jangtq`. Now tracked and shipped publicly.
+- **Architecture → Advanced overrides were silent no-ops.** Pre-1.0.1 the "Force dtype" and "Block size" pickers wrote to `plan.overrides` but `CLIArgsBuilder` dropped them on the floor — Python's convert always auto-detected regardless of UI choice. Both now propagate via new `--force-dtype {bf16,fp16,fp8}` and `-b / --block-size N` flags on `jang_tools convert`.
+
+### Added
+
+- **`jang_tools` 2.4.2** CLI flags:
+  - `-b / --block-size N` — quantization group size override (0 = auto, the default)
+  - `--force-dtype {bf16,fp16,fp8}` — bypass per-tensor safetensors-header sniff. Useful when the header is stripped or mislabeled.
+
+### Notes
+
+- JANGTQ convert scripts (`convert_qwen35_jangtq`, `convert_minimax_jangtq`) still take positional args only — extending them to the new flags is v1.1 territory.
+- 13/13 `CLIArgsBuilderTests` pass on the new propagation logic.
+
+---
+
 ## [1.0.0] — First public release
 
 The initial signed + notarized `JANGStudio.dmg` — a native macOS wizard that converts HuggingFace models to JANG and JANGTQ formats with zero Python setup.
