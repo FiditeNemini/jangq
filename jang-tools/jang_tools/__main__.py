@@ -182,6 +182,8 @@ def cmd_convert(args):
                 name = name[:-len(suffix)]
         output = f"{name}-{profile}"
 
+    from .convert import DEFAULT_BLOCK_SIZE
+    block_size = args.block_size if args.block_size > 0 else DEFAULT_BLOCK_SIZE
     result = convert_model(
         model_path=args.model,
         output_path=output,
@@ -189,6 +191,8 @@ def cmd_convert(args):
         profile=profile,
         quantization_method=args.method,
         hadamard=args.hadamard,
+        block_size=block_size,
+        force_dtype=args.force_dtype,
         progress_emitter=getattr(args, "progress_emitter", None),
     )
 
@@ -237,6 +241,14 @@ def main():
                           help="JANG profile (e.g., JANG_2L, JANG_3M) or number 1-8 (default: 2)")
     p_convert.add_argument("-m", "--method", default="mse", choices=["mse", "rtn", "mse-all"],
                           help="Quantization method (default: mse)")
+    p_convert.add_argument("-b", "--block-size", type=int, default=0,
+                          help="Quantization group size in weights per block. 0 = auto (default). "
+                               "Typical values: 32, 64, 128. Large-expert MoE models (150+) auto-pick "
+                               "128 unless this flag overrides.")
+    p_convert.add_argument("--force-dtype", choices=["bf16", "fp16", "fp8"], default=None,
+                          help="Treat source tensors as this dtype during load. Overrides the per-tensor "
+                               "safetensors-header sniff. Useful when the header is stripped or mislabeled. "
+                               "Default: auto-detect per tensor.")
     p_convert.add_argument("--hadamard", action="store_true",
                           help="Apply Hadamard rotation before quantization (QuIP# style, ~0.5-1 bit quality gain)")
     p_convert.set_defaults(func=cmd_convert)

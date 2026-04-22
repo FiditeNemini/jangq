@@ -105,4 +105,56 @@ final class CLIArgsBuilderTests: XCTestCase {
         let args = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: "JANGTQ2", modelType: "some_other_moe"))
         XCTAssertEqual(args[1], "jang_tools.convert_qwen35_jangtq")
     }
+
+    // MARK: - Advanced overrides propagate to the JANG CLI
+
+    func test_forceBlockSizeFlagsAppendWhenSet() {
+        let p = plan(profile: "JANG_4K")
+        p.overrides.forceBlockSize = 128
+        let args = CLIArgsBuilder.args(for: p)
+        XCTAssertTrue(args.contains("-b"), "expected -b flag when forceBlockSize is set")
+        let idx = args.firstIndex(of: "-b")!
+        XCTAssertEqual(args[idx + 1], "128")
+    }
+
+    func test_forceBlockSizeOmittedWhenNilOrZero() {
+        let args = CLIArgsBuilder.args(for: plan(profile: "JANG_4K"))
+        XCTAssertFalse(args.contains("-b"), "no -b flag when forceBlockSize is nil")
+    }
+
+    func test_forceDtypeFlagPropagates() {
+        for (dtype, alias) in [(SourceDtype.bf16, "bf16"),
+                               (SourceDtype.fp16, "fp16"),
+                               (SourceDtype.fp8, "fp8")] {
+            let p = plan(profile: "JANG_2L")
+            p.overrides.forceDtype = dtype
+            let args = CLIArgsBuilder.args(for: p)
+            XCTAssertTrue(args.contains("--force-dtype"),
+                          "expected --force-dtype flag when forceDtype=\(dtype)")
+            let idx = args.firstIndex(of: "--force-dtype")!
+            XCTAssertEqual(args[idx + 1], alias)
+        }
+    }
+
+    func test_forceDtypeUnknownAndJangV2OmitFlag() {
+        for dtype in [SourceDtype.unknown, .jangV2] {
+            let p = plan()
+            p.overrides.forceDtype = dtype
+            let args = CLIArgsBuilder.args(for: p)
+            XCTAssertFalse(args.contains("--force-dtype"),
+                           "forceDtype=\(dtype) should not emit a flag")
+        }
+    }
+
+    func test_jangtqIgnoresAdvancedOverridesForNow() {
+        let p = plan(family: .jangtq, profile: "JANGTQ2", modelType: "minimax_m2")
+        p.overrides.forceBlockSize = 128
+        p.overrides.forceDtype = .fp8
+        let args = CLIArgsBuilder.args(for: p)
+        // JANGTQ convert scripts take positional args only (SRC OUT PROFILE);
+        // they don't accept -b or --force-dtype yet. Extending those scripts
+        // is a separate change.
+        XCTAssertFalse(args.contains("-b"))
+        XCTAssertFalse(args.contains("--force-dtype"))
+    }
 }

@@ -160,6 +160,7 @@ def convert_model(
     profile: Optional[str] = None,
     hadamard: bool = False,
     gptq_hessian_dir: Optional[str | Path] = None,
+    force_dtype: Optional[str] = None,
     *,
     progress_emitter=None,
 ) -> dict:
@@ -201,6 +202,8 @@ def convert_model(
     print(f"  Format: v2 (MLX-native, instant load)")
     print(f"  AWQ scaling: {'yes (alpha=' + str(awq_alpha) + ')' if use_awq else 'no'}")
     print(f"  Hadamard rotation: {'yes' if hadamard else 'no'}")
+    if force_dtype:
+        print(f"  Force source dtype: {force_dtype} (per-tensor sniff overridden)")
     print(f"{'='*60}\n")
 
     # Step 1: Detect architecture
@@ -517,23 +520,45 @@ def convert_model(
             continue
 
         with safe_open(str(sf_path), framework="numpy") as f:
-            try:
-                weights = f.get_tensor(tensor_name).astype(np.float32)
-            except (TypeError, AttributeError):
+            # force_dtype overrides the per-tensor auto-detect when set:
+            #   fp16 / bf16  → skip fp8 path, load via numpy (bf16 falls back
+            #                   to raw-byte reader if numpy can't handle it).
+            #   fp8          → go directly to fp8 dequant path.
+            #   None (auto)  → the classic try-numpy-then-fallback chain.
+            if force_dtype == "fp8":
                 from .fp8 import load_fp8_tensor
                 from .calibrate import _load_bf16_tensor
                 scale_key = f"{tensor_name}_scale_inv"
-                scale_inv = None
                 try:
                     scale_inv = f.get_tensor(scale_key)
                 except Exception:
-                    # bfloat16 scale_inv can't be loaded by numpy —
-                    # read raw bytes from safetensors and convert manually
                     scale_inv = _load_bf16_from_header(str(sf_path), scale_key)
+                weights = load_fp8_tensor(sf_path, tensor_name, shape, scale_inv)
+            elif force_dtype == "bf16":
+                from .calibrate import _load_bf16_tensor
                 try:
-                    weights = load_fp8_tensor(sf_path, tensor_name, shape, scale_inv)
-                except Exception:
+                    weights = f.get_tensor(tensor_name).astype(np.float32)
+                except (TypeError, AttributeError):
                     weights = _load_bf16_tensor(sf_path, tensor_name, shape)
+            else:
+                # Auto-detect path (original behavior).
+                try:
+                    weights = f.get_tensor(tensor_name).astype(np.float32)
+                except (TypeError, AttributeError):
+                    from .fp8 import load_fp8_tensor
+                    from .calibrate import _load_bf16_tensor
+                    scale_key = f"{tensor_name}_scale_inv"
+                    scale_inv = None
+                    try:
+                        scale_inv = f.get_tensor(scale_key)
+                    except Exception:
+                        # bfloat16 scale_inv can't be loaded by numpy —
+                        # read raw bytes from safetensors and convert manually
+                        scale_inv = _load_bf16_from_header(str(sf_path), scale_key)
+                    try:
+                        weights = load_fp8_tensor(sf_path, tensor_name, shape, scale_inv)
+                    except Exception:
+                        weights = _load_bf16_tensor(sf_path, tensor_name, shape)
 
         # AWQ scaling
         awq_scales = None

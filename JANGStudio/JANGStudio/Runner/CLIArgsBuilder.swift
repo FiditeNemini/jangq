@@ -13,6 +13,15 @@ enum CLIArgsBuilder {
             var args = ["-m", "jang_tools", "convert", src, "-o", out, "-p", plan.profile,
                         "-m", plan.method.rawValue, "--progress=json", "--quiet-text"]
             if plan.hadamard { args.append("--hadamard") }
+            // Advanced overrides — propagated only when explicitly set by the
+            // user (Architecture → Advanced overrides). Omitted otherwise so
+            // Python's auto-detect stays in charge.
+            if let bs = plan.overrides.forceBlockSize, bs > 0 {
+                args.append(contentsOf: ["-b", String(bs)])
+            }
+            if let fd = plan.overrides.forceDtype, let alias = dtypeFlagValue(for: fd) {
+                args.append(contentsOf: ["--force-dtype", alias])
+            }
             return args
         case .jangtq:
             let mod: String = switch plan.detected?.modelType ?? "" {
@@ -21,6 +30,18 @@ enum CLIArgsBuilder {
                 default: "jang_tools.convert_qwen35_jangtq"
             }
             return ["-m", mod, "--progress=json", "--quiet-text", src, out, plan.profile]
+        }
+    }
+
+    /// Map SourceDtype → the alias Python's `jang_tools convert --force-dtype`
+    /// accepts. Returns nil for values that don't make sense to force (unknown,
+    /// jangV2 — the model is already JANG format, you shouldn't be reconverting).
+    private static func dtypeFlagValue(for d: SourceDtype) -> String? {
+        switch d {
+        case .bf16: return "bf16"
+        case .fp16: return "fp16"
+        case .fp8: return "fp8"
+        case .unknown, .jangV2: return nil
         }
     }
 }
