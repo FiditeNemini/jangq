@@ -331,6 +331,11 @@ class DeepseekV4RoPE(nn.Module):
         return self._inv_freq[0]
 
     def __call__(self, x, offset=0, inverse=False, positions=None):
+        # NOTE: mx.fast.rope was tried as a fast path here but produced
+        # incoherent output (likely an inv_freq layout/scale convention
+        # mismatch with YaRN-modified freqs). Reverted to manual cos/sin
+        # path which is verified bit-exact against PR #1192 reference.
+        # Future: investigate exact mx.fast.rope freqs format requirements.
         dtype = x.dtype
         L = x.shape[-2]
         pos = (

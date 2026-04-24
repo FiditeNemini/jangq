@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.5.4 — 2026-04-24
+
+### Verified
+- Long-context generation works coherently up to 700+ token prompts on
+  default plain-`KVCache` path. Compressor auto-triggers during prefill
+  via `L >= compress_ratio` check.
+- HumanEval-style code generation produces correct `is_palindrome`,
+  list ops, etc. — model is bench-ready.
+
+### Investigated
+- `mx.fast.rope` fast path tried for forward RoPE (saves ~129 ops/token
+  across 43 layers × 3 rope calls). Produced incoherent output — likely
+  YaRN inv_freq scale convention mismatch with `mx.fast.rope` expectations.
+  Kept manual cos/sin path; documented in code comment for future.
+
+
 ## 2.5.3 — 2026-04-24
 
 ### Added
