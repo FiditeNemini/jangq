@@ -133,7 +133,53 @@ def load_jangtq_model(model_path, skip_params_eval=False):
     eos_ids = config.get("eos_token_id")
     if isinstance(eos_ids, int):
         eos_ids = [eos_ids]
-    tokenizer = load_tokenizer(model_path, eos_token_ids=eos_ids)
+    try:
+        tokenizer = load_tokenizer(model_path, eos_token_ids=eos_ids)
+    except Exception as _e:
+        # Newer model_types (e.g. deepseek_v4) may trip transformers' config
+        # validation. Fall back to direct PreTrainedTokenizerFast from tokenizer.json.
+        import warnings
+        warnings.warn(f"load_tokenizer failed ({_e}); using PreTrainedTokenizerFast fallback")
+        from transformers import PreTrainedTokenizerFast
+        import os
+        tok_file = os.path.join(str(model_path), "tokenizer.json")
+        tokenizer = PreTrainedTokenizerFast(tokenizer_file=tok_file, eos_token_id=eos_ids[0] if eos_ids else None)
+
+    # Pre-compile Metal kernels layer-by-layer so the FIRST call to
+    # generate() doesn't pay 60+ seconds of cold JIT inside a single
+    # command buffer (which trips Metal's watchdog on quantized
+    # 191+ GB MoEs like Kimi K2.6). One-time ~20-30 s cost; subsequent
+    # forwards hit cached shaders.
+    try:
+        from jang_tools.load_jangtq_kimi_vlm import _warmup_jit_per_layer
+        _warmup_jit_per_layer(model)
+    except Exception as _e:
+        print(f"  [warmup] skipped ({_e!r})", flush=True)
+
+    # Apply jang_config.json chat metadata to the tokenizer so downstream
+    # generation works out-of-the-box (EOS stop, etc.). See
+    # research/DSV-FAMILY-RUNTIME-GUIDE.md §26 for the full schema.
+    chat_cfg = jang_cfg.get("chat", {}) if isinstance(jang_cfg, dict) else {}
+    if chat_cfg:
+        # Set EOS if tokenizer fallback didn't pick it up.
+        cfg_eos_id = chat_cfg.get("eos_token_id")
+        cfg_eos_tok = chat_cfg.get("eos_token")
+        if cfg_eos_id is not None and getattr(tokenizer, "eos_token_id", None) is None:
+            try:
+                tokenizer.eos_token_id = cfg_eos_id
+            except Exception:
+                pass
+        if cfg_eos_tok is not None and getattr(tokenizer, "eos_token", None) in (None, ""):
+            try:
+                tokenizer.eos_token = cfg_eos_tok
+            except Exception:
+                pass
+        # Expose the chat metadata for caller convenience.
+        try:
+            tokenizer.jang_chat = chat_cfg
+        except Exception:
+            pass
+
     print(f"  Done (eos_token_ids={eos_ids})", flush=True)
     return model, tokenizer
 
@@ -245,10 +291,12 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     #   model.                         — standard MiniMax / GLM / Qwen3
     #   model.language_model.          — raw HF Qwen3.5/3.6 VLM
     #   language_model.model.          — post-sanitize Qwen3.5/3.6 VLM
-    _VLM_PREFIX = r"(?:model\.language_model\.|language_model\.model\.|model\.)"
+    _VLM_PREFIX = r"(?:model\.language_model\.|language_model\.model\.|model\.)?"
     glm_pat = re.compile(rf"^({_VLM_PREFIX}layers\.\d+\.mlp\.)experts\.(\d+)\.(gate_proj|up_proj|down_proj)$")
     mm_pat  = re.compile(rf"^({_VLM_PREFIX}layers\.\d+\.block_sparse_moe\.)experts\.(\d+)\.(w[123])$")
     qw_pat  = re.compile(rf"^({_VLM_PREFIX}layers\.\d+\.mlp\.)experts\.(gate_up_proj|down_proj|gate_proj|up_proj)$")
+    # DSV4: layers.N.ffn.experts.E.w[123] → map to switch_mlp.{gate_proj,down_proj,up_proj}
+    dsv4_pat = re.compile(rf"^({_VLM_PREFIX}layers\.\d+\.ffn\.)experts\.(\d+)\.(w[123])$")
     mm_map  = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
     grouped_experts = {}
     # Pre-stacked tensors go straight into tq_groups with switch_mlp naming (no stacking).
@@ -265,6 +313,15 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         m = mm_pat.match(base)
         if m:
             layer_prefix = m.group(1)
+            expert_id = int(m.group(2))
+            proj_name = mm_map[m.group(3)]
+            grouped_experts.setdefault((layer_prefix, proj_name), {})[expert_id] = tq_groups.pop(base)
+            continue
+        m = dsv4_pat.match(base)
+        if m:
+            # DSV4: layers.N.ffn.experts.E.w[123] — emit under layers.N.mlp.
+            # prefix (matches our mlx_model sanitize convention).
+            layer_prefix = m.group(1).replace(".ffn.", ".mlp.")
             expert_id = int(m.group(2))
             proj_name = mm_map[m.group(3)]
             grouped_experts.setdefault((layer_prefix, proj_name), {})[expert_id] = tq_groups.pop(base)
@@ -393,7 +450,45 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         # of vision_tower and use a minimal sanitize that only handles key
         # renames + lm_head tie + mtp drops.
         is_vlm_model = hasattr(model, "vision_tower") and hasattr(model, "language_model")
-        if is_vlm_model:
+        # Kimi K2.6 (kimi_k25 model_type -> routed to mlx_vlm.kimi_vl via
+        # MODEL_REMAPPING in load_jangtq_kimi_vlm). Its on-disk projector is
+        # named `mm_projector.{pre_norm, proj.0, proj.2}` (class PatchMergerMLP
+        # in modeling_kimi_k25.py), but mlx_vlm's `KimiVLMultiModalProjector`
+        # expects `multi_modal_projector.{pre_norm, linear_1, linear_2}`.
+        # Architecturally identical — both are LN -> Linear(H, H) -> GELU ->
+        # Linear(H, text_hidden). Just needs the Python attribute rename.
+        model_type = getattr(model, "model_type", None) or (
+            getattr(model.config, "model_type", None)
+            if hasattr(model, "config") else None
+        )
+        is_kimi_vlm = is_vlm_model and model_type == "kimi_k25"
+        if is_kimi_vlm:
+            renamed = {}
+            for k, v in regular.items():
+                if k.startswith("mm_projector.pre_norm."):
+                    nk = k.replace(
+                        "mm_projector.pre_norm.",
+                        "multi_modal_projector.pre_norm.", 1,
+                    )
+                elif k.startswith("mm_projector.proj.0."):
+                    nk = k.replace(
+                        "mm_projector.proj.0.",
+                        "multi_modal_projector.linear_1.", 1,
+                    )
+                elif k.startswith("mm_projector.proj.2."):
+                    nk = k.replace(
+                        "mm_projector.proj.2.",
+                        "multi_modal_projector.linear_2.", 1,
+                    )
+                else:
+                    nk = k
+                renamed[nk] = v
+            regular = renamed
+            # kimi_vl's Model.sanitize just strips `encoder.` from vision_tower
+            # keys — safe to call directly. No expert re-split risk (Kimi's
+            # on-disk experts are per-index, already handled by our TQ stack).
+            regular = model.sanitize(regular)
+        elif is_vlm_model:
             regular = _vlm_minimal_sanitize(model, regular)
         else:
             regular = model.sanitize(regular)

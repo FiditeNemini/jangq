@@ -1510,6 +1510,7 @@ def _upgrade_switch_to_quantized(model, bits, group_size):
 
 def _fix_quantized_bits(model, weights):
     import mlx.nn as nn
+    import mlx.core as mx
     try:
         from mlx_lm.models.switch_layers import QuantizedSwitchLinear
         quant_types = (nn.QuantizedLinear, nn.QuantizedEmbedding, QuantizedSwitchLinear)
@@ -1531,6 +1532,41 @@ def _fix_quantized_bits(model, weights):
             continue
         if not hasattr(module, 'scales') or not hasattr(module, 'weight'):
             continue
+        # MXFP4/MXFP8 detection: scales stored as uint8 (UE8M0 exponent).
+        # Standard affine has float16/float32 scales. When we see uint8,
+        # reconfigure the module for mxfp4 (if bits=4) or mxfp8 (if bits=8).
+        try:
+            if module.scales.dtype == mx.uint8:
+                # biases field is absent or zero-size for mxfp4/mxfp8
+                if not hasattr(module, 'biases') or module.biases is None or (
+                    hasattr(module.biases, 'size') and module.biases.size == 0
+                ):
+                    # Infer bits from weight/scale shape ratio
+                    w_cols = module.weight.shape[-1]
+                    s_cols = module.scales.shape[-1]
+                    # mxfp4: weight is packed 8x per uint32 → in_dim = w_cols * 8
+                    # mxfp8: weight is packed 4x per uint32 → in_dim = w_cols * 4
+                    # scale block_size = 32 for both mxfp4 and mxfp8
+                    # in_dim = s_cols * 32
+                    in_dim_mxfp4 = w_cols * 8
+                    in_dim_mxfp8 = w_cols * 4
+                    if s_cols * 32 == in_dim_mxfp4:
+                        module.mode = 'mxfp4'
+                        module.bits = 4
+                        module.group_size = 32
+                    elif s_cols * 32 == in_dim_mxfp8:
+                        module.mode = 'mxfp8'
+                        module.bits = 8
+                        module.group_size = 32
+                    # Ensure biases attr removed so quantized_matmul skips it
+                    if hasattr(module, 'biases'):
+                        try:
+                            del module.biases
+                        except Exception:
+                            module.biases = None
+                    continue  # done with this module
+        except Exception:
+            pass
         try:
             # Infer actual bits and group_size from tensor shapes.
             # weight: (out, in_dim * bits / 32), scales: (out, in_dim / gs)

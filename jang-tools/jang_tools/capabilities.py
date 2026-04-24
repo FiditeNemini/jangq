@@ -40,6 +40,8 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # GLM 5.x (MLA + DSA)
     "glm_moe_dsa":      ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
     "glm5":             ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
+    # DeepSeek V4 (MLA + CSA/HCA + mHC + hash routing)
+    "deepseek_v4":      ("deepseek_v4", "deepseek_r1", "deepseek", True,  "mla"),
     # GLM 4 (dense + MoE, no MLA)
     "glm4":             ("glm4",        "deepseek_r1", "glm47",    False, "kv"),
     "glm4_moe":         ("glm4_moe",    "deepseek_r1", "glm47",    False, "kv"),

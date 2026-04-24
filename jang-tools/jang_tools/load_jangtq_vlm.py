@@ -86,7 +86,13 @@ def _mlx_vlm_skeleton(model_path: Path):
             class_predicate=get_class_predicate,
         )
 
-    processor = load_processor(model_path, add_generation_prompt=True)
+    # Kimi K2.6 (and other recent VLMs) ship a custom processor
+    # (`kimi_k25_processor.py` etc.) that AutoProcessor refuses to load
+    # without trust_remote_code. Bundles in this loader are opt-in — we're
+    # already executing their safetensors — so forward trust_remote_code=True.
+    processor = load_processor(
+        model_path, add_generation_prompt=True, trust_remote_code=True,
+    )
     _install_video_fallback(processor)
     return model, processor, config, model_config
 

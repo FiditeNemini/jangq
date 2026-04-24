@@ -48,17 +48,15 @@ STALE_JANG_ARTIFACT_PATTERNS: list[str] = [
 def _remove_stale_jang_artifacts(output_path: Path) -> list[str]:
     """Remove stale JANG-output files from a pre-existing output_path.
 
-    Returns a list of removed filenames for logging. Scoped to the KNOWN
-    JANG-output patterns in `STALE_JANG_ARTIFACT_PATTERNS` — user-added
-    files (README.md, .gitattributes, custom notes) are untouched.
-
-    Idempotent on a clean directory (returns empty list). Tolerant of
-    permission errors (print warning + continue) so a permission-denied
-    file doesn't abort the whole convert.
+    Scoped to `STALE_JANG_ARTIFACT_PATTERNS`. Skips files whose name contains
+    'NNNNN' (in-progress shard names being written by the current convert run)
+    to avoid racing with a concurrent pre-flush pass in the same process.
     """
     removed: list[str] = []
     for pattern in STALE_JANG_ARTIFACT_PATTERNS:
         for stale in output_path.glob(pattern):
+            if "NNNNN" in stale.name:
+                continue
             try:
                 stale.unlink()
                 removed.append(stale.name)
