@@ -612,6 +612,20 @@ def _precompute_freqs_cis_real(
     return mx.stack([cos, sin], axis=-1)  # (seqlen, dim/2, 2)
 
 
+# Cache of unit weight tensors for mx.fast.rms_norm (per-head Q norm uses
+# no learned weights; reusing a single-allocated ones tensor avoids
+# realloc per call across 43 layers per token).
+_Q_NORM_WEIGHT_CACHE = {}
+
+def _get_q_norm_ones(head_dim, dtype):
+    key = (head_dim, dtype)
+    w = _Q_NORM_WEIGHT_CACHE.get(key)
+    if w is None:
+        w = mx.ones((head_dim,), dtype=dtype)
+        _Q_NORM_WEIGHT_CACHE[key] = w
+    return w
+
+
 class DeepseekV4Attention(nn.Module):
     """MLA with low-rank Q and grouped low-rank O.
 
@@ -695,15 +709,16 @@ class DeepseekV4Attention(nn.Module):
 
         q_residual = self.q_norm(self.wq_a(x))
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
-        q = q * mx.rsqrt(
-            (q.astype(mx.float32) ** 2).mean(axis=-1, keepdims=True)
-            + self.args.rms_norm_eps
+        # Per-head RMSNorm via mx.fast.rms_norm (1 fused Metal kernel vs 3 ops).
+        # Uses unit weight tensor — DSV4 has no learned per-head norm weight.
+        q = mx.fast.rms_norm(
+            q,
+            weight=_get_q_norm_ones(self.head_dim, q.dtype),
+            eps=self.args.rms_norm_eps,
         )
-        q = q.astype(x.dtype)
         q = q.transpose(0, 2, 1, 3)
 
-        kv = self.kv_norm(self.wkv(x)).reshape(B, L, 1, self.head_dim)
-        kv = kv.transpose(0, 2, 1, 3)
+        kv = self.kv_norm(self.wkv(x)).reshape(B, L, 1, self.head_dim).transpose(0, 2, 1, 3)
 
         q = _apply_partial_rope(q, self.rope, offset)
         kv = _apply_partial_rope(kv, self.rope, offset)
@@ -745,7 +760,11 @@ class DeepseekV4Attention(nn.Module):
                     full_kv = mx.concatenate([full_kv, pooled], axis=2)
 
         if mask is not None and full_kv.shape[2] > mask.shape[-1]:
-            pad = mx.ones(
+            # Pad with ZEROS (additive mask: 0 = allowed). Reference PR #1192
+            # uses zeros; earlier `mx.ones(...)` bumped pooled positions by +1
+            # in the softmax (mild bug only triggered when compressor output is
+            # non-empty, i.e. prompts ≥ compress_ratio).
+            pad = mx.zeros(
                 mask.shape[:-1] + (full_kv.shape[2] - mask.shape[-1],), dtype=mask.dtype
             )
             mask = mx.concatenate([mask, pad], axis=-1)
