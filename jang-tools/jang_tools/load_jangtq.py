@@ -114,6 +114,17 @@ def load_jangtq_model(model_path, skip_params_eval=False):
 
     from mlx_lm.utils import load_config, load_model as _load_skeleton, load_tokenizer
     model_config = load_config(model_path)
+
+    # Auto-register custom model_types with mlx_lm for bundles whose
+    # architecture isn't (yet) in mlx_lm main. deepseek_v4 ships in
+    # jang_tools.dsv4.mlx_register; importing the package triggers it.
+    _model_type = model_config.get("model_type", "")
+    if _model_type == "deepseek_v4":
+        try:
+            import jang_tools.dsv4  # noqa: F401  (registers on import)
+        except Exception as _e:
+            warnings.warn(f"jang_tools.dsv4 register failed: {_e}")
+
     if "quantization" not in model_config:
         model_config["quantization"] = {"group_size": 64, "bits": 2}
 

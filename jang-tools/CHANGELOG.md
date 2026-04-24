@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.5.3 — 2026-04-24
+
+### Added
+- `Model.make_cache()` for `deepseek_v4` returns proper per-layer cache list.
+  Defaults to plain `KVCache` (short-prompt-safe). Set env `DSV4_LONG_CTX=1`
+  to enable `DeepseekV4Cache` for compress_ratio>0 layers (long-context path
+  still under refinement).
+- `DeepseekV4Cache.state` / `keys` / `meta_state` properties for proper
+  `mlx_lm.generate` pipelined evaluation.
+- `jang_tools.load_jangtq.load_jangtq_model` auto-registers `deepseek_v4`
+  via `import jang_tools.dsv4` when the bundle's model_type matches.
+
+### Known issue
+- Long-context (>128 token) generation through Compressor + Indexer path is
+  experimental; works for short prompts (≤128 tokens) coherently. Long-prompt
+  decode polish is a follow-up.
+
 ## 2.5.2 — 2026-04-24
 
 ### Removed

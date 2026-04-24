@@ -375,11 +375,69 @@ class DeepseekV4Cache:
     def offset(self):
         return self.local.offset
 
+    @property
+    def keys(self):
+        return self.local.keys
+
+    @keys.setter
+    def keys(self, value):
+        self.local.keys = value
+
+    @property
+    def state(self):
+        """Cache state tuple — mlx_lm generate iterates this for pipelined evaluation."""
+        local_state = None if self.local.empty() else self.local.state
+        return (
+            local_state,
+            tuple(self.compressor_state[k] for k in ("buffer_kv", "buffer_gate", "pooled")),
+            tuple(self.indexer_state[k] for k in ("buffer_kv", "buffer_gate", "pooled")),
+        )
+
+    @state.setter
+    def state(self, value):
+        local_state, compressor_state, indexer_state = value
+        if local_state is None:
+            self.local.keys = None
+            self.local.values = None
+        else:
+            self.local.state = local_state
+        self.compressor_state = dict(zip(("buffer_kv", "buffer_gate", "pooled"), compressor_state))
+        self.indexer_state = dict(zip(("buffer_kv", "buffer_gate", "pooled"), indexer_state))
+
+    @property
+    def meta_state(self):
+        return self.local.meta_state
+
+    @meta_state.setter
+    def meta_state(self, value):
+        self.local.meta_state = value
+
     def update_and_fetch(self, keys, values):
         return self.local.update_and_fetch(keys, values)
 
     def make_mask(self, *a, **k):
         return self.local.make_mask(*a, **k)
+
+    def is_trimmable(self):
+        return self.local.is_trimmable()
+
+    def trim(self, n):
+        return self.local.trim(n)
+
+    def size(self):
+        return self.local.size()
+
+    def empty(self):
+        return self.local.empty()
+
+    @property
+    def nbytes(self):
+        total = self.local.nbytes
+        for state in (self.compressor_state, self.indexer_state):
+            for value in state.values():
+                if value is not None:
+                    total += value.nbytes
+        return total
 
     def _branch_state(self, key):
         return self.indexer_state if key == "indexer_state" else self.compressor_state
@@ -1012,6 +1070,28 @@ class Model(nn.Module):
             w_f = w.astype(mx.float32)
         h_f = h.astype(mx.float32)
         return h_f @ w_f.T
+
+    def make_cache(self):
+        """Build per-layer cache objects.
+        SHORT-PROMPT-SAFE default: use plain KVCache for all layers. Compressor
+        + Indexer fast-path is taken in DeepseekV4Attention (cache is None for
+        v4-state, so pooled is empty and skipped). This makes prompts up to
+        sliding_window=128 tokens behave identically to the pre-make_cache path.
+        For >128 tokens, attention falls back to local-only sliding-window context
+        (still coherent, but loses pooled-global benefit). To enable full
+        long-context behavior with Compressor + Indexer, set the env var
+        DSV4_LONG_CTX=1 — then compress_ratio>0 layers get DeepseekV4Cache.
+        """
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+        import os
+        long_ctx = os.environ.get("DSV4_LONG_CTX", "0") == "1"
+        caches = []
+        for layer in self.model.layers:
+            if long_ctx and layer.self_attn.compress_ratio:
+                caches.append(DeepseekV4Cache(self.args.sliding_window))
+            else:
+                caches.append(KVCache())
+        return caches
 
     @property
     def layers(self):
