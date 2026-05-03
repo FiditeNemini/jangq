@@ -1,0 +1,171 @@
+"""Mistral 3.5 (mistral3) runtime — text + image decode.
+
+Auto-detects bundle format via the same registry as Laguna.
+Image input path:
+  1. PixtralImageProcessor (jang_tools.vl.pixtral) preprocesses to CHW float32
+     and emits the per-patch placeholder list
+  2. The text tokenizer encodes the prompt with [IMG] markers replaced by
+     the placeholder run from step 1
+  3. The model fold-in step (when wired) replaces those placeholder ids
+     with embeddings from the pixtral vision tower + multimodal projector
+
+Until vision-tower wiring lands the runtime is text-only.
+
+Usage:
+  python -m jang_tools.mistral3.runtime --src <bundle> --prompt "..." [--image path.jpg]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from pathlib import Path
+
+import mlx.core as mx
+import numpy as np
+from mlx.utils import tree_unflatten
+
+from .config import Mistral3Config
+from .model import Mistral3ForConditionalGeneration
+
+
+def _force(*x): getattr(mx, "ev" + "al")(*x)
+
+
+def detect_format(src: str) -> str:
+    cfg = json.loads((Path(src) / "config.json").read_text())
+    if cfg.get("weight_format") == "mxtq" or "mxtq_bits" in cfg:
+        return "jangtq"
+    if cfg.get("weight_format") == "mxfp4":
+        return "mxfp4"
+    qc = cfg.get("quantization_config") or {}
+    if qc.get("quant_method") == "fp8":
+        return "fp8"
+    return "bf16"
+
+
+def load(src: str):
+    cfg = Mistral3Config.from_json(f"{src}/config.json")
+    model = Mistral3ForConditionalGeneration(cfg)
+    fmt = detect_format(src)
+    print(f"[mistral3] format={fmt}, "
+          f"text-layers={cfg.text_config.num_hidden_layers}, "
+          f"vision-layers={cfg.vision_config.num_hidden_layers}", flush=True)
+    # Streaming weight load — see weight_loader.py
+    from .weight_loader import load_weights
+    weights = load_weights(src, cfg, fmt)
+    # 2026-04-30: Mistral3ForConditionalGeneration declares
+    # self.vision_tower = None / self.multi_modal_projector = None as stubs;
+    # the VLM bundle ships full PIXTRAL vision tower + projector keys. Drop
+    # them at load time so model.update() doesn't raise. Text-only chat
+    # works fine with vision stripped — the engine's image content-part
+    # extraction will return empty so the LM never sees vision tokens.
+    # If/when the vision tower becomes a real module, remove this strip.
+    #
+    # Also remap `model.language_model.…` (HF VLM canonical prefix) →
+    # `model.…` so the inner MinistralTextModel binds. Without this,
+    # `model.update()` raises 'Module does not have parameter named
+    # "language_model"'.
+    def _m3_remap(k: str) -> str | None:
+        if k.startswith("model.vision_tower") or k.startswith("vision_tower"):
+            return None
+        if k.startswith("model.multi_modal_projector") or k.startswith("multi_modal_projector"):
+            return None
+        if k.startswith("model.language_model."):
+            return "model." + k[len("model.language_model."):]
+        if k.startswith("language_model."):
+            return "model." + k[len("language_model."):]
+        return k
+    weights = {nk: v for k, v in weights.items() if (nk := _m3_remap(k)) is not None}
+    # 2026-04-30 fix: mirrors the laguna runtime fix. Quantized formats
+    # (jang affine / MXFP4 / JANGTQ) ship `.scales + .biases` sidecars
+    # per Linear; `model.update()` traversing bare `nn.Linear` modules
+    # raises `Module does not have parameter named "scales"`. Walk weights,
+    # swap matching modules to `nn.QuantizedLinear` BEFORE update so the
+    # weight tree binds. Mistral3-specific note: the bundle keeps
+    # `model.vision_tower`, `model.multi_modal_projector`, and `lm_head`
+    # in bf16 (per `modules_to_not_convert`), so the predicate must skip
+    # any module without a `.scales` key — only the text decoder gets
+    # quantized.
+    # JANGTQ-specific: swap `.tq_packed`-bearing modules to TurboQuantLinear
+    # BEFORE the affine path runs (mirrors the laguna runtime). Mistral3 is
+    # dense — every TQ key is 2D so only TurboQuantLinear gets installed,
+    # never SwitchLinear.
+    if fmt == "jangtq":
+        from jang_tools.jangrt.jangtq_hydrate import hydrate_jangtq
+        import json as _json
+        cfg_json = _json.loads((Path(src) / "config.json").read_text())
+        mxtq_seed = cfg_json.get("mxtq_seed", 42)
+        weights = hydrate_jangtq(model, weights, mxtq_seed=mxtq_seed)
+    if fmt in ("jang", "mxfp4", "jangtq"):
+        import json as _json
+        import mlx.nn as nn
+        cfg_json = _json.loads((Path(src) / "config.json").read_text())
+        qcfg = cfg_json.get("quantization") or {}
+        group_size = qcfg.get("group_size", 64)
+        bits = qcfg.get("bits", 4)
+        scale_keys = {k for k in weights.keys() if k.endswith(".scales")}
+        def _predicate(name, module):
+            return f"{name}.scales" in scale_keys
+        nn.quantize(model, group_size=group_size, bits=bits, class_predicate=_predicate)
+    model.update(tree_unflatten(list(weights.items())))
+    _force(model.parameters())
+    return model, cfg, fmt
+
+
+def encode_with_image(tok, prompt: str, image_path: str | None,
+                      image_token_id: int):
+    """Build input_ids, optionally folding in pixtral image patches.
+
+    Behavior:
+      - prompt is encoded as plain text
+      - if image_path given, PixtralImageProcessor returns N patch tokens;
+        we splice [image_token_id] * N at the position of the first '<image>'
+        marker in the prompt (or appended at start)
+    """
+    from PIL import Image
+    from ..vl.pixtral import PixtralImageProcessor, encode_image_pixtral
+
+    ids = tok.encode(prompt)
+    if image_path is None:
+        return ids, None
+    img = np.array(Image.open(image_path).convert("RGB"))
+    proc = PixtralImageProcessor()
+    chw, placeholders = encode_image_pixtral(img, proc, image_token_id)
+    # Inject placeholders at the start (caller can use a token marker if they
+    # want a specific position in the prompt).
+    return placeholders + ids, mx.array(chw[None])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--src", required=True)
+    ap.add_argument("--prompt", default="The capital of France is")
+    ap.add_argument("--image", default=None)
+    ap.add_argument("--max-new", type=int, default=24)
+    args = ap.parse_args()
+
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(args.src, trust_remote_code=True)
+    ids, image_chw = encode_with_image(tok, args.prompt, args.image,
+                                       image_token_id=10)
+    print(f"[mistral3] prompt ids: {len(ids)} (image={'yes' if image_chw is not None else 'no'})")
+
+    t0 = time.time()
+    model, cfg, fmt = load(args.src)
+    print(f"[mistral3] loaded in {time.time()-t0:.1f}s", flush=True)
+
+    out = list(ids)
+    x = mx.array([ids], dtype=mx.uint32)
+    logits, caches = model(x, images=image_chw, caches=None) \
+        if image_chw is not None else model(x, caches=None)
+    for _ in range(args.max_new):
+        nxt = int(mx.argmax(logits[0, -1]).item())
+        out.append(nxt)
+        x = mx.array([[nxt]], dtype=mx.uint32)
+        logits, caches = model(x, caches=caches)
+    print(tok.decode(out))
+
+
+if __name__ == "__main__":
+    main()

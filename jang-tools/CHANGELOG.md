@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.5.12 — 2026-05-02
+
+### Added
+- `jang_tools.jangrt.jangtq_hydrate` — pure helper that swaps
+  `nn.Linear` / `SwitchLinear` modules carrying `.tq_packed` /
+  `.tq_norms` / `.tq_bits` keys to `TurboQuantLinear` /
+  `TurboQuantSwitchLinear` and returns the leftover regular weights.
+
+### Fixed
+- Laguna JANGTQ (`weight_format=mxtq`) bundles now load. Previous
+  releases hit `ValueError: Module does not have parameter named
+  "experts"` at `model.update` because the runtime's nn.quantize
+  predicate-based affine path could not bind `.tq_packed` keys to
+  bare `nn.Linear` / `SwitchLinear` modules.
+- Mistral-Medium-3.5 (`ministral3`) JANGTQ — same fix shape (dense,
+  TurboQuantLinear only).
+
 ## 2.5.4 — 2026-04-24
 
 ### Verified

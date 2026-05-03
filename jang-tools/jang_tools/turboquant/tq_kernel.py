@@ -222,8 +222,21 @@ class TurboQuantLinear(nn.Module):
         awq = getattr(self, "awq_scale", None)
         if awq is not None:
             x = x / awq.astype(x.dtype)
-        y = tq_matmul(x, self.packed, self.norms, self.codebook, self.signs,
+        # The Metal kernel treats x as 2-D `(batch, in_features)` and uses
+        # `batch_size = x.shape[0]` for grid sizing; passing a 3-D activation
+        # `(B, T, in_features)` makes the kernel grid B-wide and silently
+        # drops the T dim, returning `(B, out_features)`. Flatten leading
+        # dims here so any caller (Linear projections inside attention with
+        # T>1 prefill) feeds the kernel a (B*T, in_features) batch.
+        orig_shape = x.shape
+        if x.ndim > 2:
+            x_flat = x.reshape(-1, self.in_features)
+        else:
+            x_flat = x
+        y = tq_matmul(x_flat, self.packed, self.norms, self.codebook, self.signs,
                        self.in_features, self.bits)
+        if x.ndim > 2:
+            y = y.reshape(*orig_shape[:-1], self.out_features)
         if "bias" in self:
             y = y + self.bias
         return y
