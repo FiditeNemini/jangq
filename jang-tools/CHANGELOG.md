@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.5.13 — 2026-05-03
+
+### Fixed
+- `load_jangtq.py`: P18 QKV-fusion patch crashed on attention classes
+  whose head-count attribute isn't `num_attention_heads`. NemotronH /
+  DeepSeek use `num_heads`; Qwen3 uses `n_heads`. Mirrored the
+  pre-patch safety check's getattr fallback inside the patched
+  `__call__` body so the reshape resolves correctly across families.
+  Also bails to the original call when no recognised name is found.
+- `load_jangtq.py`: P18 unconditionally called `self.rope(queries,
+  ...)` but NemotronHAttention has no rope (cache update happens
+  directly before SDPA). Gated the rope step behind `hasattr` and
+  added a fallback for `self.scale` (1/sqrt(head_dim)) for classes
+  that don't expose `scale` or use `softmax_scale`.
+
+These fixes make Nemotron-H bundles bootable through the canonical
+`load_jangtq_model` path. Without them the engine emitted empty
+responses with no decoded tokens because every prefill aborted on
+the AttributeError.
+
+
 ## 2.5.12 — 2026-05-02
 
 ### Added

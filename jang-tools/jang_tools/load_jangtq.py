@@ -827,18 +827,57 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                     if getattr(self, "use_qk_norm", False):
                         queries = self.q_norm(queries)
                         keys = self.k_norm(keys)
-                    queries = queries.reshape(B, L, self.num_attention_heads, -1).transpose(0, 2, 1, 3)
-                    keys = keys.reshape(B, L, self.num_key_value_heads, -1).transpose(0, 2, 1, 3)
-                    values = values.reshape(B, L, self.num_key_value_heads, -1).transpose(0, 2, 1, 3)
+                    # Different model classes name the head-count
+                    # attribute differently — Llama-style uses
+                    # `num_attention_heads`, Qwen3 uses `n_heads`,
+                    # NemotronHAttention / DeepSeek use `num_heads`,
+                    # MLA classes use `n_q_heads` etc. The pre-patch
+                    # safety-check at the gather step (line ~797)
+                    # already does this fallback; mirror it here so
+                    # the runtime reshape doesn't AttributeError on
+                    # families that don't expose `num_attention_heads`.
+                    n_heads = getattr(self, "num_attention_heads", None) \
+                        or getattr(self, "num_heads", None) \
+                        or getattr(self, "n_heads", None)
+                    n_kv_heads = getattr(self, "num_key_value_heads", None) \
+                        or getattr(self, "n_kv_heads", None) \
+                        or getattr(self, "num_kv_heads", None) \
+                        or n_heads
+                    if n_heads is None or n_kv_heads is None:
+                        # No recognised head-count attribute — bail to
+                        # the original __call__ rather than reshape
+                        # to a wrong layout.
+                        return orig_call(self, x, mask=mask, cache=cache)
+                    queries = queries.reshape(B, L, n_heads, -1).transpose(0, 2, 1, 3)
+                    keys = keys.reshape(B, L, n_kv_heads, -1).transpose(0, 2, 1, 3)
+                    values = values.reshape(B, L, n_kv_heads, -1).transpose(0, 2, 1, 3)
+                    # Some attention families don't apply rope at all
+                    # (NemotronHAttention does cache update directly,
+                    # no rotary embedding). Bail to the original
+                    # `__call__` rather than crash on `self.rope` —
+                    # the QKV fusion savings still apply via the
+                    # `qkv = fused(x)` step above; we just give up
+                    # the dispatch fusion for the rope+SDPA stage.
+                    has_rope = hasattr(self, "rope")
                     if cache is not None:
-                        queries = self.rope(queries, offset=cache.offset)
-                        keys = self.rope(keys, offset=cache.offset)
+                        if has_rope:
+                            queries = self.rope(queries, offset=cache.offset)
+                            keys = self.rope(keys, offset=cache.offset)
                         keys, values = cache.update_and_fetch(keys, values)
                     else:
-                        queries = self.rope(queries); keys = self.rope(keys)
+                        if has_rope:
+                            queries = self.rope(queries)
+                            keys = self.rope(keys)
+                    # SDPA scale: most classes have `self.scale`. Some
+                    # MLA-style use `self.softmax_scale` or compute
+                    # inline. Fallback to standard `1/sqrt(head_dim)`.
+                    sdpa_scale = getattr(self, "scale", None)
+                    if sdpa_scale is None:
+                        head_dim = queries.shape[-1]
+                        sdpa_scale = head_dim ** -0.5
                     from mlx_lm.models.base import scaled_dot_product_attention
                     out = scaled_dot_product_attention(
-                        queries, keys, values, cache=cache, scale=self.scale, mask=mask,
+                        queries, keys, values, cache=cache, scale=sdpa_scale, mask=mask,
                     )
                     out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
                     return self.o_proj(out)
