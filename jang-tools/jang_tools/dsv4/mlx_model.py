@@ -367,14 +367,38 @@ def _apply_partial_rope(x, rope, offset=0, inverse=False, positions=None):
 
 
 class DeepseekV4Cache:
-    """Simplified cache for DSV4: wraps a plain KVCache with compressor/indexer
-    state buffers (cross-window pooling). For short prompts (<sliding_window),
-    the plain KVCache is equivalent to RotatingKVCache."""
-    def __init__(self, sliding_window):
+    """Simplified cache for DSV4: wraps a RotatingKVCache (sliding-window local
+    attention) with `compressor_state` + `indexer_state` cumulative pool buffers
+    (HSA + CSA cross-window compressed-global-context).
+
+    The cache is constructed per layer with that layer's `compress_ratio`. The
+    ratio is needed by `trim()` to compute proportional pool truncation —
+    each compressed pool row covers `compress_ratio` underlying KV tokens, so
+    truncating the local KV by `n` tokens means dropping `n // ratio`
+    compressed rows from the tail (the latest, output-side rows that the
+    trim is specifically meant to discard).
+
+    For short prompts (<sliding_window), the plain rotating-cache behavior is
+    equivalent to RotatingKVCache.
+
+    `compress_ratio=None` is accepted for backward compatibility — `trim()`
+    falls back to the v2.5.14 full-reset behavior in that case (correct but
+    pays full pool re-derivation on every multi-turn). The `make_cache`
+    factory always passes the layer's actual ratio so this fallback only
+    fires for callers that constructed the cache before this signature
+    extension."""
+    def __init__(self, sliding_window, compress_ratio=None):
         from mlx_lm.models.cache import RotatingKVCache
         self.local = RotatingKVCache(max_size=sliding_window, keep=0)
         self.compressor_state = {"buffer_kv": None, "buffer_gate": None, "pooled": None}
         self.indexer_state = {"buffer_kv": None, "buffer_gate": None, "pooled": None}
+        # `compress_ratio` is the per-layer attention compression ratio used
+        # by Compressor.accumulate_windows / update_pool. Stored on the cache
+        # so `trim()` can do proportional pool-row truncation matching the
+        # llama.cpp dsv4_make_row_range strategy (see
+        # antirez/llama.cpp-deepseek-v4-flash, src/llama-memory-hybrid-iswa.cpp
+        # `dsv4_clear_rows`). When unset, `trim()` falls back to full reset.
+        self.compress_ratio = compress_ratio
 
     @property
     def offset(self):
@@ -427,74 +451,103 @@ class DeepseekV4Cache:
         return self.local.is_trimmable()
 
     def trim(self, n):
-        """Trim local KV by n tokens AND reset compressor + indexer pool state.
+        """Trim local KV by n tokens AND truncate compressor + indexer pool state.
 
-        Why the reset is mandatory:
-        ----------------------------
+        Why this matters
+        ----------------
         `DeepseekV4Cache` wraps a `RotatingKVCache` (`self.local`) for the
         sliding-window local attention path PLUS two cumulative pool-state
         dicts (`compressor_state`, `indexer_state`) holding the HSA / CSA
-        compressed-global-context buffers. Every forward pass updates the
-        pool state via `accumulate_windows` (window-aligned KV/gate
-        buffers) and `update_pool` (pooled compressed vectors), driven by
-        the running KV positions.
+        cross-window compressed-global-context. Every forward pass updates
+        the pool via `accumulate_windows` (window-aligned KV/gate buffers)
+        and `update_pool` (appended pooled vectors), driven by running KV
+        positions.
 
-        Pre-fix: `trim(n)` only delegated to `self.local.trim(n)` —
-        truncating the local KV by n tokens without touching the pool
-        state. The pool buffers continued to reflect the **pre-trim**
-        positions, including any output-side tokens that the trim
-        operation was specifically meant to discard. The scheduler then
-        stored the half-truncated cache to the prefix cache for next-turn
-        reuse via `__getstate__`. On the next multi-turn `/v1/chat/
-        completions`, the prefix-cache hit restored the contaminated pool
-        via `__setstate__`, and the model's pool-attention path read
-        global-context vectors built from a previous turn's GENERATED
-        OUTPUT — typically the polite-assistant attractor in DSV4-Flash
-        chat-mode training data ("How are things with you? Let me know
-        if there's anything I can help with."). The contamination
-        compounded across turns and the model drifted into a repeating
-        loop of those phrases until max_tokens.
+        The bug `trim()` fixes: pre-2.5.14, `trim(n)` only delegated to
+        `self.local.trim(n)` — truncating local KV by n tokens without
+        touching the pool. The scheduler then stored the half-truncated
+        cache to the prefix cache for next-turn reuse. The contaminated
+        pool — built from output-side tokens that trim was meant to
+        discard — got restored on the next turn, and the model's
+        pool-attention path read global-context vectors derived from
+        prior turns' GENERATED OUTPUT. Symptom on DSV4-Flash:
+        polite-assistant attractor loops on /v1/chat/completions.
+        Bench mode (SimpleEngine, no cache reuse) was unaffected — proof
+        the model itself is sound, only cross-turn pool-state survival
+        was broken.
 
-        Why bench-mode (MMLU 91 %+) is unaffected:
-        ------------------------------------------
-        SimpleEngine doesn't reuse caches across requests — every prompt
-        is a fresh prefill — so the pool is freshly derived per-request
-        from the actual prompt KV, never inherited from a prior request's
-        output side. Bench harness was the smoking gun proof that the
-        model itself is sound and the bug is in cross-turn pool-state
-        survival, NOT in sampling / rep_penalty / quant / chat template.
+        Strategy: proportional row truncation
+        -------------------------------------
+        Each `pooled` row covers `compress_ratio` underlying KV tokens.
+        After `self.local.trim(n)` removes the latest n KV tokens, the
+        latest `n // compress_ratio` pool rows correspond to those
+        discarded tokens and must go. Earlier pool rows remain valid
+        because they were built from KV positions that survived the
+        trim.
 
-        Why we reset (instead of proportional-trim):
-        --------------------------------------------
-        `accumulate_windows` keys partial-window buffers off START_POS,
-        and `update_pool` appends pooled vectors keyed by window index.
-        Computing a proportional truncation that lines up with `n`
-        requires per-state position math that's brittle and arch-aware
-        (varies per `compress_ratio`, per layer-type). Reset is correct
-        + simple: on next forward, `accumulate_windows` rebuilds buffers
-        from None and `update_pool` rebuilds pooled from scratch — both
-        already handle None initialisation cleanly (see lines 450-471).
-        Cost: pool re-derives from the kept KV on the first forward pass
-        of the next turn. Marginal latency hit; coherence preserved.
+        This mirrors llama.cpp's `dsv4_clear_rows`
+        (`row_begin = p0 / ratio`, `row_end = ceil(p1 / ratio)` from
+        antirez/llama.cpp-deepseek-v4-flash,
+        src/llama-memory-hybrid-iswa.cpp). Multi-turn long-context
+        chats now keep their compressed history across turns instead of
+        re-deriving the entire pool from scratch every turn (which
+        2.5.14's full-reset did).
 
-        Engine-side note:
-        -----------------
-        `vmlx_engine/scheduler.py:770` discards `DeepseekV4Cache` from
-        the cumulative-state classification (`non_kv.discard(...)`) on
-        the assumption it's pure-KV-with-an-inner-RotatingKVCache. With
-        this `trim()` fix, that classification is now CORRECT — the
-        external surface is KV-shaped because the pool resets on trim,
-        so prefix-cache reuse is safe.
+        `buffer_kv` and `buffer_gate` are partial-window buffers — tokens
+        that haven't yet filled a complete window for compression. Their
+        START_POS may fall in the discarded range or at a position where
+        the upstream window is now incomplete; safest to clear them
+        unconditionally and let `accumulate_windows` rebuild them on the
+        next forward.
+
+        Fallback: when `compress_ratio` is None (cache constructed via
+        the legacy single-arg signature), fall back to v2.5.14's full
+        pool reset — still correct, just heavier.
         """
-        # Reset cumulative pool state BEFORE delegating to local trim.
-        # Order doesn't matter functionally (no shared state between the
-        # local KV and the pool buffers) but doing it first makes the
-        # invariant clearer in the resulting object: post-trim, pool
-        # state is None and KV is truncated.
+        # Trim KV first so we know the new total length for proportional
+        # pool truncation.
+        rv = self.local.trim(n)
+
+        # Clear partial-window buffers unconditionally. They hold
+        # incompletely-filled window state keyed by start_pos which is
+        # invalidated by ANY trim. `accumulate_windows` re-derives them
+        # from the kept KV on the next forward (see `update_pool`
+        # docstring, lines 462-471, which handles `pooled is None`).
         for state in (self.compressor_state, self.indexer_state):
-            for key in state:
-                state[key] = None
-        return self.local.trim(n)
+            state["buffer_kv"] = None
+            state["buffer_gate"] = None
+
+        ratio = self.compress_ratio
+        if ratio is None or ratio <= 0:
+            # Legacy / unknown-ratio path: full reset (v2.5.14 fallback).
+            for state in (self.compressor_state, self.indexer_state):
+                state["pooled"] = None
+            return rv
+
+        # Proportional pool truncation. `n // ratio` is the number of
+        # pool rows that became stale (latest, output-side rows). For
+        # boundary safety: always discard at least one trailing row
+        # when n > 0, since the most-recently-appended pool row may
+        # have been computed from a window that overlapped output
+        # tokens — keeping it would re-introduce the contamination.
+        rows_to_drop = max(1, n // ratio) if n > 0 else 0
+        if rows_to_drop == 0:
+            return rv
+
+        for state in (self.compressor_state, self.indexer_state):
+            pooled = state["pooled"]
+            if pooled is None:
+                continue
+            n_rows = pooled.shape[1]
+            keep = max(0, n_rows - rows_to_drop)
+            if keep == 0:
+                state["pooled"] = None
+            elif keep < n_rows:
+                # Slice axis=1 (the window/row axis) to first `keep`
+                # entries. `pooled.shape == (B, n_rows, dim)` per
+                # `update_pool` line 466.
+                state["pooled"] = pooled[:, :keep, :]
+        return rv
 
     def size(self):
         return self.local.size()
@@ -1179,7 +1232,15 @@ class Model(nn.Module):
         caches = []
         for layer in self.model.layers:
             if long_ctx and layer.self_attn.compress_ratio:
-                caches.append(DeepseekV4Cache(self.args.sliding_window))
+                # Pass per-layer `compress_ratio` so `DeepseekV4Cache.trim()`
+                # can do proportional pool-row truncation instead of the
+                # v2.5.14 full reset (better long-context multi-turn perf:
+                # only the latest `n // ratio` pool rows are dropped per
+                # trim, the kept-prefix pool survives).
+                caches.append(DeepseekV4Cache(
+                    self.args.sliding_window,
+                    compress_ratio=layer.self_attn.compress_ratio,
+                ))
             else:
                 caches.append(KVCache())
         return caches

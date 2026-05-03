@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.5.15 — 2026-05-03
+
+### Fixed
+- `DeepseekV4Cache.trim(n)` now does **proportional** pool-row truncation
+  instead of v2.5.14's full reset. The cache accepts a new
+  `compress_ratio` constructor arg (per-layer) and uses it to compute
+  how many trailing `pooled` rows correspond to the trimmed KV tokens
+  (`rows_to_drop = max(1, n // ratio)`). The kept-prefix pool survives
+  across multi-turn — so long-context chats no longer pay full pool
+  re-derivation on every turn.
+
+  Strategy mirrors llama.cpp's
+  [antirez/llama.cpp-deepseek-v4-flash](https://github.com/antirez/llama.cpp-deepseek-v4-flash)
+  `dsv4_clear_rows` in `src/llama-memory-hybrid-iswa.cpp`:
+  `row_begin = p0 / ratio`, `row_end = ceil(p1 / ratio)`. Same principle
+  in MLX form: slice `pooled[:, :keep, :]` where `keep = n_rows -
+  rows_to_drop`.
+
+  `buffer_kv` and `buffer_gate` partial-window buffers are still
+  cleared unconditionally — their start_pos invariants are invalidated
+  by any trim, and `accumulate_windows` already handles None init.
+
+  Backward-compatible: when `compress_ratio` is None (legacy single-arg
+  construction), `trim()` falls back to v2.5.14's full reset — still
+  correct, just less efficient.
+
+### Notes
+- This only affects `cache_type="kv"` DSV4-Flash multi-turn `/v1/chat/
+  completions` performance, not correctness. v2.5.14 already fixed the
+  chat-mode loop root cause; v2.5.15 just makes the fix cheaper for
+  long-context multi-turn.
+
 ## 2.5.14 — 2026-05-03
 
 ### Fixed
