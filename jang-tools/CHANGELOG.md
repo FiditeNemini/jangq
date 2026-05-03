@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.5.14 — 2026-05-03
+
+### Fixed
+- `DeepseekV4Cache.trim(n)` now resets the cumulative compressor +
+  indexer pool state in addition to delegating to the inner
+  `RotatingKVCache.trim(n)`. Pre-fix the pool buffers (`buffer_kv`,
+  `buffer_gate`, `pooled` keys in `compressor_state` and
+  `indexer_state`) survived the truncation reflecting pre-trim KV
+  positions — including output-side tokens the trim was meant to
+  discard. On multi-turn `/v1/chat/completions` the scheduler's
+  prefix-cache reuse restored that contaminated pool on the next
+  turn, and the model's HSA / CSA pool-attention path read
+  global-context vectors built from prior turns' GENERATED OUTPUT.
+  Symptom: DSV4-Flash drifted into the polite-assistant attractor
+  on chat completions ("How are things with you? Let me know if
+  there's anything I can help with." repeated until max_tokens).
+  Bench harness (SimpleEngine, no cache reuse across requests) was
+  unaffected — that's how we know the model itself is sound and
+  the bug was specifically in cross-turn pool-state survival.
+
+  Reset semantics: pool state goes to None on every trim. Next
+  forward pass re-derives via `accumulate_windows` + `update_pool`
+  from the kept KV. Both helpers already handle None-pool init
+  cleanly. Cost: marginal first-forward latency on the next turn;
+  coherence preserved across arbitrary multi-turn chats.
+
+  This makes the existing engine-side classification at
+  `vmlx_engine/scheduler.py:770` (`non_kv.discard("DeepseekV4Cache")`)
+  correct — the cache's external surface is now genuinely KV-shaped,
+  so prefix-cache reuse is safe.
+
+### Notes
+- Engine-side rep_penalty bandaids in `_FAMILY_FALLBACK_DEFAULTS`
+  for `deepseek_v4` (1.15) were masking this same cumulative-pool
+  contamination via diversification pressure rather than fixing it.
+  Once 2.5.14 lands the engine can revert that to 1.05 (the MMLU
+  91 % baseline value).
+
 ## 2.5.13 — 2026-05-03
 
 ### Fixed

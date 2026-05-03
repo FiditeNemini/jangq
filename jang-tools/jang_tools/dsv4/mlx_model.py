@@ -427,6 +427,73 @@ class DeepseekV4Cache:
         return self.local.is_trimmable()
 
     def trim(self, n):
+        """Trim local KV by n tokens AND reset compressor + indexer pool state.
+
+        Why the reset is mandatory:
+        ----------------------------
+        `DeepseekV4Cache` wraps a `RotatingKVCache` (`self.local`) for the
+        sliding-window local attention path PLUS two cumulative pool-state
+        dicts (`compressor_state`, `indexer_state`) holding the HSA / CSA
+        compressed-global-context buffers. Every forward pass updates the
+        pool state via `accumulate_windows` (window-aligned KV/gate
+        buffers) and `update_pool` (pooled compressed vectors), driven by
+        the running KV positions.
+
+        Pre-fix: `trim(n)` only delegated to `self.local.trim(n)` —
+        truncating the local KV by n tokens without touching the pool
+        state. The pool buffers continued to reflect the **pre-trim**
+        positions, including any output-side tokens that the trim
+        operation was specifically meant to discard. The scheduler then
+        stored the half-truncated cache to the prefix cache for next-turn
+        reuse via `__getstate__`. On the next multi-turn `/v1/chat/
+        completions`, the prefix-cache hit restored the contaminated pool
+        via `__setstate__`, and the model's pool-attention path read
+        global-context vectors built from a previous turn's GENERATED
+        OUTPUT — typically the polite-assistant attractor in DSV4-Flash
+        chat-mode training data ("How are things with you? Let me know
+        if there's anything I can help with."). The contamination
+        compounded across turns and the model drifted into a repeating
+        loop of those phrases until max_tokens.
+
+        Why bench-mode (MMLU 91 %+) is unaffected:
+        ------------------------------------------
+        SimpleEngine doesn't reuse caches across requests — every prompt
+        is a fresh prefill — so the pool is freshly derived per-request
+        from the actual prompt KV, never inherited from a prior request's
+        output side. Bench harness was the smoking gun proof that the
+        model itself is sound and the bug is in cross-turn pool-state
+        survival, NOT in sampling / rep_penalty / quant / chat template.
+
+        Why we reset (instead of proportional-trim):
+        --------------------------------------------
+        `accumulate_windows` keys partial-window buffers off START_POS,
+        and `update_pool` appends pooled vectors keyed by window index.
+        Computing a proportional truncation that lines up with `n`
+        requires per-state position math that's brittle and arch-aware
+        (varies per `compress_ratio`, per layer-type). Reset is correct
+        + simple: on next forward, `accumulate_windows` rebuilds buffers
+        from None and `update_pool` rebuilds pooled from scratch — both
+        already handle None initialisation cleanly (see lines 450-471).
+        Cost: pool re-derives from the kept KV on the first forward pass
+        of the next turn. Marginal latency hit; coherence preserved.
+
+        Engine-side note:
+        -----------------
+        `vmlx_engine/scheduler.py:770` discards `DeepseekV4Cache` from
+        the cumulative-state classification (`non_kv.discard(...)`) on
+        the assumption it's pure-KV-with-an-inner-RotatingKVCache. With
+        this `trim()` fix, that classification is now CORRECT — the
+        external surface is KV-shaped because the pool resets on trim,
+        so prefix-cache reuse is safe.
+        """
+        # Reset cumulative pool state BEFORE delegating to local trim.
+        # Order doesn't matter functionally (no shared state between the
+        # local KV and the pool buffers) but doing it first makes the
+        # invariant clearer in the resulting object: post-trim, pool
+        # state is None and KV is truncated.
+        for state in (self.compressor_state, self.indexer_state):
+            for key in state:
+                state[key] = None
         return self.local.trim(n)
 
     def size(self):
