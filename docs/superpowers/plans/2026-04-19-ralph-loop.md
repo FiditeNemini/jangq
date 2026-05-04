@@ -43,14 +43,14 @@ Proves the plumbing. No audit logic yet.
 ### Task R1.1 — Directory scaffold + gitignore
 
 **Files:**
-- Create: `/Users/eric/jang/ralph-runner/README.md`
-- Create: `/Users/eric/jang/ralph-runner/pyproject.toml`
-- Modify: `/Users/eric/jang/.gitignore`
+- Create: `<repo>/ralph-runner/README.md`
+- Create: `<repo>/ralph-runner/pyproject.toml`
+- Modify: `<repo>/.gitignore`
 
 - [ ] **Step 1: Create the scaffold**
 
 ```bash
-mkdir -p /Users/eric/jang/ralph-runner/{tests/fixtures,results,baselines}
+mkdir -p <repo>/ralph-runner/{tests/fixtures,results,baselines}
 ```
 
 - [ ] **Step 2: Write `pyproject.toml`**
@@ -82,7 +82,7 @@ Autonomous test harness for JANG Studio. Converts small test models through ever
 
 ```bash
 # One-shot Tier 1 (Qwen3-0.6B, Llama-3.2-1B, SmolVLM-256M)
-cd /Users/eric/jang && python -m ralph_runner.runner --tier 1 --one-shot
+cd <repo> && python -m ralph_runner.runner --tier 1 --one-shot
 
 # Enable continuous loop (fires every 6h)
 /loop 6h python -m ralph_runner.runner --tier 1
@@ -124,7 +124,7 @@ Add `skip: "reason"` to the model entry:
 
 - [ ] **Step 4: Update `.gitignore`**
 
-Append to `/Users/eric/jang/.gitignore`:
+Append to `<repo>/.gitignore`:
 
 ```
 # Ralph Runner — results and baselines are private per feedback_no_research_public.md
@@ -137,7 +137,7 @@ ralph-runner/*.log
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add ralph-runner/README.md ralph-runner/pyproject.toml .gitignore
 git commit -m "feat(ralph): scaffold test harness directory"
 ```
@@ -147,8 +147,8 @@ git commit -m "feat(ralph): scaffold test harness directory"
 ### Task R1.2 — Model + profile YAMLs
 
 **Files:**
-- Create: `/Users/eric/jang/ralph-runner/models.yaml`
-- Create: `/Users/eric/jang/ralph-runner/profiles.yaml`
+- Create: `<repo>/ralph-runner/models.yaml`
+- Create: `<repo>/ralph-runner/profiles.yaml`
 
 - [ ] **Step 1: `models.yaml`**
 
@@ -169,7 +169,7 @@ Expected: `YAML OK`.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add ralph-runner/models.yaml ralph-runner/profiles.yaml
 git commit -m "feat(ralph): models.yaml + profiles.yaml (Tier 1 active)"
 ```
@@ -179,8 +179,8 @@ git commit -m "feat(ralph): models.yaml + profiles.yaml (Tier 1 active)"
 ### Task R1.3 — `remote.py` (SSH + rsync)
 
 **Files:**
-- Create: `/Users/eric/jang/ralph-runner/remote.py`
-- Create: `/Users/eric/jang/ralph-runner/tests/test_remote.py`
+- Create: `<repo>/ralph-runner/remote.py`
+- Create: `<repo>/ralph-runner/tests/test_remote.py`
 
 - [ ] **Step 1: Write failing test**
 
@@ -192,7 +192,7 @@ from ralph_runner.remote import build_rsync_args, build_ssh_args
 
 def test_build_rsync_args_includes_delete_and_exclude_results():
     args = build_rsync_args(
-        src="/Users/eric/jang/jang-tools/",
+        src="<repo>/jang-tools/",
         dst="macstudio:~/jang-ralph-workspace/jang/jang-tools/",
         excludes=[".venv", "__pycache__", "*.egg-info"],
     )
@@ -212,7 +212,7 @@ def test_build_ssh_args_uses_eric_user():
 - [ ] **Step 2: Run to fail**
 
 ```bash
-cd /Users/eric/jang/ralph-runner && python -m pytest tests/test_remote.py -v
+cd <repo>/ralph-runner && python -m pytest tests/test_remote.py -v
 ```
 
 Expected: `ModuleNotFoundError: No module named 'ralph_runner'`.
@@ -224,7 +224,7 @@ Expected: `ModuleNotFoundError: No module named 'ralph_runner'`.
 """SSH + rsync orchestration for Mac Studio.
 
 Mac Studio host is `macstudio` (Tailscale short name resolving to 100.76.98.16).
-Ralph never touches /Volumes/EricsLLMDrive (read-only) or anything outside
+Ralph never touches <external-ssd> (read-only) or anything outside
 ~/jang-ralph-workspace/.
 """
 from __future__ import annotations
@@ -297,7 +297,7 @@ Create `ralph-runner/__init__.py` as empty file so `python -m ralph_runner` work
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd /Users/eric/jang/ralph-runner && python -m pytest tests/test_remote.py -v
+cd <repo>/ralph-runner && python -m pytest tests/test_remote.py -v
 ```
 
 Expected: 2 pass.
@@ -305,7 +305,7 @@ Expected: 2 pass.
 - [ ] **Step 5: Smoke test against real macstudio**
 
 ```bash
-cd /Users/eric/jang && python3 -c "from ralph_runner.remote import remote_free_gb; print(f'macstudio free: {remote_free_gb():.1f} GB')"
+cd <repo> && python3 -c "from ralph_runner.remote import remote_free_gb; print(f'macstudio free: {remote_free_gb():.1f} GB')"
 ```
 
 Expected: prints a number (~97 GB).
@@ -313,7 +313,7 @@ Expected: prints a number (~97 GB).
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add ralph-runner/remote.py ralph-runner/__init__.py ralph-runner/tests/test_remote.py
 git commit -m "feat(ralph): remote.py — SSH + rsync orchestration with tests"
 ```
@@ -323,7 +323,7 @@ git commit -m "feat(ralph): remote.py — SSH + rsync orchestration with tests"
 ### Task R1.4 — `runner.py` (tier-1 one-shot, no audit yet)
 
 **Files:**
-- Create: `/Users/eric/jang/ralph-runner/runner.py`
+- Create: `<repo>/ralph-runner/runner.py`
 
 - [ ] **Step 1: Implement**
 
@@ -479,7 +479,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: First tier-1 smoke run**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 python3 -m ralph_runner.runner --tier 1 --one-shot 2>&1 | tee ralph-runner/results/first-run.log
 ```
 
@@ -490,7 +490,7 @@ If HF downloads fail due to auth (Llama-3.2 may require acceptance), mark that m
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add ralph-runner/runner.py
 git commit -m "feat(ralph): runner.py tier-1 convert loop (no audit yet)"
 ```
@@ -504,9 +504,9 @@ Adds the "what does the output actually look like" checks.
 ### Task R2.1 — `audit.py` (A1-A7 implementations)
 
 **Files:**
-- Create: `/Users/eric/jang/ralph-runner/audit.py`
-- Create: `/Users/eric/jang/ralph-runner/tests/test_audit.py`
-- Create: `/Users/eric/jang/ralph-runner/tests/fixtures/fake_converted_model/` (minimal valid JANG output for unit tests)
+- Create: `<repo>/ralph-runner/audit.py`
+- Create: `<repo>/ralph-runner/tests/test_audit.py`
+- Create: `<repo>/ralph-runner/tests/fixtures/fake_converted_model/` (minimal valid JANG output for unit tests)
 
 **Detailed implementation in the design doc § Part 3 — Audit matrix.** Each of A1-A7 becomes a top-level function in `audit.py`:
 

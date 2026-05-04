@@ -37,7 +37,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).parent.parent.parent  # /Users/eric/jang/
+REPO_ROOT = Path(__file__).parent.parent.parent  # repo root
 
 PYTHON_SERVER = REPO_ROOT / "jang-server" / "server.py"
 SWIFT_DIAGNOSTICS = REPO_ROOT / "JANGStudio" / "JANGStudio" / "Runner" / "DiagnosticsBundle.swift"

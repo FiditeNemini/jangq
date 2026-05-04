@@ -1857,7 +1857,7 @@ Punted to M121 with a clear scope specification so a future iter can do the full
    - `blob.py:187`: `assert bits_seen is not None` — same type narrowing class. **Low priority.**
    - `format.py:44,58,81,94`: size-of-struct constants that gate **binary on-disk layout**. THIS is the high-value class.
 3. **Why format.py is different.** The checks confirm that `struct.calcsize("<IIHHQQ")` returns the exact byte count the readers expect. If a future edit changes the format string but forgets to update the size constant, the check catches it at load. Under -O, the check goes away. Readers later misalign tensors in the expert blob and produce zero-value or garbage weights — no exception, just wrong numbers.
-4. **Why didn't this bite us yet?** Because JANG Studio's embedded Python is NOT invoked with -O (verified: BundleResolver.pythonExecutable → `ls /Users/eric/jang/JANGStudio/JANGStudio/Resources/python/bin/` → no -O flag in any invocation). So in practice today, the asserts work. But (a) the bundle could ship with -O in a future release for startup speed, (b) a dev running the CLI manually with -O would silently bypass the checks, (c) if the asserts are ever "optimized away" by a static analysis pass, corrupted experts would slip into a shipped model.
+4. **Why didn't this bite us yet?** Because JANG Studio's embedded Python is NOT invoked with -O (verified: BundleResolver.pythonExecutable → `ls <repo>/JANGStudio/JANGStudio/Resources/python/bin/` → no -O flag in any invocation). So in practice today, the asserts work. But (a) the bundle could ship with -O in a future release for startup speed, (b) a dev running the CLI manually with -O would silently bypass the checks, (c) if the asserts are ever "optimized away" by a static analysis pass, corrupted experts would slip into a shipped model.
 5. **Root cause, not band-aid:** Replacing `assert BLOB_HEADER_SIZE == 32` with `if BLOB_HEADER_SIZE != 32: raise ImportError(...)` removes the -O fragility entirely. The check runs at module import regardless of optimization level. Same behavior, stripping-immune.
 6. **Test strategy:** three subprocess tests, one under each `python` / `python -O` / `python -OO`, each asserts the module imports cleanly AND reports the expected constants. A fourth test greps the format.py source for any future `assert BLOB_HEADER_SIZE ==` / `assert TENSOR_HEADER_SIZE ==` / etc. via `inspect.getsource` — this prevents a future regression if someone reverts the fix.
 
@@ -2498,7 +2498,7 @@ Pivoted to examine the path-validation code I'd skimmed during earlier iters —
 3. **Adjacent concern:** source inside output. User with source `/workspace/hf-model` picks output `/workspace`. Convert writes into /workspace/ alongside the source subfolder. Cleanup passes mix the two trees.
 4. **Real-user likelihood:** moderate. Not a daily scenario but easy to stumble into — the folder picker defaults to the last-used location. A user picking source in `/models/Qwen3.6-BF16/`, then clicking "Choose output…" with the picker starting at the source location, hitting "New Folder" inside the picker → they've just nested output inside source.
 5. **Fix: straightforward string-prefix check with trailing-slash to prevent sibling-prefix false positives.** `/a/b` is NOT inside `/a/bc` but IS inside `/a/b/c`. The `path + "/"` appendage is the standard trick.
-6. **Standardization:** use `.standardizedFileURL.path` to normalize `/Users/eric/./models` and `/Users/eric/models/` to the same form. SwiftUI's NSOpenPanel can return non-standardized URLs.
+6. **Standardization:** use `.standardizedFileURL.path` to normalize `~/./models` and `~/models/` to the same form. SwiftUI's NSOpenPanel can return non-standardized URLs.
 7. **Three tests:** two positive captures (nested dst-in-src, src-in-dst) and one regression guard (sibling-prefix must not trigger).
 
 **Meta-lesson — preflight-as-safety-net.** Preflight is the user-facing safety boundary. Gaps there cascade into DATA-LOSS scenarios because convert trusts preflight and writes where told. Future audits should explicitly enumerate "what could the user select that passes preflight but causes damage at convert time?" — e.g., symlinks to system dirs, mount points, read-only FUSE filesystems (parent-writable check may not catch copy-on-write or network mount quirks). This iter closes one; others remain as future M-items.
@@ -4845,7 +4845,7 @@ The three dispositions give a template for triaging open-observation items in th
 **Angle:** Iter-110 forecast: "pivot to Smelt/dflash." Smelt lives outside the repo; dflash is a subdir of jang-tools already covered by iter-105 M113. Pivoted to `jang-server/` which I'd never audited — pure diversification of audit surface.
 
 **Deep trace walkthrough:**
-1. **Grep'd `except Exception` in /Users/eric/jang/jang-server/:** 10 sites in a single 1774-line server.py.
+1. **Grep'd `except Exception` in <repo>/jang-server/:** 10 sites in a single 1774-line server.py.
 2. **Applied the iter-106 dual-invariant template directly.** No need to reinvent — copy, update paths, adjust thresholds.
 3. **Precise regex found 4 bare-swallow sites** on first run:
    - L415: DB row restore (corrupt row shouldn't kill sweep).
@@ -5326,7 +5326,7 @@ Each follows identical shape: inventory → taxonomy → coarse count → precis
    - JANGQuantizer.swiftpm iter-120 M185 — SettingsView Check Connection
    - JANGQuantizer.swiftpm iter-121 M186 — QueueView Cancel + Retry (×2 in same file)
 2. **Designed the memory note** with: anti-pattern + correct pattern code blocks, the narrow exception (truly idempotent + best-effort), three historical instances cited with file refs, audit grep recipe, green-field guidance, links to related memories (`feedback_remediation_pattern.md` + `feedback_view_lifecycle_cancel.md`).
-3. **Wrote to** `/Users/eric/.claude/projects/-Users-eric-jang/memory/feedback_no_try_in_button_handlers.md`.
+3. **Wrote to** `~/.claude/projects/-Users-eric-jang/memory/feedback_no_try_in_button_handlers.md`.
 4. **Updated MEMORY.md index** with a one-line entry under the Feedback section.
 
 **Meta-lesson — long-term memory is the right venue for cross-session rules.** The audit checklist and investigation log are great for project-state and per-iter findings, but they're tied to the JANG repo specifically. Cross-session rules — patterns that apply to ANY future Swift code, ANY future ralph audit — live in the memory dir so future-me sees them automatically on every session start. **Rule for which iters get a memory note:** when an iter codifies a meta-lesson that's (a) language-or-framework-general (not JANG-specific), (b) recurring (3+ instances), (c) describable as a do/don't rule with code examples, write a memory note.
@@ -6281,7 +6281,7 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 **Deep trace walkthrough:**
 1. **Found the Swift tokenizer implementation.** `jang-runtime/Sources/JANG/JANGTokenizer.swift` (349 lines) — standalone BPE implementation with byte-level encoder, merges table, special tokens, chat template. Loads tokenizer.json + tokenizer_config.json exactly like Python's AutoTokenizer.
 2. **Checked existing test coverage.** `JANGTQTokenizerTests.swift` uses a SYNTHETIC "tiny vocab" fixture — exercises loader code paths but never verifies encoder correctness against a real tokenizer. A BPE bug (wrong merge priority, space-prefix handling, byte-encoder mapping) would ship undetected.
-3. **Captured Python reference IDs.** Ran `python3 -c "from transformers import AutoTokenizer; tok = AutoTokenizer.from_pretrained('/Users/eric/models/Qwen3.6-35B-A3B-JANG_2L'); ..."`. Got token IDs for 3 test strings covering: ASCII+punctuation, multi-word sentence, expression with numbers.
+3. **Captured Python reference IDs.** Ran `python3 -c "from transformers import AutoTokenizer; tok = AutoTokenizer.from_pretrained('~/models/Qwen3.6-35B-A3B-JANG_2L'); ..."`. Got token IDs for 3 test strings covering: ASCII+punctuation, multi-word sentence, expression with numbers.
 4. **Wrote `JANGTokenizerPythonParityTests.swift`** with those IDs as hardcoded XCTAssertEqual references. 2 tests: primary parity + out-of-vocab regression guard. XCTSkip when fixture not present (CI-friendly).
 5. **Ran against the real fixture.** 2/2 pass. Swift byte-identical to Python on all strings. Concrete command output captured: both tests green in ~1 second each.
 6. **Full jang-runtime suite runs clean.** 64 tests, 4 pre-existing skips, 0 failures. New tests integrated without disturbing the existing 62.
@@ -6379,7 +6379,7 @@ Parallels iter-118 M183's "cover all file types" lesson: without a mechanical ch
 1. **Byte-copy path:** `convert.py:1111-1121` lists `generation_config.json` in `extra_configs` → `_safe_copy` does shutil.copy2 with byte-fallback. Bytes preserved.
 2. **eos-fix path:** `convert.py:1007-1034` applies `EOS_FIXES[model_type]` to top-level config + text_config + tokenizer_config.json. **Notably absent: generation_config.json.**
 3. **HF runtime behavior:** `.generate()` reads `model.generation_config.eos_token_id` with PRIORITY over `model.config.eos_token_id`. So a bundle where config.json eos=248046 (fixed) but generation_config.json eos=248044 (byte-copied stale) is INTERNALLY INCONSISTENT → HF picks wrong value.
-4. **Live evidence:** `jq '.eos_token_id' /Users/eric/models/Qwen3.6-35B-A3B-JANG_2L/generation_config.json` → `[248046, 248044]` multi-EOS list form. This happens to be safe (both are stops). BUT scalar form `248044` alone (which some older Qwen3.5 sources ship) directly hits the bug.
+4. **Live evidence:** `jq '.eos_token_id' ~/models/Qwen3.6-35B-A3B-JANG_2L/generation_config.json` → `[248046, 248044]` multi-EOS list form. This happens to be safe (both are stops). BUT scalar form `248044` alone (which some older Qwen3.5 sources ship) directly hits the bug.
 5. **Upstream check via curl:** Qwen3-8B's generation_config has `[151645, 151643]` — list form, standard convention. Scalar-form risk is for Qwen3.5-specific legacy configs.
 6. **Fix:** extend eos-fix block to handle generation_config.json with BOTH scalar (int) AND list form, load/patch/rewrite via json.dumps. Copy-loop skip guard (`_eos_fixed_gen_cfg` flag) prevents the downstream byte-copy from overwriting the fix.
 7. **Tests:** 4 new source-inspection invariants. 360/360 jang-tools tests pass unchanged.

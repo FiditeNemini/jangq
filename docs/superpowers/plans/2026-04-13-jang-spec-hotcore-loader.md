@@ -20,7 +20,7 @@
 
 **Test fixtures:**
 - Synthetic safetensors files written at runtime in `tmp_path` for unit tests.
-- **MiniMax-M2.7-JANG_2L bundle at `/Users/eric/models/MiniMax-M2.7-JANG_2L.jangspec`** for the integration test. This is the real 228 B model, 62 layers, 4.03 GB hot core — perfect coverage. Fall back to the Gemma bundle at `/tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec` if MiniMax is missing (shouldn't happen on this machine).
+- **MiniMax-M2.7-JANG_2L bundle at `~/models/MiniMax-M2.7-JANG_2L.jangspec`** for the integration test. This is the real 228 B model, 62 layers, 4.03 GB hot core — perfect coverage. Fall back to the Gemma bundle at `/tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec` if MiniMax is missing (shouldn't happen on this machine).
 
 ---
 
@@ -55,7 +55,7 @@ No other files modified.
 - [ ] **Step 1: Confirm starting state**
 
 ```bash
-cd /Users/eric/jang && git status && git log -1 --oneline && git branch --show-current
+cd <repo> && git status && git log -1 --oneline && git branch --show-current
 ```
 Expected: clean tree, current branch `jang-spec-plan2-swift-loader`, latest commit is the final Plan 2 commit (`e0f4efa jang-core: jang-core inspect subcommand with Python parity` or newer).
 
@@ -193,7 +193,7 @@ final class SafetensorsV2Tests: XCTestCase {
 - [ ] **Step 2: Run and verify it fails**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter SafetensorsV2Tests 2>&1 | tail -10
+cd <repo>/jang-runtime && swift test --filter SafetensorsV2Tests 2>&1 | tail -10
 ```
 Expected: compile error — `SafetensorsV2File` not in scope.
 
@@ -369,14 +369,14 @@ public final class SafetensorsV2File: @unchecked Sendable {
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter SafetensorsV2Tests 2>&1 | tail -15
+cd <repo>/jang-runtime && swift test --filter SafetensorsV2Tests 2>&1 | tail -15
 ```
 Expected: 3 tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/SafetensorsV2.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/SafetensorsV2.swift
 git add -f jang-runtime/Tests/JANGCoreTests/SafetensorsV2Tests.swift
 git commit -m "jang-core: pure-Swift v2 safetensors reader with synthetic round-trip"
 ```
@@ -462,7 +462,7 @@ final class BitInferenceTests: XCTestCase {
 - [ ] **Step 2: Run and verify failure**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter BitInferenceTests 2>&1 | tail -10
+cd <repo>/jang-runtime && swift test --filter BitInferenceTests 2>&1 | tail -10
 ```
 Expected: compile error — `BitInference` not in scope.
 
@@ -529,14 +529,14 @@ public enum BitInference {
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter BitInferenceTests 2>&1 | tail -15
+cd <repo>/jang-runtime && swift test --filter BitInferenceTests 2>&1 | tail -15
 ```
 Expected: 4 tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/BitInference.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/BitInference.swift
 git add -f jang-runtime/Tests/JANGCoreTests/BitInferenceTests.swift
 git commit -m "jang-core: BitInference — infer v2 bit width from qweight+scales shapes"
 ```
@@ -589,14 +589,14 @@ public struct RawTensorView: Sendable {
 - [ ] **Step 2: Build to confirm it compiles**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build 2>&1 | tail -5
+cd <repo>/jang-runtime && swift build 2>&1 | tail -5
 ```
 Expected: build success.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/QuantizedTensorView.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/QuantizedTensorView.swift
 git commit -m "jang-core: QuantizedTensorView and RawTensorView typed handles"
 ```
 
@@ -619,7 +619,7 @@ final class HotCoreLoaderTests: XCTestCase {
     /// Prefer the MiniMax bundle for this test; fall back to the Gemma
     /// fixture if MiniMax isn't present. Skip entirely if neither is there.
     private func bundleURL() throws -> URL {
-        let minimax = URL(fileURLWithPath: "/Users/eric/models/MiniMax-M2.7-JANG_2L.jangspec")
+        let minimax = URL(fileURLWithPath: "~/models/MiniMax-M2.7-JANG_2L.jangspec")
         if FileManager.default.fileExists(
             atPath: minimax.appendingPathComponent(JangSpecFormat.manifestFilename).path
         ) {
@@ -687,7 +687,7 @@ final class HotCoreLoaderTests: XCTestCase {
 - [ ] **Step 2: Run and verify failure**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter HotCoreLoaderTests 2>&1 | tail -10
+cd <repo>/jang-runtime && swift test --filter HotCoreLoaderTests 2>&1 | tail -10
 ```
 Expected: compile error — `HotCoreLoader` not in scope.
 
@@ -809,21 +809,21 @@ public enum HotCoreLoader {
 - [ ] **Step 4: Run the integration test**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter HotCoreLoaderTests 2>&1 | tail -20
+cd <repo>/jang-runtime && swift test --filter HotCoreLoaderTests 2>&1 | tail -20
 ```
 Expected: 1 test passes. The MiniMax hot core is 4.03 GB but mmap is zero-copy so the test should complete in a few seconds. If it fails with a missing base name or bit-inference failure on a specific tensor, capture the tensor name and report BLOCKED — that means the manifest includes a name the loader doesn't classify cleanly.
 
 - [ ] **Step 5: Full JANGCore sweep**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter JANGCoreTests 2>&1 | tail -30
+cd <repo>/jang-runtime && swift test --filter JANGCoreTests 2>&1 | tail -30
 ```
 Expected: all previous JANGCore tests + the new SafetensorsV2/BitInference/HotCoreLoader tests pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/HotCoreLoader.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/HotCoreLoader.swift
 git add -f jang-runtime/Tests/JANGCoreTests/HotCoreLoaderTests.swift
 git commit -m "jang-core: HotCoreLoader — classify quantized triples and raw tensors"
 ```
@@ -895,21 +895,21 @@ subcommands: [Inspect.self, HotCore.self]
 - [ ] **Step 2: Build**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build -c release --product jang-core 2>&1 | tail -5
+cd <repo>/jang-runtime && swift build -c release --product jang-core 2>&1 | tail -5
 ```
 Expected: build success.
 
 - [ ] **Step 3: Run against the MiniMax bundle**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && ./.build/release/jang-core hot-core /Users/eric/models/MiniMax-M2.7-JANG_2L.jangspec 2>&1
+cd <repo>/jang-runtime && ./.build/release/jang-core hot-core ~/models/MiniMax-M2.7-JANG_2L.jangspec 2>&1
 ```
 Expected: per-bit-width table and totals. The sum of quantized + raw should be close to the 4.03 GB reported by `jang-core inspect`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/jang-core/main.swift
+cd <repo> && git add jang-runtime/Sources/jang-core/main.swift
 git commit -m "jang-core: jang-core hot-core subcommand for bit histogram"
 ```
 
@@ -923,14 +923,14 @@ git commit -m "jang-core: jang-core hot-core subcommand for bit histogram"
 - [ ] **Step 1: Full Swift test suite**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test 2>&1 | tail -15
+cd <repo>/jang-runtime && swift test 2>&1 | tail -15
 ```
 Expected: all `JANGCoreTests` + existing `JANGTests` pass.
 
 - [ ] **Step 2: Full release build**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build -c release 2>&1 | tail -10
+cd <repo>/jang-runtime && swift build -c release 2>&1 | tail -10
 ```
 Expected: all products build.
 
@@ -945,13 +945,13 @@ Edit `docs/superpowers/notes/jang-spec-STATUS.md`:
 - [ ] **Step 4: Commit the STATUS update**
 
 ```bash
-cd /Users/eric/jang && git add docs/superpowers/notes/jang-spec-STATUS.md
+cd <repo> && git add docs/superpowers/notes/jang-spec-STATUS.md
 git commit -m "jang-spec: update STATUS after Plan 3 completion"
 ```
 
 - [ ] **Step 5: Print the commit log for the plan**
 
 ```bash
-cd /Users/eric/jang && git log --oneline jang-spec-plan2-swift-loader..HEAD
+cd <repo> && git log --oneline jang-spec-plan2-swift-loader..HEAD
 ```
 Expected: the ~6 Plan 3 commits in order.

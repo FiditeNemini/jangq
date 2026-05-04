@@ -70,7 +70,7 @@ tiers:
         supports_jangtq: true
         skip: "tier 3 manual only"
 
-      - local_path: /Volumes/EricsLLMDrive/MiniMax-M2.7-FP8
+      - local_path: <external-ssd>/MiniMax-M2.7-FP8
         family: moe_mla
         archs: [minimax_m2]
         approx_gb: 214

@@ -28,8 +28,13 @@ JANG-ISSUES.md
 JANG-PLAN.md
 gemma4_*.md
 
-# Scripts (private experiments)
-scripts/
+# Scripts (private experiments) — root scripts/ ignored, scripts/jangpress/ allowed through
+/scripts/*
+!/scripts/jangpress/
+/scripts/jangpress/__pycache__/
+/scripts/jangpress/kimi_jangpress_agent_fix.patch
+# Nested scripts/ dirs (jang-tools/jang_tools/scripts, etc.) stay private
+jang-tools/**/scripts/
 # Allow JANGStudio build scripts (build-python-bundle, codesign, notarize)
 !JANGStudio/Scripts/
 crack_*.py
@@ -56,6 +61,8 @@ mmlu_results*
 jang-runtime/.build/
 jang-runtime/.swiftpm/
 jang-tools/build/
+jang-tools/_internal/
+jang-tools/dist/
 
 # Environment & config
 .env

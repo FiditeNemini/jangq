@@ -29,10 +29,10 @@
 | `Qwen/Qwen3.6-35B-A3B` (BF16) | HF cache | 67 GB | ✅ Big target |
 | `mlx-community/Qwen3-VL-2B-Instruct-4bit` | HF cache | 1.7 GB | ❌ Already quantized |
 | `mlx-community/gemma-3n-E2B-it-4bit` | HF cache | 4.2 GB | ❌ Already quantized |
-| `/Volumes/EricsLLMDrive/Gemma-4-26B-A4B-it-BF16` | external | 48 GB | ✅ Medium target |
-| `/Volumes/EricsLLMDrive/Gemma-4-31B-it-BF16` | external | ~60 GB | ✅ Medium |
-| `/Volumes/EricsLLMDrive/MiniMax-M2.7-FP8` | external | 214 GB | ✅ Real JANGTQ target (but huge) |
-| `/Volumes/EricsLLMDrive/GLM-5.1-FP8` | external | 704 GB | ❌ Way too big for fast iteration |
+| `<external-ssd>/Gemma-4-26B-A4B-it-BF16` | external | 48 GB | ✅ Medium target |
+| `<external-ssd>/Gemma-4-31B-it-BF16` | external | ~60 GB | ✅ Medium |
+| `<external-ssd>/MiniMax-M2.7-FP8` | external | 214 GB | ✅ Real JANGTQ target (but huge) |
+| `<external-ssd>/GLM-5.1-FP8` | external | 704 GB | ❌ Way too big for fast iteration |
 
 ### Gap — what's NOT available and needs downloading (small, fast)
 
@@ -117,7 +117,7 @@ jang/
   │    └── logs/               (run logs)             │
   │                                                   │
   │  Uses existing HF cache in ~/.cache/huggingface/  │
-  │  + /Volumes/EricsLLMDrive (read-only)             │
+  │  + <external-ssd> (read-only)             │
   └───────────────────────────────────────────────────┘
 ```
 
@@ -186,7 +186,7 @@ tiers:
         approx_gb: 67
         has_chat_template: true
         supports_jangtq: true
-      - local_path: /Volumes/EricsLLMDrive/MiniMax-M2.7-FP8
+      - local_path: <external-ssd>/MiniMax-M2.7-FP8
         family: moe_mla
         archs: [minimax_m2]
         approx_gb: 214
@@ -516,7 +516,7 @@ JANG Studio P0 production-readiness is "done" when:
 
 1. **Ralph cadence on Eric's actual machine** — `/loop 6h` fires from THIS MacBook Pro session. If I'm offline, Ralph pauses. Should we migrate to a cron job on macstudio itself so it's fully autonomous? (Recommendation: yes, v2. For now `/loop` is fine — we'll see what it surfaces first.)
 2. **Known-good baselines** — for A4/A6/A7 regression detection we need a baseline. First Ralph run on a given (model, profile) becomes the baseline automatically; subsequent runs compare. Should we also hand-curate a "golden" baseline (e.g., after a confirmed-clean release) that Ralph warns against drifting from? (Recommendation: yes; baseline rotation via `ralph-runner/baselines/promote.py`.)
-3. **Destructive access to macstudio** — per CLAUDE.md, macstudio is on the "Personal (edits allowed when Eric asks)" list. Ralph writes to `~/jang-ralph-workspace/` + `~/.cache/huggingface/`. Never touches `/Volumes/EricsLLMDrive/` (read-only) or anything else. Confirm? (Yes per Eric's prior sign-off.)
+3. **Destructive access to macstudio** — per CLAUDE.md, macstudio is on the "Personal (edits allowed when Eric asks)" list. Ralph writes to `~/jang-ralph-workspace/` + `~/.cache/huggingface/`. Never touches `<external-ssd>/` (read-only) or anything else. Confirm? (Yes per Eric's prior sign-off.)
 4. **Tier-1 models — need `Qwen3-0.6B-Base` not `-8bit`** — the 8-bit cache isn't a valid conversion source. First Ralph run will `huggingface-cli download` the BF16 base model (~1.2 GB). Confirm network access on macstudio is OK for this one-time cost.
 5. **Model access gating** — `meta-llama/Llama-3.2-1B-Instruct` requires HF login acceptance. Is `HUGGING_FACE_HUB_TOKEN` already set in Eric's macstudio env, or does Ralph need a setup step?
 

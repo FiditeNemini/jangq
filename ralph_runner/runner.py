@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "results" / "state.json"
 LOCK_PATH = ROOT / "results" / "ralph.lock"
 RESULTS_DIR = ROOT / "results"
-JANG_REPO_ROOT = ROOT.parent   # /Users/eric/jang
+JANG_REPO_ROOT = ROOT.parent   # repo root
 
 
 def _yaml():
@@ -460,7 +460,7 @@ def _cmd_next_locked() -> int:
     try:
         model = info["model"]
         if model.startswith("/") or model.startswith("~/"):
-            src = model.replace("~/", "/Users/eric/")
+            src = os.path.expanduser(model)
         else:
             src = ensure_source_model(model)
     except Exception as e:

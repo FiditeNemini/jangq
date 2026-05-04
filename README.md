@@ -56,6 +56,8 @@
 ## Highlights
 
 - **397B on 128 GB Mac** — JANG_1L: 112 GB, 36 tok/s, 86.5% MMLU with reasoning
+- **DeepSeek-V4-Flash runtime** — first MLX runtime for DSV4's hybrid **SWA + CSA + HSA** attention (sliding-window + compressor-pool + hash-sparse) with mHC residuals and 1M-context pool quant cache
+- **JangPress for routed-MoE** — load 167 GB Kimi-K2.6 on a 128 GB Mac via `mmap` + `madvise` cold-tier eviction (see [`docs/JANGPRESS.md`](docs/JANGPRESS.md))
 - **Nemotron-Cascade-2 in 10 GB** — IMO Gold Medal reasoning model at 130 tok/s on 16 GB MacBooks
 - **MiniMax: only JANG works** — MLX scores 25% (random), JANG scores 74%
 - **Nemotron-3-Super-120B in 43 GB** — first working Nemotron-H quantization for Apple Silicon
@@ -180,15 +182,51 @@ The more experts a model has, the worse MLX performs at low bits:
 - **256 experts** (122B, MiniMax): MLX 2-bit breaks badly, JANG dominates
 - **512 experts** (397B, Super-120B): MLX NaN/crash below 4-bit, only JANG works
 
+## DeepSeek-V4-Flash runtime — Hybrid SWA + CSA + HSA attention
+
+DSV4-Flash is the first DeepSeek-class model whose attention is **not**
+plain MLA. JANG ships the only Apple-Silicon runtime that handles all
+three layer types correctly:
+
+| Layer type | Description | JANG path |
+|---|---|---|
+| **SWA** (Sliding-Window Attention) | local windowed attention; cheap fast layers | `jang_tools.dsv4.mlx_model.DSV4SlidingWindow` |
+| **CSA** (Compressor / Compressed-State Attention) | per-layer compressor pool + windowed buffer; carries pooled-K/V across the whole context | `DeepseekV4Cache` + `accumulate_windows` + `update_pool` |
+| **HSA** (Hash-Sparse Attention via Indexer) | indexer chooses top-K hash buckets per-token; sparse attention over the global compressed pool | `Indexer` module + `DSV4LayerCache` indexer state |
+| **mHC residuals** | multi-Head-Compressed residual stream stabilises 43-layer 284B model | residual-axis fix in `mlx_model.py` |
+| **Pool quant cache** | quantized streaming KV pool with proportional `trim()` (mirrors `llama.cpp` `dsv4_clear_rows`) | `DeepseekV4Cache.trim(n)` |
+
+End-to-end verified: 1M-context pool accumulation, multi-turn `/v1/chat/completions`
+with prefix-cache reuse, dual-mode reasoning, 20.5 tok/s decode on
+M3 Ultra @ JANGTQ2 (79.5 GB), 24.5 tok/s on Swift.
+
+## JangPress — fit routed-MoE bundles bigger than RAM
+
+JangPress is the load-time memory policy in
+[`osaurus-ai/vmlx-swift-lm`](https://github.com/osaurus-ai/vmlx-swift-lm)
+that combines mmap-backed safetensors, per-token router-aware
+`MADV_DONTNEED` over canonical routed-expert pages, and an optional
+prestack overlay. It lets routed-MoE bundles bigger than RAM serve
+from a single Mac:
+
+| Bundle | Size | Host RAM | Post-load RSS |
+|---|---|---|---|
+| Kimi-K2.6-Small-JANGTQ | 153 GB | 128 GB | ~0.7 GB |
+| Kimi-K2.6-Med-JANGTQ | 167 GB | 128 GB | ~1 GB |
+| DSV4-Flash JANG_2L | 96.6 GB | 128 GB+ | varies |
+
+Python serve + bench scripts: [`scripts/jangpress/`](scripts/jangpress/).
+Full guide: [`docs/JANGPRESS.md`](docs/JANGPRESS.md).
+
 ## Install
 
 ```bash
-pip install "jang[mlx]>=2.1.5"
+pip install "jang[mlx]>=2.5.18"
 ```
 
 For Vision-Language models:
 ```bash
-pip install "jang[vlm]>=2.1.5"
+pip install "jang[vlm]>=2.5.18"
 ```
 
 ## Quick Start

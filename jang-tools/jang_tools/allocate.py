@@ -99,7 +99,7 @@ def _prev_bit_width(current: int) -> Optional[int]:
 #   Budget-neutral: (gate=4 + up=2 + down=3) / 3 = 3.0 average.
 #   Same size as uniform 3-bit, but prevents float16 overflow.
 #
-#   See research/397B-MLP-ASYMMETRY.md for full analysis.
+#   (gate/down asymmetry empirically required on 512-expert models).
 #
 #
 #

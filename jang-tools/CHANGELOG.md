@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.5.18 — 2026-05-04
+
+### Changed
+- DSV4-Flash sampling defaults bumped to thinking-mode `rep_penalty=1.15`,
+  chat-mode `rep_penalty=1.05`, `max_new_tokens=4096`. Audit-validated;
+  prevents OOD-prompt repetition collapse in thinking mode without
+  hurting MMLU.
+
+## 2.5.17 — 2026-05-04
+
+### Fixed
+- `_hydrate_jangtq_model` now forces lazy-parameter materialization at
+  the end so downstream loaders never observe a half-evaluated graph.
+
+## 2.5.16 — 2026-05-03
+
+### Fixed
+- DSV4-Flash EOS list now survives `PreTrainedTokenizerFast` fallback. When
+  `transformers` falls back to the bare fast tokenizer (no chat template,
+  no special tokens), the `chat.eos_token_id` list from `jang_config.json`
+  was being dropped. The loader now re-injects it post-fallback so
+  `vmlxctl` / SimpleEngine can stop on the right tokens.
+
 ## 2.5.15 — 2026-05-03
 
 ### Fixed

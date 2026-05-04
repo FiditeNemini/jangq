@@ -1,7 +1,7 @@
 """SSH + rsync orchestration for Mac Studio.
 
 Mac Studio host is `macstudio` (Tailscale short name resolving to 100.76.98.16).
-Ralph never touches /Volumes/EricsLLMDrive (read-only) or anything outside
+Ralph never touches <external-ssd> (read-only) or anything outside
 ~/jang-ralph-workspace/.
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 REMOTE_HOST = "macstudio"
-REMOTE_WORKSPACE = "/Users/eric/jang-ralph-workspace"
+REMOTE_WORKSPACE = "~/jang-ralph-workspace"
 DEFAULT_EXCLUDES = (
     ".git", ".venv", "__pycache__", "*.egg-info", "*.pyc",
     "JANGStudio/build", "JANGStudio/DerivedData",

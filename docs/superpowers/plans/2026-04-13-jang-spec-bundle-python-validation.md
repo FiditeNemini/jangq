@@ -27,7 +27,7 @@ A second helper, `load_jang_model_from_bundle(bundle_dir)`, wraps the existing `
 - TQ-compressed bundles — bundles built by Plan 1 contain plain quantized hot_core + plain quantized expert blobs, no TurboQuant compression.
 
 **Test fixtures:**
-- Source model: `/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M/`
+- Source model: `<repo>/models/Gemma-4-26B-A4B-it-JANG_4M/`
 - Bundle: `/tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec` (built earlier, ~16 GB on disk)
 - If the bundle is missing, Task 1 step 0 rebuilds it via `jang spec build`.
 
@@ -60,7 +60,7 @@ Modified:
 - [ ] **Step 1: Confirm jang repo state**
 
 ```bash
-cd /Users/eric/jang && git status && git log -1 --oneline && git branch --show-current
+cd <repo> && git status && git log -1 --oneline && git branch --show-current
 ```
 
 Expected: clean tree, current branch `jang-spec-plan4-metal-matmul`, latest commit `d4f3a84` or newer.
@@ -75,7 +75,7 @@ git checkout -b jang-spec-plan5-bundle-python-validation
 
 ```bash
 if [ ! -f /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec/jangspec.json ]; then \
-  jang spec build /Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M --out /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec --force; \
+  jang spec build <repo>/models/Gemma-4-26B-A4B-it-JANG_4M --out /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec --force; \
 fi
 ```
 
@@ -219,7 +219,7 @@ def test_bundle_loader_byte_parity_against_source(
 - [ ] **Step 2: Run and confirm failure**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python3 -m pytest tests/jangspec/test_bundle_loader.py -v
+cd <repo>/jang-tools && python3 -m pytest tests/jangspec/test_bundle_loader.py -v
 ```
 
 Expected: `ModuleNotFoundError: No module named 'jang_tools.jangspec.bundle_loader'`.
@@ -410,7 +410,7 @@ def load_jang_model_from_bundle(bundle_dir: Path | str):
 - [ ] **Step 4: Run tests against the Gemma fixture**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python3 -m pytest tests/jangspec/test_bundle_loader.py -v -s
+cd <repo>/jang-tools && python3 -m pytest tests/jangspec/test_bundle_loader.py -v -s
 ```
 
 Expected: 3 tests pass (or skip if the Gemma fixture is unavailable on this machine — should be present per the conftest default).
@@ -423,7 +423,7 @@ If the byte-parity test fails:
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-tools/jang_tools/jangspec/bundle_loader.py
+cd <repo> && git add jang-tools/jang_tools/jangspec/bundle_loader.py
 git add -f jang-tools/tests/jangspec/test_bundle_loader.py
 git commit -m "jang-spec: bundle_loader — reconstruct mlx-lm weight dict from .jangspec"
 ```
@@ -449,7 +449,7 @@ Plan 5 validation: load Gemma-4-26B-A4B-it-JANG_4M two ways and confirm
 greedy decode produces identical token sequences.
 
   Path A (baseline):  jang_tools.loader.load_jang_vlm_model on the source
-                      directory /Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M
+                      directory <repo>/models/Gemma-4-26B-A4B-it-JANG_4M
   Path B (bundle):    jang_tools.jangspec.bundle_loader.load_jang_model_from_bundle
                       on /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec
 
@@ -470,7 +470,7 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_SOURCE = "/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M"
+DEFAULT_SOURCE = "<repo>/models/Gemma-4-26B-A4B-it-JANG_4M"
 DEFAULT_BUNDLE = "/tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec"
 DEFAULT_PROMPT = "The capital of France is"
 DEFAULT_MAX = 16
@@ -592,7 +592,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Sanity-check the script imports without running it**
 
 ```bash
-cd /Users/eric/jang && python3 -c "
+cd <repo> && python3 -c "
 import importlib.util
 spec = importlib.util.spec_from_file_location('v', 'jang-tools/scripts/validate_bundle_gemma4.py')
 mod = importlib.util.module_from_spec(spec)
@@ -606,7 +606,7 @@ Expected: `script imports cleanly, main signature: main`. **Do not run `main()` 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-tools/scripts/validate_bundle_gemma4.py
+cd <repo> && git add jang-tools/scripts/validate_bundle_gemma4.py
 git commit -m "jang-spec: validate_bundle_gemma4 — token-equality validation script"
 ```
 
@@ -630,7 +630,7 @@ Edit `docs/superpowers/notes/jang-spec-STATUS.md`:
 - [ ] **Step 2: Commit STATUS update**
 
 ```bash
-cd /Users/eric/jang && git add docs/superpowers/notes/jang-spec-STATUS.md
+cd <repo> && git add docs/superpowers/notes/jang-spec-STATUS.md
 git commit -m "jang-spec: update STATUS after Plan 5 (code ready, run pending)"
 ```
 
@@ -643,7 +643,7 @@ git commit -m "jang-spec: update STATUS after Plan 5 (code ready, run pending)"
 - [ ] **Step 1: Re-run jangspec test suite (excluding the run-pending validation script)**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python3 -m pytest tests/jangspec/ -v 2>&1 | tail -25
+cd <repo>/jang-tools && python3 -m pytest tests/jangspec/ -v 2>&1 | tail -25
 ```
 
 Expected: 17 tests pass (14 from prior plans + 3 new from `test_bundle_loader.py`).
@@ -651,7 +651,7 @@ Expected: 17 tests pass (14 from prior plans + 3 new from `test_bundle_loader.py
 - [ ] **Step 2: Print plan commit log**
 
 ```bash
-cd /Users/eric/jang && git log --oneline jang-spec-plan4-metal-matmul..HEAD
+cd <repo> && git log --oneline jang-spec-plan4-metal-matmul..HEAD
 ```
 
 Expected: 4 commits from this plan.
@@ -661,7 +661,7 @@ Expected: 4 commits from this plan.
 The validation script is committed but **not executed**. When RAM is free, run:
 
 ```bash
-cd /Users/eric/jang && python3 jang-tools/scripts/validate_bundle_gemma4.py
+cd <repo> && python3 jang-tools/scripts/validate_bundle_gemma4.py
 ```
 
 Expected output:

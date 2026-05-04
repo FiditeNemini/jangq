@@ -72,5 +72,5 @@ Each new model needs:
 2. Calibration mix tuned to model's training distribution
 3. Quantization profile selection (2-bit usually OK for 64+ expert MoE)
 
-See `research/JANGREAP-LESSONS.md` for the canonical bug/trap doc — read
+See the JANGReap lessons doc for the canonical bug/trap list — read
 before running on a new model.

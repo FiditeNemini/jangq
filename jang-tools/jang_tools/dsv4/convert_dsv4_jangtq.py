@@ -1,16 +1,32 @@
 """DeepSeek-V4-Flash FP4+FP8 source → JANGTQ bundle.
 
-No REAP prune — converts all 256 experts as-is. Profile:
+No REAP prune — converts all 256 experts as-is.
+
+Profiles (--profile sets ROUTED-EXPERT bits):
   JANGTQ2 (default): routed experts 2-bit MXTQ, attention + embed +
                      lm_head + shared experts 8-bit affine, norms +
                      router + mHC params fp16 passthrough
   JANGTQ4: routed experts 4-bit MXTQ (bigger bundle, better fidelity)
 
+Variants (--variant tweaks NON-routed bits + drops MTP):
+  std (default)     : preserves legacy behavior (8-bit affine on
+                      attention/shared/embed/head; MTP layers shipped).
+  K (JANG_DSV4_K)   : MAX-QUALITY 70-80 GB profile. Drops MTP head
+                      (~6.5B params unused at decode-time sanitize) and
+                      keeps EVERY non-routed module at 8-bit affine
+                      gsz=32 — attention (wq_a/wq_b/wkv/wo_a/wo_b),
+                      shared experts, Compressor, Indexer, embed, head.
+                      Router (gate.weight), mHC fn matrices, all
+                      RMSNorms, attn_sink, ape stay fp16 passthrough.
+                      Source FP4 routed → 2-bit MXTQ; source FP8
+                      non-routed → 8-bit affine (≤0.5% RMS, lossless
+                      vs FP8). Use --profile 2 for 70-80 GB bundle.
+
 Usage:
   python -m jang_tools.dsv4.convert_dsv4_jangtq \\
       --src <path/to/DeepSeek-V4-Flash> \\
-      --dst ~/.mlxstudio/models/JANGQ-AI/DSV4-Flash-JANGTQ \\
-      --profile 2
+      --dst ~/.mlxstudio/models/JANGQ-AI/DSV4-Flash-JANGTQ_K \\
+      --profile 2 --variant K
 """
 
 from __future__ import annotations
@@ -32,6 +48,7 @@ from jang_tools.dsv4.weight_loader import ShardIndex
 
 SEED = 42
 FORMAT = "jangtq"  # set by main() from --format flag: "jang" or "jangtq"
+VARIANT = "std"    # set by main() from --variant flag: "std" or "K"
 
 
 def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
@@ -42,25 +59,34 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
     source tensors (~3% vs group=128). Keeps mlx_lm's single-config
     path simple (one group_size value).
 
-    - FP4-origin routed experts:
+    Routed experts (FP4 origin):
       * profile 8 → 8-bit affine g=32 (max fidelity; ~0.5% RMS)
       * profile 4 → 4-bit affine g=32 (matches FP4 source; ~9% RMS)
       * profile 2 → 2-bit MXTQ codebook (aggressive; lossy)
-    - FP8-origin attention/shared/embed/head: 8-bit affine g=32
-    - Norms/small: fp16 passthrough
+
+    Non-routed (variant="std" or "K", FP8 origin): ALL 8-bit affine g=32.
+    Variant K's only delta vs std is dropping the MTP head (handled in
+    convert(), not here). Non-routed bit-width stays 8 because attention
+    + shared experts run on EVERY token — FP8 source → 8-bit affine is
+    bit-faithful (~0.5% RMS), 4-bit would be a quality regression.
+
+    Norms / small / mHC fn matrices / router gate / hash table /
+    attn_sink / ape: fp16 passthrough (or int passthrough for tid2eid).
     """
     n = name
 
-    # Norms + small tensors → fp16 passthrough
+    # Tier 1: norms + small tensors + mHC fn + tid2eid + attn_sink + ape
+    # → fp16 passthrough (int tensors stay int via weight_loader)
     if ("norm" in n or n.endswith(".bias") or "attn_sink" in n
             or ".ape" in n or "tid2eid" in n or n.startswith("hc_")
             or re.search(r"^layers\.\d+\.hc_", n)
             or re.search(r"^mtp\.\d+\.hc_", n)
             or re.search(r"^layers\.\d+\.ffn\.gate\.(weight|bias)$", n)
+            or re.search(r"^mtp\.\d+\.ffn\.gate\.(weight|bias)$", n)
             ):
         return 16, "passthrough", 0
 
-    # Router gate.weight → fp16 passthrough
+    # Router gate.weight (non-MoE-expert) → fp16 passthrough
     if n.endswith(".gate.weight") and "experts" not in n:
         return 16, "passthrough", 0
 
@@ -74,16 +100,26 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
             return profile_bits, "affine", 32
         return profile_bits, "mxtq", 0
 
-    # Shared experts + attention + embed + head: default 8-bit affine g=32.
-    # Env DSV4_HIGH_PRECISION=1 keeps these at bf16 (no quant) to eliminate
-    # compound quant error for arithmetic-sensitive reasoning. Trade-off:
-    # bundle +5-8 GB, but removes all quant noise from non-routed path.
+    # Non-routed quantized tensors. Env DSV4_HIGH_PRECISION=1 keeps these at
+    # bf16 (no quant) to eliminate compound quant error for arithmetic-
+    # sensitive reasoning. Trade-off: bundle +5-8 GB, but removes all quant
+    # noise from non-routed path.
     import os as _os
     hp = _os.environ.get("DSV4_HIGH_PRECISION", "0") == "1"
+
+    # Variant K's only delta vs std is dropping MTP (see convert()).
+    # Non-routed stay at 8-bit because attention/shared run every token
+    # and FP8 source → 8-bit affine is bit-faithful (~0.5% RMS).
+    nonrouted_bits = 8
+
     if "shared_experts" in n and n.endswith(".weight"):
-        return (16, "passthrough", 0) if hp else (8, "affine", 32)
+        return (16, "passthrough", 0) if hp else (nonrouted_bits, "affine", 32)
     if re.search(r"attn\.(wq_a|wq_b|wkv|wo_a|wo_b)\.weight$", n):
-        return (16, "passthrough", 0) if hp else (8, "affine", 32)
+        return (16, "passthrough", 0) if hp else (nonrouted_bits, "affine", 32)
+    # Compressor / Indexer (long-context modules, fire only on prompts >= compress_ratio)
+    if re.search(r"\.(compressor|indexer)\.", n) and n.endswith(".weight"):
+        return (16, "passthrough", 0) if hp else (nonrouted_bits, "affine", 32)
+    # Embed + head — Tier 1 every-token path, keep 8-bit even in K profile
     if n == "embed.weight" or n == "head.weight":
         return (16, "passthrough", 0) if hp else (8, "affine", 32)
 
@@ -101,10 +137,22 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
     idx = ShardIndex(src)
     print(f"[convert] source: {src}")
     print(f"[convert] target: {dst}")
-    profile_name = f"JANG_{profile_bits}L" if FORMAT == "jang" else f"JANGTQ{profile_bits}"
-    print(f"[convert] profile: {profile_name} (format={FORMAT})")
+    if FORMAT == "jang":
+        profile_name = f"JANG_{profile_bits}L"
+    elif VARIANT == "K":
+        profile_name = "JANGTQ_K" if profile_bits == 2 else f"JANGTQ{profile_bits}_K"
+    else:
+        profile_name = f"JANGTQ{profile_bits}"
+    print(f"[convert] profile: {profile_name} (format={FORMAT}, variant={VARIANT})")
+    drop_mtp = (VARIANT == "K")
+    if drop_mtp:
+        print("[convert] MTP head: DROP (variant=K, ~6.5B params unused at decode)")
     print(f"[convert] scanning for .weight keys (skip sibling .scale)...")
     weight_keys = [k for k in idx.keys if not k.endswith(".scale")]
+    if drop_mtp:
+        before = len(weight_keys)
+        weight_keys = [k for k in weight_keys if not k.startswith("mtp.")]
+        print(f"[convert] dropped {before - len(weight_keys)} mtp.* tensors")
     print(f"[convert] {len(weight_keys)} logical tensors to process")
 
     MAX_SHARD_BYTES = 1_000_000_000
@@ -114,6 +162,14 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
     shard_map: dict[str, str] = {}
 
     totals = {"mxtq": 0, "affine": 0, "passthrough": 0}
+    # Per-module quantization overrides for config.json. Keyed on the storage
+    # tensor stem (e.g. "layers.0.attn.wq_a"). We write an entry for every
+    # affine tensor whose (bits, mode, group_size) differs from the top-level
+    # default (bits=8 mode=affine group_size=32). Mirrors what the
+    # patch_dsv4_quant_config tool produces — having this baked in at convert
+    # time means we never ship a misconfig'd bundle (root cause of the
+    # JANGTQ-CONFIG-METADATA-BUG that capped DSV4 HumanEval at 42%).
+    quant_overrides: dict[str, dict] = {}
     t_start = time.time()
 
     def flush_shard():
@@ -182,6 +238,7 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
                 base = name[:-len(".weight")] if name.endswith(".weight") else name
                 add_tensor(f"{base}.weight", np.ascontiguousarray(w_u32))
                 add_tensor(f"{base}.scales", np.ascontiguousarray(s_bytes))
+                quant_overrides[base] = {"bits": 4, "group_size": 32, "mode": "mxfp4"}
                 totals["affine"] += 1
             else:
                 qw, qs, qb = mx.quantize(w, group_size=gsz or 64, bits=bits)
@@ -189,6 +246,11 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
                 add_tensor(f"{base}.weight", np.array(qw))
                 add_tensor(f"{base}.scales", np.array(qs).astype(np.float16))
                 add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))
+                # Record override iff diverges from top-level (bits=8 affine gsz=32).
+                if bits != 8 or (gsz or 64) != 32:
+                    quant_overrides[base] = {
+                        "bits": bits, "group_size": gsz or 64, "mode": "affine",
+                    }
                 totals["affine"] += 1
 
         elif method == "mxtq":
@@ -227,25 +289,64 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
     # config.json + jang_config.json
     src_cfg = json.loads((src / "config.json").read_text())
     src_cfg.pop("quantization_config", None)
-    # Default global quantization: 8-bit affine group=32 for attention+shared+head+embed.
-    # Per-module overrides for mxfp4 routed experts written below.
-    quant_cfg = {"group_size": 32, "bits": 8}
-    # Routed expert overrides to mxfp4 (only when profile=4 JANGTQ).
-    if FORMAT == "jangtq" and profile_bits == 4:
-        n_layers = src_cfg.get("num_hidden_layers", 43)
-        for L in range(n_layers):
-            for proj in ("gate_proj", "down_proj", "up_proj"):
-                path = f"model.layers.{L}.mlp.switch_mlp.{proj}"
-                quant_cfg[path] = {
-                    "group_size": 32, "bits": 4, "mode": "mxfp4",
-                }
-    elif FORMAT == "jangtq" and profile_bits == 2:
-        # 2-bit MXTQ is our own codebook — not mxfp4
-        quant_cfg["bits"] = profile_bits
+
+    # transformers 4.45+ renamed `rope_scaling` → `rope_parameters` and
+    # `type` → `rope_type` inside the dict. Older DeepSeek source configs
+    # ship the legacy key, but transformers 4.57+ then fails to set
+    # `max_position_embeddings` on PreTrainedConfig and the bundle won't
+    # load via `AutoTokenizer.from_pretrained`. Migrate so every emitted
+    # bundle is forward-compatible.
+    if "rope_scaling" in src_cfg and "rope_parameters" not in src_cfg:
+        rs = src_cfg.pop("rope_scaling")
+        rp = dict(rs)
+        if "type" in rp:
+            rp["rope_type"] = rp.pop("type")
+        if "rope_theta" not in rp:
+            rp["rope_theta"] = float(src_cfg.get("rope_theta", 10000))
+        for k in ("beta_fast", "beta_slow", "factor"):
+            if k in rp:
+                rp[k] = float(rp[k])
+        src_cfg["rope_parameters"] = rp
+    if FORMAT == "jang":
+        # Pure-affine bundle (JANG_2L/4L). One bit-width across all routed
+        # experts; non-routed are 8-bit. Per-module overrides cover
+        # divergences (and routed_expert_bits is documented at top-level).
+        quant_cfg: dict = {"bits": 8, "group_size": 32, "mode": "affine"}
     else:
-        # JANG_2L etc — uniform affine at profile_bits
-        quant_cfg["bits"] = profile_bits
+        # JANGTQ bundle. Top-level stays bits=8 mode=affine (the safe default
+        # for non-routed; that's what _fix_quantized_bits expects too).
+        # Routed-expert codec is signalled via top-level routed_expert_bits.
+        # Per-module overrides for any tensor that diverges from this default
+        # (currently mxfp4 routed @ profile=4, plus 4-bit attn/shared/etc on
+        # variant=K).
+        quant_cfg = {"bits": 8, "group_size": 32, "mode": "affine"}
+    quant_cfg.update(quant_overrides)
+    # Variant K and std both keep non-routed at 8-bit affine. Variant K
+    # only differs by dropping MTP (see drop_mtp above).
+    nonrouted_bits_meta = 8
+    # Mirror the Swift-required metadata INSIDE the quantization dict so the
+    # vMLX strict Codable decoder finds it whether it looks at top-level or
+    # quantization sub-object (existing bundles ship both).
+    if FORMAT == "jangtq":
+        quant_cfg["routed_expert_bits"] = profile_bits
+        quant_cfg["mxtq_bits"] = {
+            "routed_expert": profile_bits,
+            "attention": nonrouted_bits_meta,
+            "shared_expert": nonrouted_bits_meta,
+            "compressor": nonrouted_bits_meta,
+            "indexer": nonrouted_bits_meta,
+            "embed_tokens": 8,
+            "lm_head": 8,
+            "norms_router_hc": 16,
+        }
     src_cfg["quantization"] = quant_cfg
+    # Top-level Swift-required keys (DeepseekV4JANGTQ §414 Codable decode +
+    # build_jangtq_sidecar.py's seed lookup). Without these, the Swift loader
+    # falls back to defaults that may mismatch the bundle's actual codec.
+    if FORMAT == "jangtq":
+        src_cfg["routed_expert_bits"] = profile_bits
+        src_cfg["mxtq_seed"] = SEED
+        src_cfg["group_size"] = 32
     src_cfg["_name_or_path"] = f"DSV4-Flash-{profile_name}"
     (dst / "config.json").write_text(json.dumps(src_cfg, indent=2))
 
@@ -254,7 +355,9 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
             "affine" if FORMAT == "jang" else "mxtq"
         ),
         "profile": profile_name,
+        "variant": VARIANT,
         "mxtq_seed": SEED,
+        "drop_mtp": drop_mtp,
         "source_model": str(src),
         "source_config": {
             "n_routed_experts": src_cfg.get("n_routed_experts"),
@@ -263,8 +366,10 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
         },
         "mxtq_bits": {
             "routed_expert": profile_bits,
-            "attention": 8,
-            "shared_expert": 8,
+            "attention": nonrouted_bits_meta,
+            "shared_expert": nonrouted_bits_meta,
+            "compressor": nonrouted_bits_meta,
+            "indexer": nonrouted_bits_meta,
             "embed_tokens": 8,
             "lm_head": 8,
             "norms_router_hc": 16,
@@ -308,9 +413,24 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
                 "tool_output_tag": "tool_result",
             },
             "sampling_defaults": {
-                "temperature": 0.6,   # from inference/generate.py default
+                # DSV4-Flash chat defaults. T=0.6/top_p=0.95 match the
+                # standalone JANG reference path. Repetition penalty is
+                # mode-split because the model's degeneration profile is
+                # different in chat vs thinking:
+                #   * thinking mode: keep neutral (1.0). >1.0 makes
+                #     vMLX thinking mode fail to close </think>.
+                #   * chat mode: 1.05. With penalty 1.0 long chat replies
+                #     drift into single-token loops on K bundles
+                #     (live-observed on JANGTQ_K). 1.05 is light enough
+                #     to preserve fluency, hard enough to break loops.
+                # max_new_tokens 4096 because thinking traces routinely run
+                # 1500–3500 chars and 300 was clipping mid-reasoning.
+                "temperature": 0.6,
                 "top_p": 0.95,
-                "max_new_tokens": 300,
+                "repetition_penalty": 1.0,
+                "repetition_penalty_thinking": 1.0,
+                "repetition_penalty_chat": 1.05,
+                "max_new_tokens": 4096,
             },
         },
     }, indent=2))
@@ -329,6 +449,29 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
         copied += 1
     print(f"[convert] copied {copied} aux files/dirs")
 
+    # Force eos_token_id to LIST form across all three config files. Upstream
+    # DSV4 ships single-int eos=1; without <｜User｜>=128803 also as a stop,
+    # the model auto-continues past <｜end▁of▁sentence｜> into a fake user
+    # turn, causing "🤖 My name is..." restart loops on multi-turn chat.
+    # Resolve token ids dynamically from the actual tokenizer (don't hardcode).
+    try:
+        from transformers import AutoTokenizer
+        _tok = AutoTokenizer.from_pretrained(str(dst), trust_remote_code=True)
+        _eos_id = _tok.convert_tokens_to_ids("<｜end▁of▁sentence｜>")
+        _user_id = _tok.convert_tokens_to_ids("<｜User｜>")
+        if _eos_id is not None and _user_id is not None and _eos_id != _user_id:
+            _eos_list = sorted({_eos_id, _user_id})
+            for _fn in ("config.json", "generation_config.json", "tokenizer_config.json"):
+                _p = dst / _fn
+                if not _p.exists():
+                    continue
+                _d = json.loads(_p.read_text())
+                _d["eos_token_id"] = _eos_list
+                _p.write_text(json.dumps(_d, indent=2, ensure_ascii=False))
+            print(f"[convert] forced eos_token_id={_eos_list} in 3 config files")
+    except Exception as _eos_err:
+        print(f"[convert] WARN eos list patch failed: {_eos_err}")
+
     elapsed = time.time() - t_start
     print(f"\nDONE in {elapsed:.0f}s ({elapsed/60:.1f} min)")
     print(f"  mxtq={totals['mxtq']}  affine={totals['affine']}  passthrough={totals['passthrough']}")
@@ -343,9 +486,13 @@ def main() -> int:
                     help="Routed-expert bit count.")
     ap.add_argument("--format", default="jangtq", choices=("jang", "jangtq"),
                     help="jang=standard affine everywhere; jangtq=MXTQ for 2-bit routed.")
+    ap.add_argument("--variant", default="std", choices=("std", "K"),
+                    help="std=legacy with MTP shipped; K=MAX-QUALITY 70-80GB "
+                         "profile (drops MTP head, all non-routed stay 8-bit).")
     args = ap.parse_args()
-    global FORMAT
+    global FORMAT, VARIANT
     FORMAT = args.format
+    VARIANT = args.variant
     convert(args.src, args.dst, args.profile)
     return 0
 

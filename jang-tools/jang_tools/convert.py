@@ -244,7 +244,7 @@ def convert_model(
     # MLP asymmetry fix for 512+ expert models.
     # gate_proj→IMPORTANT (4-bit), down_proj→3-bit floor, up_proj→COMPRESS (2-bit OK).
     # Prevents SiLU amplification → float16 overflow → NaN (proven on 397B + Nemotron).
-    # See research/397B-MLP-ASYMMETRY.md for full analysis.
+    # (gate/down asymmetry empirically required on 512-expert models).
     if num_experts >= 512:
         print(f"  MLP asymmetry: 512+ experts → gate_proj=IMPORTANT(4-bit), down_proj=3-bit floor")
 

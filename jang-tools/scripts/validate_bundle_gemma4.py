@@ -4,7 +4,7 @@ Plan 5 validation: load Gemma-4-26B-A4B-it-JANG_4M two ways and confirm
 greedy decode produces identical token sequences.
 
   Path A (baseline):  jang_tools.loader.load_jang_vlm_model on the source
-                      directory /Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M
+                      directory <repo>/models/Gemma-4-26B-A4B-it-JANG_4M
   Path B (bundle):    jang_tools.jangspec.bundle_loader.load_jang_model_from_bundle
                       on /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec
 
@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_SOURCE = "/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M"
+DEFAULT_SOURCE = "<repo>/models/Gemma-4-26B-A4B-it-JANG_4M"
 DEFAULT_BUNDLE = "/tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec"
 DEFAULT_PROMPT = "The capital of France is"
 DEFAULT_MAX = 16

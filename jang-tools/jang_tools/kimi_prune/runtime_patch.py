@@ -4,17 +4,17 @@ Kimi K2.6 (`kimi_k25` model_type in mlx_lm) wraps `DeepseekV3Model` from
 `mlx_lm.models.deepseek_v3`. That file's MLA attention has the same L==1
 absorb branch as `deepseek_v32` and the same bf16 SDPA drift bug — without
 this patch, decode produces repetition loops after ~14 tokens on quantized
-Kimi bundles. See `research/VMLX-RUNTIME-FIXES.md` for the full history
-(originally found on GLM-5.1 JANG_1L).
+Kimi bundles (originally found on GLM-5.1 JANG_1L).
 
 WHAT THIS DOES:
-  Copies `research/deepseek_v3_patched.py` over the MAIN pip install
-  (`/opt/homebrew/lib/python3.14/site-packages/mlx_lm/models/deepseek_v3.py`).
-  Keeps a timestamped backup next to the original the first time it runs.
+  Copies a patched `deepseek_v3.py` over whatever the active python's
+  `mlx_lm.models.deepseek_v3` resolves to (e.g. a Homebrew or pyenv
+  site-packages tree). Keeps a timestamped backup next to the original
+  the first time it runs.
 
 WHAT THIS DOES NOT DO:
   - DOES NOT touch vMLX's bundled mlx_lm (vMLX patches via its own source
-    tree, per the 2026-04-11 rule).
+    tree).
   - DOES NOT touch any conda / other-venv installs.
 
 IDEMPOTENT: if the patch marker is already present, this is a no-op.
@@ -50,8 +50,7 @@ def _locate_target() -> Path:
     if "vmlx" in str(target).lower() or "/vmlx-" in str(target):
         raise RuntimeError(
             f"Refusing to patch vMLX-bundled file: {target}\n"
-            "vMLX has its own deepseek_v3.py; patch it via the vMLX source tree "
-            "(see research/VMLX-RUNTIME-FIXES.md)."
+            "vMLX has its own deepseek_v3.py; patch it via the vMLX source tree."
         )
     return target
 

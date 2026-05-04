@@ -377,7 +377,7 @@ try:
 
     # Build Swift runtime sidecar so Swift runtimes (vmlx-swift-lm, vmlxctl,
     # Osaurus) can load without fatalError. Python loader doesn't need it, but
-    # uploading without it is a footgun — see research/JANGTQ-REFERENCE.md.
+    # uploading without it is a footgun.
     print(f"\n  Building jangtq_runtime.safetensors sidecar...")
     try:
         from jang_tools.build_jangtq_sidecar import main as _build_sidecar

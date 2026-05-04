@@ -90,6 +90,7 @@ _FUSED_SWIGLU_SOURCE = f'''
     uint out_features = meta[2];
     uint packed_cols = meta[3];
     uint bits = meta[4];
+    float swiglu_limit = static_cast<float>(meta[5]) * 0.001f;
 
     if (out_idx_0 >= out_features) return;
 
@@ -157,6 +158,10 @@ _FUSED_SWIGLU_SOURCE = f'''
             float nu = static_cast<float>(norms_up[expert * out_features + oi]);
             float gv = acc_g[o] * ng;
             float uv = acc_u[o] * nu;
+            if (swiglu_limit > 0.0f) {{
+                gv = metal::min(gv, swiglu_limit);
+                uv = metal::min(metal::max(uv, -swiglu_limit), swiglu_limit);
+            }}
             out_act[base_off + oi] = (gv / (1.0f + metal::fast::exp(-gv))) * uv;
         }}
     }}
@@ -173,20 +178,29 @@ _kernel_swiglu = None
 _DECODE_CACHE = {}
 
 
-def make_fused_gate_up_swiglu_decode(in_features, out_features, bits, K):
+def make_fused_gate_up_swiglu_decode(
+    in_features, out_features, bits, K, swiglu_limit: float = 0.0
+):
     """Return a pure function(x_rot, pg, ng, pu, nu, cb, idx_flat) → (K, out_f).
 
     x_rot: (1, in_features) float32, already Hadamard-rotated
     idx_flat: (K,) uint32
     Assumes broadcast mode (batch=1, K experts).
     """
-    key = ("gu_swiglu", in_features, out_features, bits, K)
+    # DSV4's routed experts require a limited SwiGLU:
+    #   silu(min(gate, 10)) * clip(up, -10, 10)
+    # Standard SwiGLU models pass 0.0 and keep the historical fast path.
+    limit_milli = int(round(float(swiglu_limit or 0.0) * 1000.0))
+    key = ("gu_swiglu", in_features, out_features, bits, K, limit_milli)
     if key in _DECODE_CACHE:
         return _DECODE_CACHE[key]
 
     vals_per_u32 = 32 // bits
     packed_cols = (in_features + vals_per_u32 - 1) // vals_per_u32
-    meta = mx.array([K, in_features, out_features, packed_cols, bits], dtype=mx.uint32)
+    meta = mx.array(
+        [K, in_features, out_features, packed_cols, bits, max(0, limit_milli)],
+        dtype=mx.uint32,
+    )
     # P17: OPT=10 outputs per thread (swept optimum on M3 Ultra)
     out_groups = (out_features + _FUSED_SWIGLU_OPT - 1) // _FUSED_SWIGLU_OPT
     grid_x = out_groups * 32
@@ -245,6 +259,7 @@ def fused_gate_up_swiglu_matmul(
     codebook: mx.array, signs: mx.array,
     rhs_indices: mx.array,
     bits: int,
+    swiglu_limit: float = 0.0,
 ) -> mx.array:
     """Fused gate+up+SwiGLU activation. Returns post-activation result.
 
@@ -284,7 +299,11 @@ def fused_gate_up_swiglu_matmul(
     x_rot = hadamard_rotate_metal(x_flat.astype(mx.float32), signs)
 
     K_meta = 1 if out_shape_kind in ("sorted", "per_row") else K
-    meta = mx.array([K_meta, in_features, out_features, packed_cols, bits], dtype=mx.uint32)
+    limit_milli = int(round(float(swiglu_limit or 0.0) * 1000.0))
+    meta = mx.array(
+        [K_meta, in_features, out_features, packed_cols, bits, max(0, limit_milli)],
+        dtype=mx.uint32,
+    )
     n_dispatches = batch if out_shape_kind != "broadcast" else batch * K
 
     kernel = _get_kernel_swiglu()

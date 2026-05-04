@@ -60,7 +60,7 @@ jang-runtime/Package.swift     MODIFY: add JANGCoreMetal library + test target, 
 - [ ] **Step 1: Confirm state and branch**
 
 ```bash
-cd /Users/eric/jang && git status && git log -1 --oneline && git branch --show-current
+cd <repo> && git status && git log -1 --oneline && git branch --show-current
 ```
 Expected: clean tree, branch `jang-spec-plan3-hotcore`, latest commit is Plan 3's STATUS update (`a4690f7` or newer).
 
@@ -183,14 +183,14 @@ if __name__ == "__main__":
 - [ ] **Step 2: Generate the fixture**
 
 ```bash
-cd /Users/eric/jang && python3 jang-tools/scripts/gen_matmul_fixture.py
+cd <repo> && python3 jang-tools/scripts/gen_matmul_fixture.py
 ```
 Expected: one-line confirmation printing `y_ref[:4]` as four finite floats. The safetensors file is ~2 KB and `fixture_info.json` is a handful of lines.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-tools/scripts/gen_matmul_fixture.py \
+cd <repo> && git add jang-tools/scripts/gen_matmul_fixture.py \
     jang-runtime/Tests/JANGCoreMetalTests/fixtures/matmul_4bit_64x128.safetensors \
     jang-runtime/Tests/JANGCoreMetalTests/fixtures/fixture_info.json
 git commit -m "jang-core-metal: 4-bit matmul fixture generator and committed fixture"
@@ -237,14 +237,14 @@ Note: the `.copy` path is relative to the target's `path`, so `Sources/JANGCoreM
 - [ ] **Step 2: Verify the package resolves**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift package describe 2>&1 | grep -A2 "JANGCoreMetal"
+cd <repo>/jang-runtime && swift package describe 2>&1 | grep -A2 "JANGCoreMetal"
 ```
 Expected: both `JANGCoreMetal` and `JANGCoreMetalTests` appear. The Metal file is currently absent — that's fine, Task 3 creates it.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Package.swift
+cd <repo> && git add jang-runtime/Package.swift
 git commit -m "jang-core-metal: register JANGCoreMetal target with Metal resource"
 ```
 
@@ -338,7 +338,7 @@ kernel void jang_v2_quant_matmul_4bit_gemv(
 - [ ] **Step 2: Sanity-compile the kernel standalone**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && \
+cd <repo>/jang-runtime && \
   xcrun -sdk macosx metal -c Metal/JangV2QuantMatmul.metal -o /tmp/JangV2QuantMatmul.air 2>&1
 ```
 (Adjust the path if Task 2 used the co-located layout.) Expected: clean compile, no errors.
@@ -346,7 +346,7 @@ cd /Users/eric/jang/jang-runtime && \
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Metal/ jang-runtime/Sources/JANGCoreMetal/*.metal 2>/dev/null
+cd <repo> && git add jang-runtime/Metal/ jang-runtime/Sources/JANGCoreMetal/*.metal 2>/dev/null
 # (the glob covers both layouts; one will have no matches and git will silently skip it)
 git commit -m "jang-core-metal: 4-bit GEMV quantized matmul Metal kernel"
 ```
@@ -486,14 +486,14 @@ public enum MetalBuffer {
 - [ ] **Step 4: Build**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build 2>&1 | tail -10
+cd <repo>/jang-runtime && swift build 2>&1 | tail -10
 ```
 Expected: build success.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCoreMetal/JANGCoreMetal.swift \
+cd <repo> && git add jang-runtime/Sources/JANGCoreMetal/JANGCoreMetal.swift \
     jang-runtime/Sources/JANGCoreMetal/MetalContext.swift \
     jang-runtime/Sources/JANGCoreMetal/MetalBuffer.swift
 git commit -m "jang-core-metal: MetalContext + MetalBuffer helpers"
@@ -636,14 +636,14 @@ struct QuantMatmul4Params {
 - [ ] **Step 2: Build**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build 2>&1 | tail -10
+cd <repo>/jang-runtime && swift build 2>&1 | tail -10
 ```
 Expected: build success.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCoreMetal/QuantizedMatmul4.swift
+cd <repo> && git add jang-runtime/Sources/JANGCoreMetal/QuantizedMatmul4.swift
 git commit -m "jang-core-metal: QuantizedMatmul4 Swift binding"
 ```
 
@@ -751,7 +751,7 @@ final class QuantizedMatmul4Tests: XCTestCase {
 - [ ] **Step 2: Run the test**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter QuantizedMatmul4Tests 2>&1 | tail -25
+cd <repo>/jang-runtime && swift test --filter QuantizedMatmul4Tests 2>&1 | tail -25
 ```
 Expected: 1 test passes. The print line shows max abs and max rel errors (typically < 1e-3).
 
@@ -764,7 +764,7 @@ If the test **fails** on a numerical mismatch:
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add -f jang-runtime/Tests/JANGCoreMetalTests/QuantizedMatmul4Tests.swift
+cd <repo> && git add -f jang-runtime/Tests/JANGCoreMetalTests/QuantizedMatmul4Tests.swift
 git commit -m "jang-core-metal: 4-bit GEMV correctness test against MLX reference"
 ```
 
@@ -778,14 +778,14 @@ git commit -m "jang-core-metal: 4-bit GEMV correctness test against MLX referenc
 - [ ] **Step 1: Full Swift test suite**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test 2>&1 | tail -20
+cd <repo>/jang-runtime && swift test 2>&1 | tail -20
 ```
 Expected: all `JANGCoreTests`, `JANGCoreMetalTests`, and the existing `JANGTests` pass.
 
 - [ ] **Step 2: Full release build**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build -c release 2>&1 | tail -10
+cd <repo>/jang-runtime && swift build -c release 2>&1 | tail -10
 ```
 Expected: `jang`, `jang-spec-iobench`, `jang-core`, `JANGCore`, `JANGCoreMetal` all build.
 
@@ -801,13 +801,13 @@ Edit `docs/superpowers/notes/jang-spec-STATUS.md`:
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eric/jang && git add docs/superpowers/notes/jang-spec-STATUS.md
+cd <repo> && git add docs/superpowers/notes/jang-spec-STATUS.md
 git commit -m "jang-spec: update STATUS after Plan 4 completion"
 ```
 
 - [ ] **Step 5: Print commit log**
 
 ```bash
-cd /Users/eric/jang && git log --oneline jang-spec-plan3-hotcore..HEAD
+cd <repo> && git log --oneline jang-spec-plan3-hotcore..HEAD
 ```
 Expected: 7–8 commits from this plan.

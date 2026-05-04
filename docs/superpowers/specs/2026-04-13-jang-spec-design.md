@@ -279,7 +279,7 @@ These drive user-facing tuning and motivate the v2 router-aware draft (§13) if 
 
 ### 8.1 During development: `jang-runtime`
 
-The existing Swift package at `/Users/eric/jang/jang-runtime` gains two new SwiftPM targets. The current dense v1 `JANG` target is left untouched and will be deprecated later.
+The existing Swift package at `<repo>/jang-runtime` gains two new SwiftPM targets. The current dense v1 `JANG` target is left untouched and will be deprecated later.
 
 ```
 jang-runtime/

@@ -16,7 +16,7 @@
 - Drafting or speculative decoding.
 - vmlx integration.
 
-**Test fixture:** `/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M` (128-expert MoE). Set env var `JANGSPEC_TEST_MODEL` to override. Tests that need a real model skip if the fixture is absent.
+**Test fixture:** `<repo>/models/Gemma-4-26B-A4B-it-JANG_4M` (128-expert MoE). Set env var `JANGSPEC_TEST_MODEL` to override. Tests that need a real model skip if the fixture is absent.
 
 ---
 
@@ -70,7 +70,7 @@ Modified files:
 
 Run:
 ```bash
-cd /Users/eric/jang && git status && git log -1 --oneline
+cd <repo> && git status && git log -1 --oneline
 ```
 Expected: clean working tree on `main` at commit `a1aa178 jang-spec: drop router-aware drafting from v1, prior-only prefetch` (or newer).
 
@@ -243,7 +243,7 @@ def align_up(n: int, align: int = BLOB_ALIGNMENT) -> int:
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -c "from jang_tools.jangspec import format as f; print(f.BLOB_HEADER_SIZE, f.TENSOR_HEADER_SIZE, f.INDEX_ENTRY_SIZE, f.INDEX_HEADER_SIZE); print(f.align_up(100), f.align_up(4096), f.align_up(4097))"
+cd <repo>/jang-tools && python -c "from jang_tools.jangspec import format as f; print(f.BLOB_HEADER_SIZE, f.TENSOR_HEADER_SIZE, f.INDEX_ENTRY_SIZE, f.INDEX_HEADER_SIZE); print(f.align_up(100), f.align_up(4096), f.align_up(4097))"
 ```
 Expected output:
 ```
@@ -355,7 +355,7 @@ def test_unpack_rejects_wrong_magic():
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_blob.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_blob.py -v
 ```
 Expected: `ModuleNotFoundError: No module named 'jang_tools.jangspec.blob'`.
 
@@ -567,7 +567,7 @@ def unpack_expert_blob(blob: bytes) -> UnpackedBlob:
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_blob.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_blob.py -v
 ```
 Expected: 3 passed.
 
@@ -646,7 +646,7 @@ def test_index_rejects_wrong_magic(tmp_path: Path):
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_index.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_index.py -v
 ```
 Expected: ImportError / ModuleNotFoundError for `index`.
 
@@ -775,7 +775,7 @@ def read_index(path: Path) -> LoadedIndex:
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_index.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_index.py -v
 ```
 Expected: 3 passed.
 
@@ -811,7 +811,7 @@ def test_manifest_roundtrip(tmp_path: Path):
     m = Manifest(
         bundle_version=1,
         source_jang="Gemma-4-26B-A4B-it-JANG_4M",
-        source_jang_dir="/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M",
+        source_jang_dir="<repo>/models/Gemma-4-26B-A4B-it-JANG_4M",
         target_arch="gemma4_moe",
         n_layers=48,
         n_experts_per_layer=128,
@@ -843,7 +843,7 @@ def test_manifest_rejects_wrong_version(tmp_path: Path):
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_manifest.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_manifest.py -v
 ```
 Expected: ModuleNotFoundError for `manifest`.
 
@@ -913,7 +913,7 @@ def load_manifest(path: Path) -> Manifest:
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_manifest.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_manifest.py -v
 ```
 Expected: 2 passed.
 
@@ -1019,7 +1019,7 @@ def test_is_dense_model_false_when_switch_mlp_present():
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_tier.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_tier.py -v
 ```
 Expected: ModuleNotFoundError for `tier`.
 
@@ -1091,7 +1091,7 @@ def is_dense_model(tensor_names: Iterable[str]) -> bool:
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_tier.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_tier.py -v
 ```
 Expected: 3 passed.
 
@@ -1122,7 +1122,7 @@ from pathlib import Path
 
 import pytest
 
-DEFAULT_FIXTURE = "/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M"
+DEFAULT_FIXTURE = "<repo>/models/Gemma-4-26B-A4B-it-JANG_4M"
 
 
 @pytest.fixture(scope="session")
@@ -1192,7 +1192,7 @@ def test_build_creates_all_bundle_files(jangspec_fixture_model: Path, tmp_path: 
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_builder.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_builder.py -v
 ```
 Expected: ModuleNotFoundError for `builder`. (If the fixture model is missing, the test will skip — that's fine but we won't get coverage until it's present.)
 
@@ -1520,7 +1520,7 @@ class JangSpecBuilder:
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_builder.py -v -s
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_builder.py -v -s
 ```
 Expected: 1 passed (or skipped if fixture model is absent — if skipped, investigate whether a local MoE fixture can be downloaded before proceeding).
 
@@ -1607,7 +1607,7 @@ def test_reader_random_access(jangspec_fixture_model: Path, tmp_path: Path):
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_reader.py -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_reader.py -v
 ```
 Expected: ModuleNotFoundError for `reader`.
 
@@ -1676,7 +1676,7 @@ class JangSpecReader:
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/test_reader.py -v -s
+cd <repo>/jang-tools && python -m pytest tests/jangspec/test_reader.py -v -s
 ```
 Expected: 2 passed (or skipped if fixture missing).
 
@@ -1684,7 +1684,7 @@ Expected: 2 passed (or skipped if fixture missing).
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/jangspec/ -v
+cd <repo>/jang-tools && python -m pytest tests/jangspec/ -v
 ```
 Expected: all unit tests pass; integration tests pass or skip consistently.
 
@@ -1788,7 +1788,7 @@ And in the dispatch block at the end of `main()` (where other subcommands call t
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && pip install -e . --quiet
+cd <repo>/jang-tools && pip install -e . --quiet
 ```
 Expected: `Successfully installed jang-...`.
 
@@ -1804,8 +1804,8 @@ Expected: help output showing `build` and `inspect` subcommands.
 
 Run:
 ```bash
-if [ -d /Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M ]; then \
-  jang spec build /Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M \
+if [ -d <repo>/models/Gemma-4-26B-A4B-it-JANG_4M ]; then \
+  jang spec build <repo>/models/Gemma-4-26B-A4B-it-JANG_4M \
     --out /tmp/fixture.jangspec --force && \
   jang spec inspect /tmp/fixture.jangspec; \
 else \
@@ -2047,7 +2047,7 @@ if rnd.gbPerSec >= 3.0 && rnd.p99ms <= 5.0 {
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build -c release --product jang-spec-iobench
+cd <repo>/jang-runtime && swift build -c release --product jang-spec-iobench
 ```
 Expected: build success.
 
@@ -2055,7 +2055,7 @@ Expected: build success.
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-runtime && ./.build/release/jang-spec-iobench 2>&1 | tee /tmp/jang-spec-iobench.log
+cd <repo>/jang-runtime && ./.build/release/jang-spec-iobench 2>&1 | tee /tmp/jang-spec-iobench.log
 ```
 Expected: three measurement blocks and a verdict line.
 
@@ -2198,7 +2198,7 @@ git commit -m "jang-spec: README for the jangspec Python subpackage"
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/ -v
+cd <repo>/jang-tools && python -m pytest tests/ -v
 ```
 Expected: all tests pass or skip with fixture-absent messages; no failures.
 
@@ -2206,7 +2206,7 @@ Expected: all tests pass or skip with fixture-absent messages; no failures.
 
 Run:
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build -c release
+cd <repo>/jang-runtime && swift build -c release
 ```
 Expected: build success with no warnings in `jang-spec-iobench`.
 
@@ -2222,7 +2222,7 @@ Expected: three help outputs.
 
 Run:
 ```bash
-cd /Users/eric/jang && git log --oneline main..HEAD
+cd <repo> && git log --oneline main..HEAD
 ```
 Expected: the 12-or-so commits from this plan, in order.
 

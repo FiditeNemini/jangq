@@ -14,7 +14,7 @@
 
 ## Research Documents (already written)
 
-All research is at `/Users/eric/jang/research/turboquant/`:
+All research is at `<repo>/research/turboquant/`:
 - `00-RESEARCH-PLAN.md` — Master plan
 - `01-RELATED-PAPERS.md` — TurboQuant, KIVI, QJL, GEAR, QuIP, QuIP#, PolarQuant, KVLinC, KVSplit
 - `02-MLX-KV-CACHE-ANALYSIS.md` — Complete MLX cache reverse-engineering

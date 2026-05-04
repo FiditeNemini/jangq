@@ -732,6 +732,53 @@ def _precompute_freqs_cis_real(
     return mx.stack([cos, sin], axis=-1)  # (seqlen, dim/2, 2)
 
 
+def _dsv4_window_visibility(
+    batch: int,
+    seq_len: int,
+    offset: int,
+    window: int,
+    window_len: int,
+) -> mx.array:
+    """Boolean visibility for the local SWA window.
+
+    Shape is ``(B, 1, S, W)`` so it broadcasts onto SDPA scores
+    ``(B, H, S, W)``. ``window_len`` is the current RotatingKVCache length
+    after the chunk has been appended.
+    """
+    if window_len <= 0:
+        return mx.zeros((batch, 1, seq_len, 0), dtype=mx.bool_)
+    q_pos = offset + mx.arange(seq_len)
+    k_pos = (offset + seq_len) - window_len + mx.arange(window_len)
+    visible = (k_pos[None, :] <= q_pos[:, None]) & (
+        k_pos[None, :] > (q_pos[:, None] - window)
+    )
+    return mx.broadcast_to(visible[None, None, :, :], (batch, 1, seq_len, window_len))
+
+
+def _dsv4_compressed_visibility(
+    batch: int,
+    seq_len: int,
+    offset: int,
+    compressed_len: int,
+    ratio: int,
+) -> mx.array:
+    """Boolean visibility for DSV4 compressed pool rows.
+
+    Pool row ``k`` summarizes raw positions ``[k*ratio, (k+1)*ratio)``.
+    Query position ``q`` may see that row only after the summarized raw
+    window has ended: ``(k + 1) * ratio <= q + 1``.
+    """
+    if compressed_len <= 0:
+        return mx.zeros((batch, 1, seq_len, 0), dtype=mx.bool_)
+    q_pos = offset + mx.arange(seq_len)
+    k_idx = mx.arange(compressed_len)
+    visible = ((k_idx[None, :] + 1) * ratio) <= (q_pos[:, None] + 1)
+    return mx.broadcast_to(
+        visible[None, None, :, :],
+        (batch, 1, seq_len, compressed_len),
+    )
+
+
 # Cache of unit weight tensors for mx.fast.rms_norm (per-head Q norm uses
 # no learned weights; reusing a single-allocated ones tensor avoids
 # realloc per call across 43 layers per token).
@@ -846,6 +893,7 @@ class DeepseekV4Attention(nn.Module):
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, kv)
         full_kv = kv
+        attn_mask = mask
 
         if self.compress_ratio:
             v4_cache = cache if isinstance(cache, DeepseekV4Cache) else None
@@ -859,39 +907,81 @@ class DeepseekV4Attention(nn.Module):
             # - L >= compress_ratio (enough tokens to produce non-empty pool in one call)
             if v4_cache is not None or L >= self.compress_ratio:
                 pooled = self.compressor(x, self.compress_rope, v4_cache, offset)
-                if hasattr(self, "indexer") and pooled.shape[1] > 0:
-                    topk = self.indexer(x, q_residual, self.compress_rope, self.rope, v4_cache, offset)
-                    if topk is not None:
-                        expanded = mx.broadcast_to(
-                            pooled[:, None, None, :, :],
-                            (B, 1, L, pooled.shape[1], self.head_dim),
+                if pooled.shape[1] > 0:
+                    topk = None
+                    if hasattr(self, "indexer") and pooled.shape[1] > self.indexer.index_topk:
+                        topk = self.indexer(
+                            x, q_residual, self.compress_rope, self.rope,
+                            v4_cache, offset,
                         )
-                        idx = topk[:, None, :, :, None]
-                        pooled = mx.take_along_axis(
-                            expanded,
-                            mx.broadcast_to(idx, idx.shape[:-1] + (self.head_dim,)),
-                            axis=3,
-                        ).reshape(B, 1, -1, self.head_dim)
-                    else:
-                        pooled = pooled[:, None]
-                else:
-                    pooled = pooled[:, None]
-                if pooled.shape[2] > 0:
-                    full_kv = mx.concatenate([full_kv, pooled], axis=2)
 
-        if mask is not None and full_kv.shape[2] > mask.shape[-1]:
-            # Pad with ZEROS (additive mask: 0 = allowed). Reference PR #1192
-            # uses zeros; earlier `mx.ones(...)` bumped pooled positions by +1
-            # in the softmax (mild bug only triggered when compressor output is
-            # non-empty, i.e. prompts ≥ compress_ratio).
-            pad = mx.zeros(
-                mask.shape[:-1] + (full_kv.shape[2] - mask.shape[-1],), dtype=mask.dtype
-            )
-            mask = mx.concatenate([mask, pad], axis=-1)
+                    if L == 1:
+                        # Decode fast path: materialize only the selected rows
+                        # for the single query. This is bounded by index_topk
+                        # and avoids carrying a full pool mask through SDPA.
+                        if topk is not None:
+                            idx = topk[:, None, :, :, None]
+                            expanded = mx.broadcast_to(
+                                pooled[:, None, None, :, :],
+                                (B, 1, L, pooled.shape[1], self.head_dim),
+                            )
+                            pooled_kv = mx.take_along_axis(
+                                expanded,
+                                mx.broadcast_to(
+                                    idx,
+                                    idx.shape[:-1] + (self.head_dim,),
+                                ),
+                                axis=3,
+                            ).reshape(B, 1, -1, self.head_dim)
+                        else:
+                            pooled_kv = pooled[:, None]
+                        full_kv = mx.concatenate([full_kv, pooled_kv], axis=2)
+                        attn_mask = None
+                    else:
+                        # Prefill path: keep the compressed pool flat and
+                        # describe visibility with a compact bool mask. The old
+                        # code expanded to (B, 1, L, P, D) and then gathered
+                        # L*topk rows, which caused multi-GB/TB allocations and
+                        # leaked query i into query j's selected pool slice.
+                        local_mask = _dsv4_window_visibility(
+                            B, L, offset, self.args.sliding_window, full_kv.shape[2],
+                        )
+                        comp_mask = _dsv4_compressed_visibility(
+                            B, L, offset, pooled.shape[1], self.compress_ratio,
+                        )
+                        if topk is not None:
+                            k_idx = mx.arange(pooled.shape[1])
+                            selected = (
+                                topk[..., None] == k_idx[None, None, None, :]
+                            ).any(axis=-2)
+                            comp_mask = comp_mask & selected[:, None, :, :]
+                        full_kv = mx.concatenate([full_kv, pooled[:, None]], axis=2)
+                        attn_mask = mx.concatenate([local_mask, comp_mask], axis=-1)
+
+        if attn_mask is not None:
+            # DSV4 has heterogeneous attention state: SWA-only layers may use a
+            # full KVCache while HSA/CSA layers use DeepseekV4Cache
+            # (RotatingKVCache local window + cumulative pool rows). For
+            # layers that did not build a DSV4-specific bool mask above, adapt
+            # the shared model mask to this layer's actual key length.
+            if attn_mask.shape[-1] > full_kv.shape[2]:
+                attn_mask = attn_mask[..., -full_kv.shape[2]:]
+            elif full_kv.shape[2] > attn_mask.shape[-1]:
+                if getattr(attn_mask, "dtype", None) == mx.bool_:
+                    pad = mx.ones(
+                        attn_mask.shape[:-1] + (full_kv.shape[2] - attn_mask.shape[-1],),
+                        dtype=mx.bool_,
+                    )
+                else:
+                    pad = mx.zeros(
+                        attn_mask.shape[:-1] + (full_kv.shape[2] - attn_mask.shape[-1],),
+                        dtype=attn_mask.dtype,
+                    )
+                attn_mask = mx.concatenate([attn_mask, pad], axis=-1)
 
         out = scaled_dot_product_attention(
             q, full_kv, full_kv,
-            cache=local_cache, scale=self.softmax_scale, mask=mask,
+            cache=local_cache, scale=self.softmax_scale, mask=attn_mask,
             sinks=self.attn_sink.astype(q.dtype),
         )
         out = _apply_partial_rope(out, self.rope, offset, inverse=True)
@@ -1226,9 +1316,17 @@ class Model(nn.Module):
         long-context behavior with Compressor + Indexer, set the env var
         DSV4_LONG_CTX=1 — then compress_ratio>0 layers get DeepseekV4Cache.
         """
-        from mlx_lm.models.cache import KVCache, RotatingKVCache
+        from mlx_lm.models.cache import KVCache
         import os
         long_ctx = os.environ.get("DSV4_LONG_CTX", "0") == "1"
+        pool_quant = os.environ.get("DSV4_POOL_QUANT", "0") == "1"
+        pool_cache_cls = DeepseekV4Cache
+        if pool_quant:
+            try:
+                from .pool_quant_cache import PoolQuantizedV4Cache
+                pool_cache_cls = PoolQuantizedV4Cache
+            except Exception:
+                pool_cache_cls = DeepseekV4Cache
         caches = []
         for layer in self.model.layers:
             if long_ctx and layer.self_attn.compress_ratio:
@@ -1237,7 +1335,7 @@ class Model(nn.Module):
                 # v2.5.14 full reset (better long-context multi-turn perf:
                 # only the latest `n // ratio` pool rows are dropped per
                 # trim, the kept-prefix pool survives).
-                caches.append(DeepseekV4Cache(
+                caches.append(pool_cache_cls(
                     self.args.sliding_window,
                     compress_ratio=layer.self_attn.compress_ratio,
                 ))

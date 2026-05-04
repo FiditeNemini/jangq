@@ -23,7 +23,7 @@
 - `JANGCoreMetal` Plan 4 kernel. mlx-swift's existing quantized matmul kernels are the fast path for vmlx-swift-lm; we do not need a parallel kernel.
 
 **Test fixtures:**
-- Source: `/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M/` (16 GB)
+- Source: `<repo>/models/Gemma-4-26B-A4B-it-JANG_4M/` (16 GB)
 - Bundle: `/tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec/` (existing, but Task 1 rebuilds it after the builder update so configs land at the bundle root)
 
 ---
@@ -94,7 +94,7 @@ This is acceptable for v1. If it ever becomes the bottleneck a future plan can a
 - [ ] **Step 1: Confirm jang repo state**
 
 ```bash
-cd /Users/eric/jang && git status && git log -1 --oneline && git branch --show-current
+cd <repo> && git status && git log -1 --oneline && git branch --show-current
 ```
 
 Expected: clean tree, current branch `jang-spec-plan5-bundle-python-validation` (or whichever branch holds the latest committed work), latest commit is the Plan 5 STATUS update.
@@ -104,16 +104,16 @@ Expected: clean tree, current branch `jang-spec-plan5-bundle-python-validation` 
 The jang-tools changes (builder update) and vmlx-swift-lm changes are in different repos. We branch each:
 
 ```bash
-cd /Users/eric/jang && git checkout -b jang-spec-plan6-vmlx-integration
-cd /Users/eric/jang/vmlx-swift-lm && git checkout -b jang-spec-bundle-loader
+cd <repo> && git checkout -b jang-spec-plan6-vmlx-integration
+cd <repo>/vmlx-swift-lm && git checkout -b jang-spec-bundle-loader
 ```
 
-The vmlx-swift-lm copy at `/Users/eric/jang/vmlx-swift-lm/` is a separate git repo from the parent jang repo.
+The vmlx-swift-lm copy at `<repo>/vmlx-swift-lm/` is a separate git repo from the parent jang repo.
 
 - [ ] **Step 3: Verify vmlx-swift-lm builds clean before any edits**
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm && swift build -c release 2>&1 | tail -3
+cd <repo>/vmlx-swift-lm && swift build -c release 2>&1 | tail -3
 ```
 
 Expected: `Build complete!` Anything else, stop and report.
@@ -154,7 +154,7 @@ Open `jang-tools/jang_tools/jangspec/builder.py`. Find the existing `_copy_token
 - [ ] **Step 2: Re-run the builder unit tests to confirm nothing broke**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python3 -m pytest tests/jangspec/test_builder.py tests/jangspec/test_reader.py -v 2>&1 | tail -15
+cd <repo>/jang-tools && python3 -m pytest tests/jangspec/test_builder.py tests/jangspec/test_reader.py -v 2>&1 | tail -15
 ```
 
 Expected: all builder + reader tests pass (or skip if fixture is unavailable; should not skip on this machine).
@@ -162,7 +162,7 @@ Expected: all builder + reader tests pass (or skip if fixture is unavailable; sh
 - [ ] **Step 3: Rebuild the Gemma-4-26B fixture bundle with the updated builder**
 
 ```bash
-cd /Users/eric/jang && jang spec build /Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M --out /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec --force 2>&1 | tail -10
+cd <repo> && jang spec build <repo>/models/Gemma-4-26B-A4B-it-JANG_4M --out /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec --force 2>&1 | tail -10
 ```
 
 Expected: build completes in ~6–10s, prints layer/expert summary.
@@ -178,7 +178,7 @@ Expected: all four files present.
 - [ ] **Step 5: Commit the builder change**
 
 ```bash
-cd /Users/eric/jang && git add jang-tools/jang_tools/jangspec/builder.py
+cd <repo> && git add jang-tools/jang_tools/jangspec/builder.py
 git commit -m "jangspec(builder): copy config.json + jang_config.json to bundle root"
 ```
 
@@ -756,7 +756,7 @@ extension Float16 {
 - [ ] **Step 2: Build to confirm it compiles standalone**
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm && swift build -c release 2>&1 | tail -15
+cd <repo>/vmlx-swift-lm && swift build -c release 2>&1 | tail -15
 ```
 
 Expected: build success. If it fails on `MLX.stacked`, check the actual mlx-swift API name in this fork (it may be `stack`, `stacked`, `MLXNN.stack`, or similar — adapt to whatever the local fork exposes). Same for `MLXArray(u32, shape)` initializer — older mlx-swift uses positional args, newer versions take labeled `(values:shape:)`.
@@ -764,7 +764,7 @@ Expected: build success. If it fails on `MLX.stacked`, check the actual mlx-swif
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm && git add Libraries/MLXLMCommon/JangSpecBundleLoader.swift
+cd <repo>/vmlx-swift-lm && git add Libraries/MLXLMCommon/JangSpecBundleLoader.swift
 git commit -m "jangspec: native Swift bundle loader in MLXLMCommon"
 ```
 
@@ -849,7 +849,7 @@ The rest of `loadWeights` is unchanged — `model.sanitize`, `JangLoader.dequant
 - [ ] **Step 2: Build**
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm && swift build -c release 2>&1 | tail -10
+cd <repo>/vmlx-swift-lm && swift build -c release 2>&1 | tail -10
 ```
 
 Expected: build success.
@@ -857,7 +857,7 @@ Expected: build success.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm && git add Libraries/MLXLMCommon/Load.swift
+cd <repo>/vmlx-swift-lm && git add Libraries/MLXLMCommon/Load.swift
 git commit -m "jangspec: route .jangspec bundles through JangSpecBundleLoader in loadWeights"
 ```
 
@@ -896,7 +896,7 @@ git commit -m "jangspec: route .jangspec bundles through JangSpecBundleLoader in
 - [ ] **Step 2: Build**
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm && swift build -c release 2>&1 | tail -10
+cd <repo>/vmlx-swift-lm && swift build -c release 2>&1 | tail -10
 ```
 
 Expected: build success.
@@ -904,7 +904,7 @@ Expected: build success.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm && git add Libraries/MLXLMCommon/JangLoader.swift
+cd <repo>/vmlx-swift-lm && git add Libraries/MLXLMCommon/JangLoader.swift
 git commit -m "jangspec(JangLoader): findConfigPath falls back to bundle target/ subdir"
 ```
 
@@ -917,7 +917,7 @@ git commit -m "jangspec(JangLoader): findConfigPath falls back to bundle target/
 - [ ] **Step 1: Build the RunBench product**
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm && swift build -c release --product RunBench 2>&1 | tail -10
+cd <repo>/vmlx-swift-lm && swift build -c release --product RunBench 2>&1 | tail -10
 ```
 
 Expected: build success including the new bundle loader.
@@ -927,7 +927,7 @@ Expected: build success including the new bundle loader.
 We do NOT actually run the bench — Eric runs that when RAM is free. We do confirm the binary links and immediately exits when given a missing model:
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm && BENCH_MODEL=/nonexistent/path BENCH_TOKENS=/nonexistent.json ./.build/release/RunBench 2>&1 | head -20
+cd <repo>/vmlx-swift-lm && BENCH_MODEL=/nonexistent/path BENCH_TOKENS=/nonexistent.json ./.build/release/RunBench 2>&1 | head -20
 ```
 
 Expected: prints the bench banner, then errors out cleanly on the missing model. We're checking that the binary links against the new code without crashing at startup, NOT that it generates tokens.
@@ -960,15 +960,15 @@ Edit `docs/superpowers/notes/jang-spec-STATUS.md`:
 - [ ] **Step 2: Commit STATUS**
 
 ```bash
-cd /Users/eric/jang && git add docs/superpowers/notes/jang-spec-STATUS.md
+cd <repo> && git add docs/superpowers/notes/jang-spec-STATUS.md
 git commit -m "jang-spec: STATUS update — Plan 6 ready, vmlx-swift-lm reads bundles natively"
 ```
 
 - [ ] **Step 3: Print plan commit log across both repos**
 
 ```bash
-echo "=== jang ==="; cd /Users/eric/jang && git log --oneline jang-spec-plan5-bundle-python-validation..HEAD
-echo "=== vmlx-swift-lm ==="; cd /Users/eric/jang/vmlx-swift-lm && git log --oneline main^..HEAD
+echo "=== jang ==="; cd <repo> && git log --oneline jang-spec-plan5-bundle-python-validation..HEAD
+echo "=== vmlx-swift-lm ==="; cd <repo>/vmlx-swift-lm && git log --oneline main^..HEAD
 ```
 
 Expected: 2 commits in jang (builder update + STATUS), 3 commits in vmlx-swift-lm (loader + Load.swift wiring + JangLoader fallback).
@@ -980,7 +980,7 @@ Expected: 2 commits in jang (builder update + STATUS), 3 commits in vmlx-swift-l
 The full validation needs RAM. Eric runs it manually:
 
 ```bash
-cd /Users/eric/jang/vmlx-swift-lm
+cd <repo>/vmlx-swift-lm
 pkill -9 -f "ollama|omlx|Python.*mlx_lm" 2>/dev/null
 BENCH_MODEL=/tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec \
     ./.build/release/RunBench

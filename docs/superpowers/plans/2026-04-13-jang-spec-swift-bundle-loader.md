@@ -63,7 +63,7 @@ Modified files:
 - [ ] **Step 1: Confirm starting state**
 
 ```bash
-cd /Users/eric/jang && git status && git log -1 --oneline
+cd <repo> && git status && git log -1 --oneline
 ```
 
 Expected: clean tree, latest commit is Plan 1's last commit (either `89dd2a0 README for the jangspec Python subpackage` or later if the branch has been merged to main). If uncertain, run `git branch` to see the current branch.
@@ -147,14 +147,14 @@ let package = Package(
 - [ ] **Step 2: Verify the package resolves**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift package describe 2>&1 | head -20
+cd <repo>/jang-runtime && swift package describe 2>&1 | head -20
 ```
 Expected: describes the package including `JANGCore` and `jang-core` targets without errors. The JANGCore target will show "no source files" — that's fine at this point.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Package.swift
+cd <repo> && git add jang-runtime/Package.swift
 git commit -m "jang-core: register JANGCore library and jang-core CLI targets"
 ```
 
@@ -328,14 +328,14 @@ final class JangSpecFormatTests: XCTestCase {
 - [ ] **Step 5: Build and test**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter JangSpecFormatTests 2>&1 | tail -20
+cd <repo>/jang-runtime && swift test --filter JangSpecFormatTests 2>&1 | tail -20
 ```
 Expected: `Test Suite 'JangSpecFormatTests' passed` with 4 tests.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/ jang-runtime/Tests/JANGCoreTests/JangSpecFormatTests.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/ jang-runtime/Tests/JANGCoreTests/JangSpecFormatTests.swift
 git commit -m "jang-core: format constants mirror with parity tests"
 ```
 
@@ -470,7 +470,7 @@ final class ExpertIndexTests: XCTestCase {
 - [ ] **Step 2: Run the failing test**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter ExpertIndexTests 2>&1 | tail -10
+cd <repo>/jang-runtime && swift test --filter ExpertIndexTests 2>&1 | tail -10
 ```
 Expected: compile error `cannot find 'ExpertIndex' in scope`. That's the failing-test signal.
 
@@ -593,14 +593,14 @@ public struct ExpertIndex: Sendable {
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter ExpertIndexTests 2>&1 | tail -15
+cd <repo>/jang-runtime && swift test --filter ExpertIndexTests 2>&1 | tail -15
 ```
 Expected: 3 tests passing.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/ExpertIndex.swift jang-runtime/Tests/JANGCoreTests/ExpertIndexTests.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/ExpertIndex.swift jang-runtime/Tests/JANGCoreTests/ExpertIndexTests.swift
 git commit -m "jang-core: ExpertIndex parser with synthetic round-trip tests"
 ```
 
@@ -747,7 +747,7 @@ final class ExpertBlobTests: XCTestCase {
 - [ ] **Step 2: Run the failing test**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter ExpertBlobTests 2>&1 | tail -10
+cd <repo>/jang-runtime && swift test --filter ExpertBlobTests 2>&1 | tail -10
 ```
 Expected: compile error — `ExpertBlob` not found.
 
@@ -911,14 +911,14 @@ public struct ExpertBlob: Sendable {
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter ExpertBlobTests 2>&1 | tail -15
+cd <repo>/jang-runtime && swift test --filter ExpertBlobTests 2>&1 | tail -15
 ```
 Expected: 2 tests passing.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/ExpertBlob.swift jang-runtime/Tests/JANGCoreTests/ExpertBlobTests.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/ExpertBlob.swift jang-runtime/Tests/JANGCoreTests/ExpertBlobTests.swift
 git commit -m "jang-core: ExpertBlob parser with 9-tensor synthetic round-trip"
 ```
 
@@ -999,14 +999,14 @@ public struct JangSpecManifest: Codable, Sendable, Equatable {
 - [ ] **Step 2: Build to confirm it compiles**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build 2>&1 | tail -10
+cd <repo>/jang-runtime && swift build 2>&1 | tail -10
 ```
 Expected: build success. No tests for this file yet — it's covered by the integration test in Task 7.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/JangSpecManifest.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/JangSpecManifest.swift
 git commit -m "jang-core: JangSpecManifest Codable struct"
 ```
 
@@ -1077,14 +1077,14 @@ public final class ExpertStore: @unchecked Sendable {
 - [ ] **Step 2: Build**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build 2>&1 | tail -10
+cd <repo>/jang-runtime && swift build 2>&1 | tail -10
 ```
 Expected: build success.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/ExpertStore.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/ExpertStore.swift
 git commit -m "jang-core: ExpertStore — mmap experts-*.bin, load-by-key"
 ```
 
@@ -1174,7 +1174,7 @@ import Foundation
 /// `/tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec` and reused
 /// across test runs as long as the manifest is present.
 enum Fixtures {
-    static let sourceModelPath = "/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M"
+    static let sourceModelPath = "<repo>/models/Gemma-4-26B-A4B-it-JANG_4M"
     static let cacheDir = URL(fileURLWithPath: "/tmp/jangcore-fixtures")
     static let bundleURL = cacheDir.appendingPathComponent("Gemma-4-26B-A4B-it-JANG_4M.jangspec")
 
@@ -1283,21 +1283,21 @@ final class JangSpecBundleTests: XCTestCase {
 - [ ] **Step 4: Build and test**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test --filter JangSpecBundleTests 2>&1 | tail -25
+cd <repo>/jang-runtime && swift test --filter JangSpecBundleTests 2>&1 | tail -25
 ```
-Expected: 2 tests passing (or `SKIPPED` with a clear reason if the Gemma fixture is unavailable). If skipped on this machine, verify the source model exists at `/Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M`.
+Expected: 2 tests passing (or `SKIPPED` with a clear reason if the Gemma fixture is unavailable). If skipped on this machine, verify the source model exists at `<repo>/models/Gemma-4-26B-A4B-it-JANG_4M`.
 
 - [ ] **Step 5: Full test sweep**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test 2>&1 | tail -30
+cd <repo>/jang-runtime && swift test 2>&1 | tail -30
 ```
 Expected: `JangSpecFormatTests`, `ExpertIndexTests`, `ExpertBlobTests`, `JangSpecBundleTests` all pass. Existing `JANGTests` should be unaffected.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/JANGCore/JangSpecBundle.swift jang-runtime/Tests/JANGCoreTests/Fixtures.swift jang-runtime/Tests/JANGCoreTests/JangSpecBundleTests.swift
+cd <repo> && git add jang-runtime/Sources/JANGCore/JangSpecBundle.swift jang-runtime/Tests/JANGCoreTests/Fixtures.swift jang-runtime/Tests/JANGCoreTests/JangSpecBundleTests.swift
 git commit -m "jang-core: JangSpecBundle façade + Gemma fixture integration tests"
 ```
 
@@ -1361,19 +1361,19 @@ struct Inspect: AsyncParsableCommand {
 - [ ] **Step 2: Build**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build -c release --product jang-core 2>&1 | tail -10
+cd <repo>/jang-runtime && swift build -c release --product jang-core 2>&1 | tail -10
 ```
 Expected: build success.
 
 - [ ] **Step 3: Smoke-test against the fixture bundle**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && ./.build/release/jang-core inspect /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec 2>&1
+cd <repo>/jang-runtime && ./.build/release/jang-core inspect /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec 2>&1
 ```
 Expected: the same fields Python's `jang spec inspect` prints, in Swift.
 If the fixture bundle doesn't exist yet at that path (because the integration test didn't run), build it first:
 ```bash
-jang spec build /Users/eric/jang/models/Gemma-4-26B-A4B-it-JANG_4M --out /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec --force
+jang spec build <repo>/models/Gemma-4-26B-A4B-it-JANG_4M --out /tmp/jangcore-fixtures/Gemma-4-26B-A4B-it-JANG_4M.jangspec --force
 ```
 
 - [ ] **Step 4: Parity check against Python**
@@ -1387,7 +1387,7 @@ Compare the two outputs visually. All fields shared between the two implementati
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang && git add jang-runtime/Sources/jang-core/main.swift
+cd <repo> && git add jang-runtime/Sources/jang-core/main.swift
 git commit -m "jang-core: jang-core inspect subcommand with Python parity"
 ```
 
@@ -1400,21 +1400,21 @@ git commit -m "jang-core: jang-core inspect subcommand with Python parity"
 - [ ] **Step 1: Full Swift test suite**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift test 2>&1 | tail -20
+cd <repo>/jang-runtime && swift test 2>&1 | tail -20
 ```
 Expected: all `JANGCoreTests` pass, existing `JANGTests` unchanged.
 
 - [ ] **Step 2: Rebuild all products**
 
 ```bash
-cd /Users/eric/jang/jang-runtime && swift build -c release 2>&1 | tail -15
+cd <repo>/jang-runtime && swift build -c release 2>&1 | tail -15
 ```
 Expected: `jang`, `jang-spec-iobench`, `jang-core` all build.
 
 - [ ] **Step 3: Summarize commits**
 
 ```bash
-cd /Users/eric/jang && git log --oneline main..HEAD
+cd <repo> && git log --oneline main..HEAD
 ```
 Expected: the tasks from this plan, each as one commit.
 

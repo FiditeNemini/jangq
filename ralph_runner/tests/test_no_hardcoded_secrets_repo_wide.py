@@ -37,7 +37,7 @@ import re
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).parent.parent.parent  # /Users/eric/jang/
+REPO_ROOT = Path(__file__).parent.parent.parent  # repo root
 
 # Directories to skip — vendored third-party + build outputs.
 SKIP_DIR_NAMES = {

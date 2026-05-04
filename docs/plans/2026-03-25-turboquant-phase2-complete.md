@@ -146,7 +146,7 @@ def benchmark_generation(model, tokenizer, prompt, gen_tokens=100):
 ## Task 7: vmlx Cache Type Integration
 
 **Files:**
-- Modify: `vmlx_engine/utils/cache_types.py` (on Mac Studio at `/Users/eric/mlx/vllm-mlx/`)
+- Modify: `vmlx_engine/utils/cache_types.py` (on Mac Studio at `~/mlx/vllm-mlx/`)
 - Modify: `vmlx_engine/utils/jang_loader.py`
 
 **What:** vmlx's `detect_cache_type()` needs to recognize TurboQuantKVCache. The cache type detection routes to different code paths for batch operations, serialization, and memory management.

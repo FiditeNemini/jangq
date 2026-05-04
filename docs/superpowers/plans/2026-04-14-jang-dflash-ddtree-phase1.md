@@ -5,17 +5,17 @@
 
 **Architecture recap:** 5-layer block-diffusion drafter (JangDFlashDrafter) consumes hidden states from 5 evenly-spaced target layers via KV injection, emits B=16 parallel candidate distributions in one forward, top-k=4 per slot → lattice beam m=60 → prefix-trie → EAGLE-2 tree-attention verification on MiniMax target.
 
-**Tech stack:** PyTorch for drafter training on 5090. MLX-Swift for inference on Apple Silicon. JANG loader handles drafter weights. vmlx-swift git tree is at `/Users/eric/vmlx/swift/`.
+**Tech stack:** PyTorch for drafter training on 5090. MLX-Swift for inference on Apple Silicon. JANG loader handles drafter weights. vmlx-swift git tree is at `~/vmlx/swift/`.
 
 ---
 
 ## Task 1: Python drafter scaffold (PyTorch, trains on 5090)
 
 **Files:**
-- Create: `/Users/eric/jang/jang-tools/jang_tools/dflash/__init__.py`
-- Create: `/Users/eric/jang/jang-tools/jang_tools/dflash/drafter.py`
-- Create: `/Users/eric/jang/jang-tools/jang_tools/dflash/config.py`
-- Test: `/Users/eric/jang/jang-tools/tests/test_dflash_drafter.py`
+- Create: `<repo>/jang-tools/jang_tools/dflash/__init__.py`
+- Create: `<repo>/jang-tools/jang_tools/dflash/drafter.py`
+- Create: `<repo>/jang-tools/jang_tools/dflash/config.py`
+- Test: `<repo>/jang-tools/tests/test_dflash_drafter.py`
 
 - [ ] **Step 1: Write the failing test for drafter forward shape**
 
@@ -41,7 +41,7 @@ def test_drafter_forward_shapes():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/eric/jang && python -m pytest jang-tools/tests/test_dflash_drafter.py -v`
+Run: `cd <repo> && python -m pytest jang-tools/tests/test_dflash_drafter.py -v`
 Expected: FAIL with ImportError
 
 - [ ] **Step 3: Write `config.py`**
@@ -83,7 +83,7 @@ python -m pytest jang-tools/tests/test_dflash_drafter.py -v
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add jang-tools/jang_tools/dflash/ jang-tools/tests/test_dflash_drafter.py
 git commit -m "jang-dflash: scaffold PyTorch drafter with KV injection"
 ```
@@ -168,8 +168,8 @@ Tap layer indices hardcoded to `[10, 22, 34, 46, 58]` (5 evenly spaced through M
 
 ```bash
 printf "What is 2+2?\nExplain photosynthesis.\nName three planets.\n" > /tmp/prompts.txt
-cd /Users/eric/jang && python -m jang_tools.dflash.distill_data \
-  --model /Users/eric/models/MiniMax-M2.7-JANG_2L \
+cd <repo> && python -m jang_tools.dflash.distill_data \
+  --model ~/models/MiniMax-M2.7-JANG_2L \
   --prompts /tmp/prompts.txt \
   --out /tmp/dflash-distill-smoke \
   --max-tokens 32 --limit 3
@@ -273,7 +273,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Smoke run 5 steps on smoke data**
 
 ```bash
-cd /Users/eric/jang && python -m jang_tools.dflash.train \
+cd <repo> && python -m jang_tools.dflash.train \
   --data /tmp/dflash-distill-smoke \
   --out /tmp/dflash-drafter-smoke \
   --max-steps 5 --batch 1
@@ -308,8 +308,8 @@ Walks a PT state dict, casts to fp16 numpy, writes safetensors preserving key pa
 ## Task 6: Swift drafter module
 
 **Files:**
-- Create: `/Users/eric/vmlx/swift/Sources/vMLXLMCommon/DFlash/JangDFlashDrafter.swift`
-- Create: `/Users/eric/vmlx/swift/Sources/vMLXLMCommon/DFlash/JangDFlashConfig.swift`
+- Create: `~/vmlx/swift/Sources/vMLXLMCommon/DFlash/JangDFlashDrafter.swift`
+- Create: `~/vmlx/swift/Sources/vMLXLMCommon/DFlash/JangDFlashConfig.swift`
 
 - [ ] **Step 1: `JangDFlashConfig.swift`**
 
@@ -328,13 +328,13 @@ Forward `callAsFunction(_ blockIDs: MLXArray, hTaps: MLXArray) -> MLXArray`. Fus
 - [ ] **Step 3: Build clean**
 
 ```bash
-cd /Users/eric/vmlx/swift && swift build --target vMLXLMCommon 2>&1 | tail -30
+cd ~/vmlx/swift && swift build --target vMLXLMCommon 2>&1 | tail -30
 ```
 
 - [ ] **Step 4: Commit in the vmlx tree**
 
 ```bash
-cd /Users/eric/vmlx && git add swift/Sources/vMLXLMCommon/DFlash/
+cd ~/vmlx && git add swift/Sources/vMLXLMCommon/DFlash/
 git commit -m "dflash: scaffold JangDFlashDrafter Swift module"
 ```
 
@@ -343,7 +343,7 @@ git commit -m "dflash: scaffold JangDFlashDrafter Swift module"
 ## Task 7: Hidden tap + tree-attention mask in MiniMax.swift
 
 **Files:**
-- Modify: `/Users/eric/vmlx/swift/Sources/vMLXLLM/Models/MiniMax.swift`
+- Modify: `~/vmlx/swift/Sources/vMLXLLM/Models/MiniMax.swift`
 
 - [ ] **Step 1: Extend `MiniMaxModelInner.callAsFunction`**
 
@@ -356,13 +356,13 @@ Add optional `treeMask: MLXArray?` threaded down to every attention layer. When 
 - [ ] **Step 3: Build + run existing MiniMax tests**
 
 ```bash
-cd /Users/eric/vmlx/swift && swift build --target vMLXLLM
+cd ~/vmlx/swift && swift build --target vMLXLLM
 ```
 
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eric/vmlx && git add swift/Sources/vMLXLLM/Models/MiniMax.swift
+cd ~/vmlx && git add swift/Sources/vMLXLLM/Models/MiniMax.swift
 git commit -m "minimax: optional layer-hidden-tap and tree-attention mask"
 ```
 
@@ -371,8 +371,8 @@ git commit -m "minimax: optional layer-hidden-tap and tree-attention mask"
 ## Task 8: DDTreeBuilder (Swift CPU)
 
 **Files:**
-- Create: `/Users/eric/vmlx/swift/Sources/vMLXLMCommon/DFlash/DDTreeBuilder.swift`
-- Test: `/Users/eric/vmlx/swift/Tests/vMLXLMCommonTests/DDTreeBuilderTests.swift`
+- Create: `~/vmlx/swift/Sources/vMLXLMCommon/DFlash/DDTreeBuilder.swift`
+- Test: `~/vmlx/swift/Tests/vMLXLMCommonTests/DDTreeBuilderTests.swift`
 
 - [ ] **Step 1: Write failing tests**
 
@@ -390,7 +390,7 @@ Two methods:
 - [ ] **Step 3: Tests pass**
 
 ```bash
-cd /Users/eric/vmlx/swift && swift test --filter DDTreeBuilderTests
+cd ~/vmlx/swift && swift test --filter DDTreeBuilderTests
 ```
 
 - [ ] **Step 4: Commit**
@@ -400,7 +400,7 @@ cd /Users/eric/vmlx/swift && swift test --filter DDTreeBuilderTests
 ## Task 9: JangDFlashSpecDec end-to-end step
 
 **Files:**
-- Create: `/Users/eric/vmlx/swift/Sources/vMLXLMCommon/DFlash/JangDFlashSpecDec.swift`
+- Create: `~/vmlx/swift/Sources/vMLXLMCommon/DFlash/JangDFlashSpecDec.swift`
 
 - [ ] **Step 1: Implement `step(state:) -> [Int]`**
 
@@ -439,8 +439,8 @@ When `--dflash-drafter` is present, load the drafter safetensors via `JangLoader
 - [ ] **Step 2: Bench**
 
 ```bash
-/Users/eric/vmlx/swift/.build/arm64-apple-macosx/release/vmlxctl serve \
-  -m /Users/eric/models/MiniMax-M2.7-JANG_2L.jangspec \
+~/vmlx/swift/.build/arm64-apple-macosx/release/vmlxctl serve \
+  -m ~/models/MiniMax-M2.7-JANG_2L.jangspec \
   --dflash-drafter /tmp/dflash-drafter-smoke/drafter.safetensors \
   -p 8765
 ```
@@ -462,7 +462,7 @@ Run bench script (`/tmp/mm-isolate.sh`). Untrained drafter → acceptance ~0, ef
 ```bash
 # On M3 Ultra
 cd ~/jang && python -m jang_tools.dflash.distill_data \
-  --model /Users/eric/models/MiniMax-M2.7-JANG_2L \
+  --model ~/models/MiniMax-M2.7-JANG_2L \
   --prompts prompts-5k.txt \
   --out /Volumes/External/dflash-distill-v1 \
   --max-tokens 256

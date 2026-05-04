@@ -34,7 +34,7 @@ import re
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).parent.parent.parent  # /Users/eric/jang/
+REPO_ROOT = Path(__file__).parent.parent.parent  # repo root
 SWIFTPM_SRC = REPO_ROOT / "jang-server" / "frontend" / "JANGQuantizer.swiftpm" / "Sources"
 
 API_CLIENT = SWIFTPM_SRC / "APIClient.swift"

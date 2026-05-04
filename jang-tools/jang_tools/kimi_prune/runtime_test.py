@@ -27,7 +27,7 @@ Usage:
 Requires:
   - mlx, mlx-lm installed
   - jang_tools (this package)
-  - research/deepseek_v3_patched.py present
+  - patched deepseek_v3 source available next to the package
 """
 
 from __future__ import annotations

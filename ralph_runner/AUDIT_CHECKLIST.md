@@ -391,7 +391,7 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `test_swift_encode_decode_roundtrips` — assert `Swift.decode(Swift.encode(s)) == s`. Same-language round-trip invariant. Complementary safety net: a Swift encoder AND decoder that drift in mutually-canceling ways would pass the cross-language test if both matched the Python IDs but produced different strings — but would fail round-trip. Both tests together close that gap.
       **Test result: 2/2 M216 tests pass.** Swift `JANGTokenizer.decode` produces byte-identical output to Python on all 3 reference pairs. The BPE byte-encoder/decoder map is inverse-consistent.
       **Design parity with M208:**
-      - Same fixture path (`/Users/eric/models/Qwen3.6-35B-A3B-JANG_2L`).
+      - Same fixture path (`~/models/Qwen3.6-35B-A3B-JANG_2L`).
       - Same XCTSkip-when-fixture-missing pattern for CI friendliness.
       - Same hardcoded Python-reference approach (no cross-call at test time).
       - Same test-strings choice — pins that encode AND decode match Python on identical inputs.
@@ -440,7 +440,7 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `convert.py:1007-1034` pre-M212 applied `EOS_FIXES[model_type]` to: top-level config, `text_config`, and `tokenizer_config.json`. Memory A04's claim matched this exactly — the file list was deliberate.
       - `convert.py:1111-1121` (post-fix) byte-copied `generation_config.json` via `_safe_copy`. **Unpatched.**
       - **HF `GenerationMixin` behavior:** `.generate()` reads `model.generation_config.eos_token_id` with PRIORITY over `config.eos_token_id` at call time. If the bundle's `generation_config.json` contains the stale scalar `248044`, the fix in `config.json` is silently overridden.
-      - **Live evidence:** `jq '.eos_token_id' /Users/eric/models/Qwen3.6-35B-A3B-JANG_2L/generation_config.json` → `[248046, 248044]`. Multi-EOS list form — both IDs are stop tokens. List-form happens to be safe (both valid stops). **But** the SCALAR form (which some older Qwen3.5 sources ship) would be `248044` alone → silent break.
+      - **Live evidence:** `jq '.eos_token_id' ~/models/Qwen3.6-35B-A3B-JANG_2L/generation_config.json` → `[248046, 248044]`. Multi-EOS list form — both IDs are stop tokens. List-form happens to be safe (both valid stops). **But** the SCALAR form (which some older Qwen3.5 sources ship) would be `248044` alone → silent break.
       - **Verified upstream behavior:** curl'd `https://huggingface.co/Qwen/Qwen3-8B/raw/main/generation_config.json` → `eos_token_id: [151645, 151643]` (list form, different token IDs for newer Qwen3 vocab). The scalar-form risk exists for Qwen3.5-specific source configs that shipped before list-form convention.
       **Fix (iter 143):** extended the eos-fix loop to ALSO patch `generation_config.json` when `eos_fix_map` is non-empty AND the source file exists:
       - Load `source/generation_config.json` as JSON.
@@ -490,7 +490,7 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `jang-runtime/Sources/JANG/JANGTokenizer.swift:17-349` implements a standalone BPE tokenizer in Swift: byte-level BPE encoder, merges table, special tokens, chat template. Uses `tokenizer.json` + `tokenizer_config.json` from a JANG bundle as its sole input.
       - Python reference path: `transformers.AutoTokenizer.from_pretrained(bundle_dir).encode(text, add_special_tokens=False)` — the upstream canonical tokenizer.
       - **Pre-M208: no test verified the two match.** Existing `JANGTQTokenizerTests.swift` exercised Swift-side wrapper behavior (special-token lookup, chat-template structure) but never ran the same bytes through Python and diffed IDs. A subtle BPE bug in the Swift implementation — wrong merge priority, off-by-one byte-encoder, mishandled space-prefix — would produce plausible-looking output that silently degrades model quality.
-      **Live evidence captured iter-141:** ran `python3 -c "from transformers import AutoTokenizer; tok = AutoTokenizer.from_pretrained('/Users/eric/models/Qwen3.6-35B-A3B-JANG_2L'); [print(s, tok.encode(s, add_special_tokens=False)) for s in TEST_STRINGS]"`. Captured reference IDs:
+      **Live evidence captured iter-141:** ran `python3 -c "from transformers import AutoTokenizer; tok = AutoTokenizer.from_pretrained('~/models/Qwen3.6-35B-A3B-JANG_2L'); [print(s, tok.encode(s, add_special_tokens=False)) for s in TEST_STRINGS]"`. Captured reference IDs:
       | Input | Python AutoTokenizer IDs |
       |-------|--------------------------|
       | `"Hello, world!"` | `[9419, 11, 1814, 0]` |
@@ -696,7 +696,7 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       - `pip install 'jang[mlx]'` reproduce command — is `jang` actually the PyPI package name? Is `[mlx]` a real extra? If these strings are wrong, the reproduce command users paste into shells will fail with `ERROR: Could not find a version that satisfies the requirement jang[mlx]`.
       - GitHub URL `https://github.com/jjang-ai/jangq/blob/main/FORMAT.md` — does the repo `jjang-ai/jangq` exist? Does it have a `FORMAT.md` on main? If not, the card's "See FORMAT.md" link is a dead link that the stranger will click and hit 404.
       - `https://jangq.ai` domain — does it resolve? If not, the "via [JANG Studio](https://jangq.ai)" is broken.
-      - `base_model` URL `https://huggingface.co/{{ base_model }}` — is `base_model` always a valid HF model ID? What if `_name_or_path` is a local path like `/Users/eric/models/foo`? The rendered URL would be `https://huggingface.co//Users/eric/models/foo` — 404.
+      - `base_model` URL `https://huggingface.co/{{ base_model }}` — is `base_model` always a valid HF model ID? What if `_name_or_path` is a local path like `~/models/foo`? The rendered URL would be `https://huggingface.co/~/models/foo` — 404.
       - Python snippet paths — does `model_path` embed the user's absolute path (with username) into the snippet body? A stranger copying the snippet would hit "no such directory" on their machine. Should use a relative or placeholder path.
       - Each of these is an angle-H candidate. Budget one iter per 2-3 claims.
 - [ ] **M201** — Broader Settings-lie audit (spawned from M200). Iter-142 M210 closed TWO candidates (outputNamingTemplate + defaultOutputParentPath via plumbing). Remaining candidates:
@@ -1055,7 +1055,7 @@ Each item here was surfaced by a concrete trace, not speculation. Each traces ba
       **Tests (+2) in new `jang-server/tests/test_no_hardcoded_secrets.py`:**
       - `test_no_hardcoded_hf_token_in_server_py` — regex `\bhf_[A-Za-z0-9_-]{20,}\b` catches any future `hf_*` literal in server.py.
       - `test_HF_UPLOAD_TOKEN_default_is_empty` — semantic check that the env-var-read line uses `""` or `None` as default (not a real value).
-      **Cross-repo sweep:** also grep'd the rest of `/Users/eric/jang/` for `hf_*` literals. Only matches outside our source were in third-party library code (transformers' public test token in `testing_utils.py`) and our own test fixtures (which use clearly-fake tokens like `hf_abcdefghijklmnopqrstuvwxyz1234567890`). Repo source is clean post-M181.
+      **Cross-repo sweep:** also grep'd the rest of `<repo>/` for `hf_*` literals. Only matches outside our source were in third-party library code (transformers' public test token in `testing_utils.py`) and our own test fixtures (which use clearly-fake tokens like `hf_abcdefghijklmnopqrstuvwxyz1234567890`). Repo source is clean post-M181.
       **Evidence:** `jang-server/server.py:51-60`. 20 jang-server tests pass (was 18, +2).
       **Meta-lesson — secrets audits with regex sweep find what manual review misses.** Iter-113/114 found SSRF + authz with adversarial-framing audits but didn't grep for hardcoded tokens. Iter-116's targeted regex caught the leak in the first pass. **Rule: every fresh codebase audit should include a hardcoded-secret sweep early — `hf_*`, `sk-*`, `AKIA*`, `password\s*=\s*['"]...['"]`, `api_key\s*=\s*['"]...['"]`. Cheap to run; high consequence when it hits.**
       **Meta-lesson — `os.environ.get(KEY, DEFAULT)` is a leak vector by default.** The pattern is convenient but dangerous when DEFAULT is a real secret. **Rule: any env-var read for a secret must use `""` or `None` as default, then check at use-site and fail-fast if missing.** Convert silent-fall-through into actionable error. Same iter-101/108 "don't lie to the user" rule applied to operators: don't silently use a fallback secret.

@@ -207,7 +207,7 @@ Updated as each phase lands. See each task block for detailed step-by-step statu
 - `JANGStudio/docs/USER_GUIDE.md` — step-by-step wizard walkthrough, all 10 preflight rows + 12 verifier rows enumerated
 - `JANGStudio/docs/TROUBLESHOOTING.md` — 12-row common-errors table (disk full, OOM, missing chat template, stale notarization cache, dev-mode python override, etc.)
 - `JANGStudio/docs/CONTRIBUTING.md` — dev-mode setup with `$JANGSTUDIO_PYTHON_OVERRIDE`, xcodegen regen, running tests, building signed Release .app locally, file layout diagram
-- Top-level `/Users/eric/jang/README.md` — JANG Studio banner + link added between existing MLX Studio block and JANG logo
+- Top-level `<repo>/README.md` — JANG Studio banner + link added between existing MLX Studio block and JANG logo
 
 ---
 
@@ -420,7 +420,7 @@ def test_warn_never_throttled():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/test_progress.py -v
+cd <repo>/jang-tools && python -m pytest tests/test_progress.py -v
 ```
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'jang_tools.progress'`.
@@ -428,7 +428,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'jang_tools.progress'`.
 - [ ] **Step 3: Commit the failing test**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add jang-tools/tests/test_progress.py
 git commit -m "test: ProgressEmitter JSONL schema and throttling contract"
 ```
@@ -541,7 +541,7 @@ def make_noop() -> ProgressEmitter:
 - [ ] **Step 2: Run tests to verify they pass**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/test_progress.py -v
+cd <repo>/jang-tools && python -m pytest tests/test_progress.py -v
 ```
 
 Expected: PASS (all 8 tests).
@@ -549,7 +549,7 @@ Expected: PASS (all 8 tests).
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add jang-tools/jang_tools/progress.py
 git commit -m "feat: ProgressEmitter for dual text + JSONL reporting"
 ```
@@ -602,14 +602,14 @@ def test_progress_json_emits_jsonl_on_stderr_for_inspect():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/test_cli_flags.py -v
+cd <repo>/jang-tools && python -m pytest tests/test_cli_flags.py -v
 ```
 
 Expected: FAIL — `--progress` unknown or no `done` event.
 
 - [ ] **Step 3: Modify `__main__.py`**
 
-Modify `/Users/eric/jang/jang-tools/jang_tools/__main__.py`:
+Modify `<repo>/jang-tools/jang_tools/__main__.py`:
 
 Add to imports at top:
 ```python
@@ -656,7 +656,7 @@ Replace the dispatch at the end of `main()`:
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/test_cli_flags.py -v
+cd <repo>/jang-tools && python -m pytest tests/test_cli_flags.py -v
 ```
 
 Expected: PASS.
@@ -664,7 +664,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add jang-tools/jang_tools/__main__.py jang-tools/tests/test_cli_flags.py
 git commit -m "feat(cli): --progress=json and --quiet-text global flags"
 ```
@@ -710,14 +710,14 @@ def test_convert_emits_all_phases_even_on_missing_model(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/test_convert_progress.py -v
+cd <repo>/jang-tools && python -m pytest tests/test_convert_progress.py -v
 ```
 
 Expected: FAIL — convert.py crashes before emitting structured events, or prints traceback only.
 
 - [ ] **Step 3: Modify `convert.py`**
 
-In `/Users/eric/jang/jang-tools/jang_tools/convert.py`:
+In `<repo>/jang-tools/jang_tools/convert.py`:
 
 Change the `convert_model()` signature to accept an optional `progress_emitter`:
 ```python
@@ -772,14 +772,14 @@ def cmd_convert(args):
 - [ ] **Step 4: Run tests to verify**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/test_convert_progress.py -v
+cd <repo>/jang-tools && python -m pytest tests/test_convert_progress.py -v
 ```
 
 Expected: PASS.
 
 Also run the full existing test suite to ensure no regression:
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest -x
+cd <repo>/jang-tools && python -m pytest -x
 ```
 
 Expected: all pre-existing tests still pass.
@@ -787,7 +787,7 @@ Expected: all pre-existing tests still pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add jang-tools/jang_tools/convert.py jang-tools/jang_tools/__main__.py jang-tools/tests/test_convert_progress.py
 git commit -m "feat(convert): emit phase + tick events via ProgressEmitter"
 ```
@@ -887,7 +887,7 @@ def test_minimax_jangtq_emits_done_on_bad_input(tmp_path):
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/test_jangtq_progress.py -v
+cd <repo>/jang-tools && python -m pytest tests/test_jangtq_progress.py -v
 ```
 
 Expected: PASS.
@@ -895,7 +895,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add jang-tools/jang_tools/convert_qwen35_jangtq.py \
         jang-tools/jang_tools/convert_minimax_jangtq.py \
         jang-tools/tests/test_jangtq_progress.py
@@ -967,7 +967,7 @@ def test_inspect_source_missing_config_errors(tmp_path):
 - [ ] **Step 3: Run test (fails)**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/test_inspect_source.py -v
+cd <repo>/jang-tools && python -m pytest tests/test_inspect_source.py -v
 ```
 
 Expected: FAIL — subcommand unknown.
@@ -1063,7 +1063,7 @@ Wire it up in `__main__.py` — find the other `add_parser` calls and add at the
 - [ ] **Step 5: Run tests**
 
 ```bash
-cd /Users/eric/jang/jang-tools && python -m pytest tests/test_inspect_source.py -v
+cd <repo>/jang-tools && python -m pytest tests/test_inspect_source.py -v
 ```
 
 Expected: PASS.
@@ -1071,7 +1071,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add jang-tools/jang_tools/inspect_source.py jang-tools/jang_tools/__main__.py \
         jang-tools/tests/test_inspect_source.py \
         jang-tools/tests/fixtures/tiny_qwen/config.json
@@ -1090,7 +1090,7 @@ git commit -m "feat(cli): inspect-source subcommand for GUI integration"
 Run a synthetic emitter invocation that produces the exact JSONL a real conversion would emit, and save it. This fixture will be re-used by Swift's `JSONLProgressParserTests`.
 
 ```bash
-cd /Users/eric/jang/jang-tools
+cd <repo>/jang-tools
 python -c '
 from jang_tools.progress import ProgressEmitter
 import sys
@@ -1113,7 +1113,7 @@ em.done(ok=True, output="/tmp/out", elapsed_s=42.5)
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add jang-tools/tests/fixtures/golden_convert_events.jsonl
 git commit -m "test: golden JSONL fixture for Swift parser tests"
 ```
@@ -1246,7 +1246,7 @@ struct JANGStudioApp: App {
 
 ```bash
 brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
-cd /Users/eric/jang/JANGStudio
+cd <repo>/JANGStudio
 xcodegen generate
 xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build
 ```
@@ -1256,7 +1256,7 @@ Expected: `BUILD SUCCEEDED`.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 echo "JANGStudio/build/" >> .gitignore
 echo "JANGStudio/JANGStudio.xcodeproj/xcuserdata/" >> .gitignore
 echo "JANGStudio/DerivedData/" >> .gitignore
@@ -1339,7 +1339,7 @@ final class ConversionPlanTests: XCTestCase {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/eric/jang/JANGStudio
+cd <repo>/JANGStudio
 xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -20
 ```
 
@@ -1416,7 +1416,7 @@ final class ConversionPlan: Codable {
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd /Users/eric/jang/JANGStudio
+cd <repo>/JANGStudio
 xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -20
 ```
 
@@ -1425,7 +1425,7 @@ Expected: `Test Suite 'ConversionPlanTests' passed`.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/JANGStudio/Models/ConversionPlan.swift \
         JANGStudio/Tests/JANGStudioTests/ConversionPlanTests.swift
 git commit -m "feat(jang-studio): ConversionPlan model with JANGTQ gating + persistence"
@@ -1444,9 +1444,9 @@ git commit -m "feat(jang-studio): ConversionPlan model with JANGTQ gating + pers
 - [ ] **Step 1: Copy the Phase-1 fixture into the Swift test bundle**
 
 ```bash
-mkdir -p /Users/eric/jang/JANGStudio/Tests/JANGStudioTests/Fixtures
-cp /Users/eric/jang/jang-tools/tests/fixtures/golden_convert_events.jsonl \
-   /Users/eric/jang/JANGStudio/Tests/JANGStudioTests/Fixtures/
+mkdir -p <repo>/JANGStudio/Tests/JANGStudioTests/Fixtures
+cp <repo>/jang-tools/tests/fixtures/golden_convert_events.jsonl \
+   <repo>/JANGStudio/Tests/JANGStudioTests/Fixtures/
 ```
 
 Add the fixture to `project.yml` under `JANGStudioTests`:
@@ -1517,7 +1517,7 @@ final class JSONLProgressParserTests: XCTestCase {
 - [ ] **Step 3: Run test to verify it fails**
 
 ```bash
-cd /Users/eric/jang/JANGStudio
+cd <repo>/JANGStudio
 xcodegen generate && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
 ```
 
@@ -1606,7 +1606,7 @@ final class JSONLProgressParser {
 - [ ] **Step 5: Run tests to verify they pass**
 
 ```bash
-cd /Users/eric/jang/JANGStudio
+cd <repo>/JANGStudio
 xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
 ```
 
@@ -1615,7 +1615,7 @@ Expected: `Test Suite 'JSONLProgressParserTests' passed`.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/JANGStudio/Models/ProgressEvent.swift \
         JANGStudio/JANGStudio/Runner/JSONLProgressParser.swift \
         JANGStudio/Tests/JANGStudioTests/JSONLProgressParserTests.swift \
@@ -1657,7 +1657,7 @@ final class BundleResolverTests: XCTestCase {
 - [ ] **Step 2: Run to fail**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
 ```
 
 Expected: compile error — `BundleResolver` missing.
@@ -1692,7 +1692,7 @@ enum BundleResolver {
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
 ```
 
 Expected: PASS.
@@ -1700,7 +1700,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/JANGStudio/Runner/BundleResolver.swift \
         JANGStudio/Tests/JANGStudioTests/BundleResolverTests.swift
 git commit -m "feat(jang-studio): BundleResolver with dev-mode override"
@@ -1739,7 +1739,7 @@ echo "{\"v\":1,\"type\":\"done\",\"ok\":true,\"output\":\"/tmp/out\",\"elapsed_s
 ```
 
 ```bash
-chmod +x /Users/eric/jang/JANGStudio/Tests/JANGStudioTests/Fixtures/fake_convert.sh
+chmod +x <repo>/JANGStudio/Tests/JANGStudioTests/Fixtures/fake_convert.sh
 ```
 
 - [ ] **Step 2: Write failing test**
@@ -1797,7 +1797,7 @@ Also update `project.yml` to ship the shell script as a bundle resource (already
 - [ ] **Step 3: Run to fail**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodegen generate && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
+cd <repo>/JANGStudio && xcodegen generate && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
 ```
 
 Expected: compile error — `PythonRunner` missing.
@@ -1900,7 +1900,7 @@ actor PythonRunner {
 - [ ] **Step 5: Run tests**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
 ```
 
 Expected: PASS.
@@ -1908,7 +1908,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/JANGStudio/Runner/PythonRunner.swift \
         JANGStudio/Tests/JANGStudioTests/PythonRunnerTests.swift \
         JANGStudio/Tests/JANGStudioTests/Fixtures/fake_convert.sh
@@ -1942,7 +1942,7 @@ Append to `PythonRunnerTests.swift`:
 - [ ] **Step 2: Run — expect PASS** (cancel already implemented in Task 3.1)
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' -only-testing:JANGStudioTests/PythonRunnerTests/test_cancelSIGTERMLandsWithinThreeSeconds 2>&1 | tail -10
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' -only-testing:JANGStudioTests/PythonRunnerTests/test_cancelSIGTERMLandsWithinThreeSeconds 2>&1 | tail -10
 ```
 
 If this fails (e.g., termination race), tighten the `cancel()` implementation so `continuation.finish()` is reached within 3 s.
@@ -1950,7 +1950,7 @@ If this fails (e.g., termination race), tighten the `cancel()` implementation so
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/Tests/JANGStudioTests/PythonRunnerTests.swift
 git commit -m "test(jang-studio): cancellation lands SIGTERM within 3s"
 ```
@@ -2033,7 +2033,7 @@ final class PreflightRunnerTests: XCTestCase {
 - [ ] **Step 2: Run to fail**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
 ```
 
 Expected: compile error.
@@ -2208,7 +2208,7 @@ struct PreflightRunner {
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
 ```
 
 Expected: PASS.
@@ -2216,7 +2216,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/JANGStudio/Verify/PreflightCheck.swift \
         JANGStudio/JANGStudio/Verify/PreflightRunner.swift \
         JANGStudio/Tests/JANGStudioTests/PreflightRunnerTests.swift
@@ -2238,7 +2238,7 @@ git commit -m "feat(jang-studio): PreflightRunner — 10 gate checks before Star
 Good fixture (minimal but valid):
 
 ```bash
-cd /Users/eric/jang/JANGStudio/Tests/JANGStudioTests/Fixtures
+cd <repo>/JANGStudio/Tests/JANGStudioTests/Fixtures
 mkdir -p good_output
 cat > good_output/config.json <<'EOF'
 {"model_type":"qwen3_5_moe","torch_dtype":"bfloat16"}
@@ -2326,7 +2326,7 @@ final class PostConvertVerifierTests: XCTestCase {
 - [ ] **Step 3: Run to fail**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
 ```
 
 Expected: compile error.
@@ -2473,7 +2473,7 @@ struct PostConvertVerifier {
 - [ ] **Step 5: Run tests**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
 ```
 
 Expected: PASS.
@@ -2481,7 +2481,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/JANGStudio/Verify/VerifyCheck.swift \
         JANGStudio/JANGStudio/Verify/PostConvertVerifier.swift \
         JANGStudio/Tests/JANGStudioTests/PostConvertVerifierTests.swift \
@@ -2618,7 +2618,7 @@ struct JANGStudioApp: App {
 - [ ] **Step 2: Build + run interactively to sanity check**
 
 ```bash
-cd /Users/eric/jang/JANGStudio
+cd <repo>/JANGStudio
 xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build
 open build/Debug/JANGStudio.app 2>/dev/null || open -a Xcode JANGStudio.xcodeproj
 ```
@@ -2628,7 +2628,7 @@ Expected: app window with left sidebar listing the 5 steps, detail pane shows "S
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/JANGStudio/Wizard/ \
         JANGStudio/JANGStudio/App/JANGStudioApp.swift
 git commit -m "feat(jang-studio): WizardCoordinator + 5-step sidebar scaffold"
@@ -2756,13 +2756,13 @@ enum SourceDetector {
 - [ ] **Step 2: Build**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -5
+cd <repo>/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -5
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift
 git commit -m "feat(jang-studio): Step 1 — source picker + inspect-source detection"
 ```
@@ -2827,8 +2827,8 @@ struct ArchitectureStep: View {
 - [ ] **Step 2: Build + commit**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -3
-cd /Users/eric/jang
+cd <repo>/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -3
+cd <repo>
 git add JANGStudio/JANGStudio/Wizard/Steps/ArchitectureStep.swift
 git commit -m "feat(jang-studio): Step 2 — architecture summary + advanced overrides"
 ```
@@ -2943,8 +2943,8 @@ struct ProfileStep: View {
 - [ ] **Step 2: Build + commit**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -3
-cd /Users/eric/jang
+cd <repo>/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -3
+cd <repo>
 git add JANGStudio/JANGStudio/Wizard/Steps/ProfileStep.swift
 git commit -m "feat(jang-studio): Step 3 — profile picker + live preflight"
 ```
@@ -3064,8 +3064,8 @@ struct RunStep: View {
 - [ ] **Step 2: Build + commit**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -3
-cd /Users/eric/jang
+cd <repo>/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -3
+cd <repo>
 git add JANGStudio/JANGStudio/Wizard/Steps/RunStep.swift
 git commit -m "feat(jang-studio): Step 4 — live run with phase/tick/log streams"
 ```
@@ -3156,8 +3156,8 @@ struct VerifyStep: View {
 - [ ] **Step 2: Build + commit**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -3
-cd /Users/eric/jang
+cd <repo>/JANGStudio && xcodebuild -project JANGStudio.xcodeproj -scheme JANGStudio -configuration Debug build 2>&1 | tail -3
+cd <repo>
 git add JANGStudio/JANGStudio/Wizard/Steps/VerifyStep.swift
 git commit -m "feat(jang-studio): Step 5 — verification checklist + Finish"
 ```
@@ -3199,7 +3199,7 @@ final class DiagnosticsBundleTests: XCTestCase {
 - [ ] **Step 2: Run to fail**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
 ```
 
 Expected: compile error.
@@ -3265,8 +3265,8 @@ Button("Copy Diagnostics") {
 - [ ] **Step 5: Run tests + commit**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
-cd /Users/eric/jang
+cd <repo>/JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -10
+cd <repo>
 git add JANGStudio/JANGStudio/Runner/DiagnosticsBundle.swift \
         JANGStudio/JANGStudio/Wizard/Steps/RunStep.swift \
         JANGStudio/Tests/JANGStudioTests/DiagnosticsBundleTests.swift
@@ -3306,9 +3306,9 @@ final class WizardFlowTests: XCTestCase {
 - [ ] **Step 2: Run + commit**
 
 ```bash
-cd /Users/eric/jang/JANGStudio
+cd <repo>/JANGStudio
 xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' 2>&1 | tail -15
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/Tests/JANGStudioUITests/WizardFlowTests.swift
 git commit -m "test(jang-studio): XCUITest verifies 5-step sidebar renders"
 ```
@@ -3382,7 +3382,7 @@ echo "[bundle] OK → $BUILD_ROOT"
 ```
 
 ```bash
-chmod +x /Users/eric/jang/JANGStudio/Scripts/build-python-bundle.sh
+chmod +x <repo>/JANGStudio/Scripts/build-python-bundle.sh
 ```
 
 - [ ] **Step 2: Wire into `project.yml`**
@@ -3405,7 +3405,7 @@ Re-run `xcodegen generate`.
 - [ ] **Step 3: Run the bundle script manually to check timing**
 
 ```bash
-cd /Users/eric/jang/JANGStudio && time Scripts/build-python-bundle.sh
+cd <repo>/JANGStudio && time Scripts/build-python-bundle.sh
 ```
 
 Expected: completes in < 5 min, ends with `[bundle] OK`, reports size < 250 MB.
@@ -3413,7 +3413,7 @@ Expected: completes in < 5 min, ends with `[bundle] OK`, reports size < 250 MB.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/Scripts/build-python-bundle.sh JANGStudio/project.yml
 git commit -m "feat(jang-studio): build-python-bundle.sh with size gate + smoke test"
 ```
@@ -3454,13 +3454,13 @@ echo "[sign] OK"
 ```
 
 ```bash
-chmod +x /Users/eric/jang/JANGStudio/Scripts/codesign-runtime.sh
+chmod +x <repo>/JANGStudio/Scripts/codesign-runtime.sh
 ```
 
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/Scripts/codesign-runtime.sh
 git commit -m "feat(jang-studio): deep-sign script for Python runtime + app"
 ```
@@ -3503,13 +3503,13 @@ echo "[notarize] OK"
 ```
 
 ```bash
-chmod +x /Users/eric/jang/JANGStudio/Scripts/notarize.sh
+chmod +x <repo>/JANGStudio/Scripts/notarize.sh
 ```
 
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/Scripts/notarize.sh
 git commit -m "feat(jang-studio): notarize.sh using xcrun notarytool"
 ```
@@ -3631,7 +3631,7 @@ jobs:
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add .github/workflows/jang-studio.yml
 git commit -m "ci: jang-studio build/test + signed DMG on tag push"
 ```
@@ -3685,7 +3685,7 @@ Created by Jinho Jang (`eric@jangq.ai`) · [jangq.ai](https://jangq.ai)
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/README.md
 git commit -m "docs(jang-studio): README.md"
 ```
@@ -3749,7 +3749,7 @@ Created by Jinho Jang (`eric@jangq.ai`).
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/docs/PROGRESS_PROTOCOL.md
 git commit -m "docs(jang-studio): PROGRESS_PROTOCOL v1 spec"
 ```
@@ -3840,7 +3840,7 @@ Tag `jang-studio-vX.Y.Z`. CI builds the signed+notarized DMG and attaches it to 
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add JANGStudio/docs/USER_GUIDE.md JANGStudio/docs/TROUBLESHOOTING.md JANGStudio/docs/CONTRIBUTING.md
 git commit -m "docs(jang-studio): USER_GUIDE + TROUBLESHOOTING + CONTRIBUTING"
 ```
@@ -3851,7 +3851,7 @@ git commit -m "docs(jang-studio): USER_GUIDE + TROUBLESHOOTING + CONTRIBUTING"
 
 - [ ] **Step 1: Modify top-level README**
 
-Add this section to `/Users/eric/jang/README.md` between the MLX Studio banner and the "Highlights" heading:
+Add this section to `<repo>/README.md` between the MLX Studio banner and the "Highlights" heading:
 
 ```markdown
 ---
@@ -3868,7 +3868,7 @@ Add this section to `/Users/eric/jang/README.md` between the MLX Studio banner a
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 git add README.md
 git commit -m "docs: link JANG Studio from top-level README"
 ```

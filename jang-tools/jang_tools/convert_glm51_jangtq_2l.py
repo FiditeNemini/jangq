@@ -96,7 +96,6 @@ def _setup_capabilities(jang_config, config, out_path):
 
 def main(src=None, out=None, awq_scales_file=None):
     # Lazy imports of heavy deps (only when actually running conversion).
-    sys.path.insert(0, "/opt/homebrew/lib/python3.14/site-packages")
     from jang_tools.fp8 import load_fp8_tensor
     from jang_tools.calibrate import _load_bf16_tensor
     from jang_tools.turboquant.linear import tq_quantize_weight

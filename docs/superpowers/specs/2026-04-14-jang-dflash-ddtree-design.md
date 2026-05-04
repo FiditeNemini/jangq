@@ -273,4 +273,4 @@ Phase 1 is complete when:
 4. Measured pure decode tok/s on M3 Ultra ≥ 200 (baseline ~42, target 4.8×)
 5. GSM8K accuracy on 200 prompts drifts ≤ 1 pp from MiniMax-JANG_2L baseline
 6. Tree verification overhead is measured and documented; flat-fallback path exists
-7. All code lives in `/Users/eric/vmlx/swift/Sources/vMLXLMCommon/DFlash/` and `/Users/eric/jang/jang-tools/jang_tools/dflash/`
+7. All code lives in `~/vmlx/swift/Sources/vMLXLMCommon/DFlash/` and `<repo>/jang-tools/jang_tools/dflash/`

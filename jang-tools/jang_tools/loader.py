@@ -294,7 +294,7 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
     # at the shared expert down_proj (SiLU*up product → 4096-dim dot product
     # exceeds float16 max 65504). bfloat16 has same range as float32
     # (max 3.4e38) so it handles this without any quality loss.
-    # See research/397B-BFLOAT16-FIX.md for full analysis.
+    # (float16 overflow on 512+ expert models; bf16 required).
     _model_cfg = json.loads((path / "config.json").read_text())
     _text_cfg = _model_cfg.get("text_config", _model_cfg)
     _n_experts = (_text_cfg.get("num_experts") or

@@ -35,10 +35,10 @@ Architectures supported:
     skip because it has q_a_proj/kv_a_proj_with_mqa instead of q/k/v_proj.
     The MoE-side P3/P15 still apply. Shared expert (if present) handled.
 
-See `research/JANGTQ-REFERENCE.md` for full architecture, math, kernel
-inventory, and known traps.
+See the JANGTQ section of the project docs for full architecture, math,
+kernel inventory, and known traps.
 """
-import json, gc, re
+import json, gc, os, re
 from pathlib import Path
 
 import mlx.core as mx
@@ -70,14 +70,19 @@ def _apply_wired_limit_safe_default():
         if sys.platform != "darwin":
             return
         total_gb = psutil.virtual_memory().total / 1e9
-        target_gb = int(total_gb * 0.70)
+        env_target = os.environ.get("JANGTQ_WIRED_LIMIT_GB")
+        if env_target:
+            target_gb = int(float(env_target))
+        else:
+            target_gb = int(total_gb * 0.70)
         # Clamp to reasonable range: at least 32 GB, at most 220 GB
         # (leaving enough headroom even on very-large-RAM machines).
         target_gb = max(32, min(target_gb, 220))
         target_bytes = target_gb * 1000 * 1000 * 1000
         _mx.set_wired_limit(target_bytes)
+        src = "env JANGTQ_WIRED_LIMIT_GB" if env_target else "ralph iter-14 tuning"
         print(f"  [wired_limit] auto-set to {target_gb} GB "
-              f"(~70% of {total_gb:.0f} GB total RAM; ralph iter-14 tuning)",
+              f"(~{target_gb / total_gb:.0%} of {total_gb:.0f} GB total RAM; {src})",
               flush=True)
     except Exception as _e:
         # Non-fatal: older MLX, no psutil, non-Apple OS, etc.
@@ -144,6 +149,24 @@ def load_jangtq_model(model_path, skip_params_eval=False):
     eos_ids = config.get("eos_token_id")
     if isinstance(eos_ids, int):
         eos_ids = [eos_ids]
+    if eos_ids is None:
+        eos_ids = []
+    # DSV4-Flash needs <｜User｜> as a turn-boundary stop in addition to
+    # <｜end▁of▁sentence｜>. Upstream DSV4 + early jang bundles ship eos as
+    # single int, leaving the model free to auto-continue into a fake user
+    # turn after EOS (manifests as "🤖 My name is..." restart loops on
+    # /v1/chat/completions). Add it dynamically from the tokenizer so this
+    # works even on bundles whose configs were never patched.
+    if _model_type == "deepseek_v4":
+        try:
+            from transformers import AutoTokenizer
+            _tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+            _user_id = _tok.convert_tokens_to_ids("<｜User｜>")
+            if _user_id is not None and _user_id not in eos_ids:
+                eos_ids = list(eos_ids) + [_user_id]
+                print(f"  [load_jangtq] DSV4: added <｜User｜>={_user_id} to eos list", flush=True)
+        except Exception as _e:
+            warnings.warn(f"DSV4 eos list expansion failed: {_e}")
     try:
         tokenizer = load_tokenizer(model_path, eos_token_ids=eos_ids)
     except Exception as _e:
@@ -154,22 +177,85 @@ def load_jangtq_model(model_path, skip_params_eval=False):
         from transformers import PreTrainedTokenizerFast
         import os
         tok_file = os.path.join(str(model_path), "tokenizer.json")
-        tokenizer = PreTrainedTokenizerFast(tokenizer_file=tok_file, eos_token_id=eos_ids[0] if eos_ids else None)
+        # PreTrainedTokenizerFast accepts a single int for eos_token_id. We
+        # store the FULL list on the tokenizer object so downstream consumers
+        # (mlx_lm TokenizerWrapper, vmlx BatchedEngine pre-wrap) can pick up
+        # all turn-boundary stops, not just <｜end▁of▁sentence｜>. Without this
+        # DSV4 multi-turn loops past EOS into a fake user/assistant turn.
+        _primary_eos = eos_ids[0] if eos_ids else None
+        tokenizer = PreTrainedTokenizerFast(tokenizer_file=tok_file, eos_token_id=_primary_eos)
+        if eos_ids:
+            try:
+                tokenizer.eos_token_ids = list(eos_ids)
+            except Exception:
+                pass
 
-    # Pre-compile Metal kernels layer-by-layer so the FIRST call to
-    # generate() doesn't pay 60+ seconds of cold JIT inside a single
-    # command buffer (which trips Metal's watchdog on quantized
-    # 191+ GB MoEs like Kimi K2.6). One-time ~20-30 s cost; subsequent
-    # forwards hit cached shaders.
+    # Pre-compile Metal kernels + materialize TQ weights so the FIRST
+    # /v1/chat/completions request doesn't pay full kernel-JIT + weight-
+    # mmap-realize cost on the user's first message. Without this, the
+    # session "starts" but weights remain lazy until a real forward fires
+    # — visible to users as a 30+ s stall on first prompt.
+    #
+    # Two-tier approach:
+    #
+    # 1. `_warmup_jit_per_layer` (Kimi-style layer-by-layer) — fastest path
+    #    when the model's DecoderLayer accepts (x, mask=None, cache=None)
+    #    or (x, None, None). Caches per-layer shaders one at a time so
+    #    each command buffer is small (avoids Metal watchdog on 100+ layer
+    #    191 GB MoEs). Works for: Kimi K2.6, Qwen3-VL, Qwen3.5-MoE, GLM-5.1.
+    #
+    # 2. Full-model 1-token forward — fallback for architectures whose
+    #    DecoderLayer signature doesn't match (DSV4 MLA: q_a_proj output
+    #    feeds back through compressed kv_lora_rank, so a per-layer
+    #    1-token forward with H-dim input mismatches the packed weight
+    #    column count and matmul raises ValueError). The full-model path
+    #    uses `model.make_cache()` + `model(tiny_ids, cache=cache)` which
+    #    is what real inference does, so every kernel shape that prefill
+    #    will need is JIT-cached on the loader thread before return.
+    _warmed = False
     try:
         from jang_tools.load_jangtq_kimi_vlm import _warmup_jit_per_layer
         _warmup_jit_per_layer(model)
+        _warmed = True
     except Exception as _e:
-        print(f"  [warmup] skipped ({_e!r})", flush=True)
+        print(f"  [warmup] per-layer skipped ({type(_e).__name__}: {_e}); "
+              f"trying full-model 1-token forward", flush=True)
+
+    if not _warmed:
+        try:
+            import time as _time
+            _t0 = _time.time()
+            # Some models expose `make_cache()`; others use `make_prompt_cache(model)`.
+            _cache = None
+            if hasattr(model, "make_cache"):
+                _cache = model.make_cache()
+            else:
+                try:
+                    from mlx_lm.models.cache import make_prompt_cache as _mpc
+                    _cache = _mpc(model)
+                except Exception:
+                    _cache = None
+            _tiny_ids = mx.array([[0]], dtype=mx.int32)
+            try:
+                if _cache is not None:
+                    _ = model(_tiny_ids, cache=_cache)
+                else:
+                    _ = model(_tiny_ids)
+            except TypeError:
+                # Some VLM wrappers want `inputs=` kwarg.
+                _ = model(inputs=_tiny_ids, cache=_cache) if _cache is not None else model(inputs=_tiny_ids)
+            mx.synchronize()
+            print(f"  [warmup] full-model 1-token forward done "
+                  f"({_time.time() - _t0:.1f}s)", flush=True)
+            _warmed = True
+        except Exception as _fe:
+            print(f"  [warmup] full-model fallback ALSO skipped "
+                  f"({type(_fe).__name__}: {_fe}). First request will be slow.",
+                  flush=True)
 
     # Apply jang_config.json chat metadata to the tokenizer so downstream
     # generation works out-of-the-box (EOS stop, etc.). See
-    # research/DSV-FAMILY-RUNTIME-GUIDE.md §26 for the full schema.
+    # See the DSV-family runtime guide for the full schema.
     chat_cfg = jang_cfg.get("chat", {}) if isinstance(jang_cfg, dict) else {}
     if chat_cfg:
         # Set EOS if tokenizer fallback didn't pick it up.
@@ -259,6 +345,297 @@ def _vlm_minimal_sanitize(model, weights):
     return out
 
 
+def _hydrate_dsv4_jangtq_streaming(
+    model, model_path, mxtq_seed, skip_params_eval=False
+):
+    """Streaming DSV4 JANGTQ hydration.
+
+    The generic JANGTQ loader first keeps every shard tensor in Python dicts,
+    then stacks every routed expert projection while the unstacked per-expert
+    tensors are still live. DSV4 has 43 layers * 256 experts * 3 projections,
+    so that peak can exceed 128 GB even though the final JANGTQ2 model is only
+    ~74 GB. This path scans safetensors headers first, stacks one
+    layer/projection at a time, installs the TurboQuant module immediately,
+    then streams regular weights per shard.
+    """
+    from safetensors import safe_open
+    import mlx.core as mx
+
+    weight_files = sorted(model_path.glob("model-*.safetensors"))
+    dsv4_pat = re.compile(r"^(layers\.\d+\.ffn\.)experts\.(\d+)\.(w[123])$")
+    mm_map = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
+    grouped = {}
+    regular_keys_by_shard = {}
+
+    print("  DSV4 streaming hydrate: scanning safetensors headers", flush=True)
+    for sf_path in weight_files:
+        regular_keys = []
+        with safe_open(str(sf_path), framework="numpy") as sf:
+            keys = list(sf.keys())
+        for key in keys:
+            if key.endswith(".tq_packed"):
+                base = key[:-10]
+                part = "packed"
+            elif key.endswith(".tq_norms"):
+                base = key[:-9]
+                part = "norms"
+            elif key.endswith(".tq_bits"):
+                base = key[:-8]
+                part = "bits"
+            else:
+                regular_keys.append(key)
+                continue
+
+            m = dsv4_pat.match(base)
+            if not m:
+                if base.startswith("mtp."):
+                    # DSV4 inference does not instantiate/use MTP layers; the
+                    # model.sanitize() path drops mtp.* regular weights too.
+                    continue
+                raise RuntimeError(
+                    "DSV4 streaming hydrate saw non-routed TQ key "
+                    f"{base!r}; generic loader path must handle this bundle"
+                )
+            layer_prefix = m.group(1).replace(".ffn.", ".mlp.")
+            expert_id = int(m.group(2))
+            proj_name = mm_map[m.group(3)]
+            group_key = (layer_prefix, proj_name)
+            grouped.setdefault(group_key, {}).setdefault(expert_id, {})[part] = (
+                sf_path,
+                key,
+            )
+        if regular_keys:
+            regular_keys_by_shard[sf_path] = set(regular_keys)
+
+    def get_module(root, dotted):
+        cur = root
+        for p in dotted.split("."):
+            cur = cur[int(p)] if p.isdigit() else getattr(cur, p)
+        return cur
+
+    def set_module(root, dotted, new_mod):
+        parts = dotted.split(".")
+        cur = root
+        for p in parts[:-1]:
+            cur = cur[int(p)] if p.isdigit() else getattr(cur, p)
+        last = parts[-1]
+        if last.isdigit():
+            cur[int(last)] = new_mod
+        else:
+            setattr(cur, last, new_mod)
+
+    print(f"  DSV4 streaming hydrate: stacking {len(grouped)} TQ groups", flush=True)
+    n_replaced = 0
+    for idx, ((layer_prefix, proj_name), experts) in enumerate(
+        sorted(grouped.items()), start=1
+    ):
+        n_exp = max(experts.keys()) + 1
+        packed_list = [None] * n_exp
+        norms_list = [None] * n_exp
+        bits = None
+        by_path = {}
+        for expert_id, parts in experts.items():
+            for part_name in ("packed", "norms", "bits"):
+                try:
+                    sf_path, tensor_key = parts[part_name]
+                except KeyError as e:
+                    raise RuntimeError(
+                        f"DSV4 TQ group {layer_prefix}{proj_name} expert "
+                        f"{expert_id} missing {part_name}"
+                    ) from e
+                by_path.setdefault(sf_path, []).append((expert_id, part_name, tensor_key))
+
+        for sf_path, reqs in by_path.items():
+            with safe_open(str(sf_path), framework="mlx") as sf:
+                for expert_id, part_name, tensor_key in reqs:
+                    tensor = sf.get_tensor(tensor_key)
+                    if part_name == "packed":
+                        packed_list[expert_id] = tensor
+                    elif part_name == "norms":
+                        norms_list[expert_id] = tensor
+                    else:
+                        bits = int(tensor[0].item())
+
+        if bits is None:
+            raise RuntimeError(f"DSV4 TQ group {layer_prefix}{proj_name} missing bits")
+        if any(t is None for t in packed_list) or any(t is None for t in norms_list):
+            raise RuntimeError(f"DSV4 TQ group {layer_prefix}{proj_name} incomplete")
+
+        stacked_packed = mx.stack(packed_list)
+        stacked_norms = mx.stack(norms_list)
+        # Do not force-evaluate here. Evaluating while the per-expert source
+        # arrays are still live doubles the group's peak memory. The final
+        # full-model warmup/materialization runs after every source list has
+        # been dropped, so steady-state tensors are still materialized before
+        # first user decode without the load-time spike.
+        n_exp, out_feat, packed_cols = stacked_packed.shape
+        vals_per_u32 = 32 // bits
+        in_features = packed_cols * vals_per_u32
+        new_module = TurboQuantSwitchLinear(
+            in_features=in_features,
+            out_features=out_feat,
+            num_experts=n_exp,
+            bits=bits,
+            bias=False,
+            seed=mxtq_seed,
+        )
+        new_module.packed = stacked_packed
+        new_module.norms = stacked_norms
+        new_base = f"{layer_prefix}switch_mlp.{proj_name}"
+        # Validate the target exists before mutating so bad naming fails loud.
+        get_module(model, new_base)
+        set_module(model, new_base, new_module)
+        n_replaced += 1
+        del packed_list, norms_list, stacked_packed, stacked_norms
+        if idx % 12 == 0 or idx == len(grouped):
+            print(
+                f"  DSV4 streaming hydrate: stacked {idx}/{len(grouped)} groups",
+                flush=True,
+            )
+        gc.collect()
+
+    print(f"  Replaced {n_replaced} DSV4 routed TQ modules", flush=True)
+    del grouped
+    gc.collect()
+
+    print("  DSV4 streaming hydrate: loading regular weights shard-by-shard", flush=True)
+    for shard_i, sf_path in enumerate(weight_files, start=1):
+        keep = regular_keys_by_shard.get(sf_path)
+        if not keep:
+            continue
+        shard_weights = mx.load(str(sf_path))
+        shard_regular = {k: v for k, v in shard_weights.items() if k in keep}
+        del shard_weights
+        if shard_regular:
+            if hasattr(model, "sanitize"):
+                shard_regular = model.sanitize(shard_regular)
+            model.load_weights(list(shard_regular.items()), strict=False)
+        del shard_regular
+        if shard_i % 10 == 0 or shard_i == len(weight_files):
+            print(
+                f"  DSV4 streaming hydrate: regular shard {shard_i}/{len(weight_files)}",
+                flush=True,
+            )
+        gc.collect()
+
+    # Install the DSV4-safe fused routed-expert decode path. This mirrors the
+    # generic post-hydration patch but now propagates `_DSV4SwiGLU.swiglu_limit`
+    # into the Metal kernel so DSV4 gets silu(min(gate, 10)) * clip(up, +/-10).
+    try:
+        from mlx_lm.models.switch_layers import SwitchGLU, _gather_sort, _scatter_unsort
+        from jang_tools.turboquant.fused_gate_up_kernel import (
+            fused_gate_up_swiglu_matmul,
+            make_fused_gate_up_swiglu_decode,
+        )
+        from jang_tools.turboquant.gather_tq_kernel import make_gather_tq_decode_per_row
+        from jang_tools.turboquant.hadamard_kernel import hadamard_rotate_metal
+
+        _orig_switchglu_call = SwitchGLU.__call__
+        _decode_compiled = {}
+
+        def _get_compiled_decode(in_f, out_f, bits, k, swiglu_limit=0.0):
+            limit_milli = int(round(float(swiglu_limit or 0.0) * 1000.0))
+            cache_key = (in_f, out_f, bits, k, limit_milli)
+            if cache_key in _decode_compiled:
+                return _decode_compiled[cache_key]
+            fused_gu = make_fused_gate_up_swiglu_decode(
+                in_f, out_f, bits, k, swiglu_limit=swiglu_limit
+            )
+            gather_dn = make_gather_tq_decode_per_row(out_f, in_f, bits, k)
+
+            def _mlp(x_flat, pg, ng, pu, nu, pd, nd, cb_gate, cb_down, signs_in, signs_dn, idx_flat):
+                x_rot = hadamard_rotate_metal(x_flat, signs_in)
+                x_act = fused_gu(x_rot, pg, ng, pu, nu, cb_gate, idx_flat)
+                x_act_rot = hadamard_rotate_metal(x_act, signs_dn)
+                return gather_dn(x_act_rot, pd, nd, cb_down, idx_flat)
+
+            _decode_compiled[cache_key] = mx.compile(_mlp)
+            return _decode_compiled[cache_key]
+
+        def _dsv4_fused_switchglu_call(self, x, indices):
+            gp = self.gate_proj
+            up = self.up_proj
+            dp = self.down_proj
+            if not isinstance(gp, TurboQuantSwitchLinear) or not isinstance(up, TurboQuantSwitchLinear):
+                return _orig_switchglu_call(self, x, indices)
+            activation = getattr(self, "activation", None)
+            swiglu_limit = getattr(activation, "swiglu_limit", 0.0) or 0.0
+            x_sq = x
+            while x_sq.ndim > 2 and x_sq.shape[-2] == 1:
+                x_sq = x_sq.squeeze(-2)
+            x_flat = x_sq.reshape(-1, gp.in_features)
+            batch = x_flat.shape[0]
+            k = indices.shape[-1] if indices.ndim > 0 else 1
+            can_fast = batch == 1 and k > 0 and indices.ndim >= 1 and indices.size < 64
+            if can_fast and not getattr(self, "training", False):
+                idx_flat = indices.reshape(-1).astype(mx.uint32)
+                compiled_mlp = _get_compiled_decode(
+                    gp.in_features, gp.out_features, gp.bits, k, swiglu_limit
+                )
+                y = compiled_mlp(
+                    x_flat.astype(mx.float32),
+                    gp.packed, gp.norms, up.packed, up.norms,
+                    dp.packed, dp.norms,
+                    gp.codebook, dp.codebook,
+                    gp.signs, dp.signs, idx_flat,
+                )
+                out = y.reshape(*indices.shape[:-1], k, 1, gp.in_features)
+                if out.dtype != x.dtype:
+                    out = out.astype(x.dtype)
+                return out.squeeze(-2)
+
+            x_exp = mx.expand_dims(x, (-2, -3))
+            do_sort = indices.size >= 64
+            idx = indices
+            inv_order = None
+            if do_sort:
+                x_exp, idx, inv_order = _gather_sort(x_exp, indices)
+            if getattr(self, "training", False):
+                idx = mx.stop_gradient(idx)
+            x_act = fused_gate_up_swiglu_matmul(
+                x_exp,
+                gp.packed, gp.norms,
+                up.packed, up.norms,
+                gp.codebook, gp.signs,
+                idx,
+                bits=gp.bits,
+                swiglu_limit=swiglu_limit,
+            )
+            x_out = self.down_proj(x_act, idx, sorted_indices=do_sort)
+            if do_sort:
+                x_out = _scatter_unsort(x_out, inv_order, indices.shape)
+            return x_out.squeeze(-2)
+
+        SwitchGLU.__call__ = _dsv4_fused_switchglu_call
+        patched = sum(
+            1 for _, m in model.named_modules()
+            if isinstance(m, SwitchGLU)
+            and isinstance(getattr(m, "gate_proj", None), TurboQuantSwitchLinear)
+            and isinstance(getattr(m, "up_proj", None), TurboQuantSwitchLinear)
+        )
+        print(
+            f"  Patched SwitchGLU class for DSV4 limited SwiGLU fused gate+up ({patched} TQ instances)",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"  DSV4 SwitchGLU fusion skipped: {e}", flush=True)
+
+    from jang_tools.loader import _fix_quantized_bits
+    _fix_quantized_bits(model, {})
+
+    if not skip_params_eval:
+        try:
+            from mlx.utils import tree_flatten
+            flat = tree_flatten(model.parameters())
+            for i in range(0, len(flat), 128):
+                mx.eval(*[v for _, v in flat[i:i + 128]])
+            mx.synchronize()
+        except Exception as e:
+            print(f"  [hydrate] chunked materialization failed: {e!r}", flush=True)
+
+    print("  Hydration complete", flush=True)
+
+
 def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                           model_config, skip_params_eval=False):
     """Apply JANGTQ TQ replacement, weight load, and runtime patches in-place.
@@ -270,6 +647,19 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     model_path = Path(model_path)
     weight_files = sorted(model_path.glob("model-*.safetensors"))
     print(f"  {len(weight_files)} shards", flush=True)
+
+    _model_type = (
+        model_config.get("model_type", "")
+        if isinstance(model_config, dict)
+        else getattr(model_config, "model_type", "")
+    )
+    if (
+        _model_type == "deepseek_v4"
+        and os.environ.get("JANGTQ_DISABLE_DSV4_STREAM_LOAD", "0") != "1"
+    ):
+        return _hydrate_dsv4_jangtq_streaming(
+            model, model_path, mxtq_seed, skip_params_eval=skip_params_eval
+        )
 
     # Collect TQ groups + regular weights
     tq_groups = {}  # base_path -> {packed, norms, bits}
@@ -308,6 +698,22 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     qw_pat  = re.compile(rf"^({_VLM_PREFIX}layers\.\d+\.mlp\.)experts\.(gate_up_proj|down_proj|gate_proj|up_proj)$")
     # DSV4: layers.N.ffn.experts.E.w[123] → map to switch_mlp.{gate_proj,down_proj,up_proj}
     dsv4_pat = re.compile(rf"^({_VLM_PREFIX}layers\.\d+\.ffn\.)experts\.(\d+)\.(w[123])$")
+    # Nemotron-H (nemotron_h, also Nemotron-3-Nano-Omni): backbone.layers.N.mixer
+    # is `NemotronHMoE` for `E` block_type with `self.switch_mlp = SwitchMLP(...)`.
+    # Per-expert shards land as `backbone.layers.N.mixer.experts.E.{gate,up,down}_proj`.
+    # Without this pattern, the loop at line ~316 falls through, the per-expert
+    # TQ tensors stay in raw 2D form keyed under the original `mixer.experts.E.X`
+    # path, and the `get_module(model, base)` lookup at the replace step raises
+    # AttributeError on every entry → "Replaced 0 modules" + the model loads
+    # all expert weights as full bf16 nn.Linear (Metal RSS 13 GB → 111 GB → 503).
+    # Symptom: /v1/responses 503 "Metal working set too full (104% of 107.5GB)".
+    # Stacking emits under `{layer_prefix}switch_mlp.{proj_name}` which matches
+    # the NemotronHMoE attribute path so `get_module(model, ...)` resolves
+    # correctly and the per-expert shards become a 3-D TurboQuantSwitchLinear.
+    nemo_pat = re.compile(
+        rf"^({_VLM_PREFIX}backbone\.layers\.\d+\.mixer\.)"
+        rf"experts\.(\d+)\.(gate_proj|up_proj|down_proj)$"
+    )
     mm_map  = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
     grouped_experts = {}
     # Pre-stacked tensors go straight into tq_groups with switch_mlp naming (no stacking).
@@ -336,6 +742,35 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             expert_id = int(m.group(2))
             proj_name = mm_map[m.group(3)]
             grouped_experts.setdefault((layer_prefix, proj_name), {})[expert_id] = tq_groups.pop(base)
+            continue
+        m = nemo_pat.match(base)
+        if m:
+            # Nemotron-H: backbone.layers.N.mixer.experts.E.{up,down}_proj
+            # → backbone.layers.N.mixer.switch_mlp.{fc1,fc2}
+            #
+            # MLX `mlx_lm.models.switch_layers.SwitchMLP` exposes ONLY `fc1`
+            # and `fc2` (no gate_proj/up_proj/down_proj). MLX `nemotron_h.py`
+            # sanitize() (lines 540-555) maps the per-expert weight keys via
+            # the table `[("down_proj", "fc2"), ("up_proj", "fc1")]`. We MUST
+            # mirror that mapping here, otherwise `set_module(model, base)`
+            # fails on every entry → "Replaced 0 modules" → 128 experts × 26
+            # MoE layers default-initialise as bf16 SwitchLinear placeholders
+            # (~110 GB Metal allocation on a 30B-A3B bundle).
+            #
+            # Nemotron-H is the GLU activation variant (`relu2(up_proj(x))`,
+            # NemotronHMLP.__call__), NOT SwiGLU — gate_proj does not exist
+            # in this architecture. nemo_pat allows gate_proj for forward
+            # compat, but we drop it here if encountered.
+            layer_prefix = m.group(1)
+            expert_id = int(m.group(2))
+            proj_name = m.group(3)
+            _nemo_proj_map = {"up_proj": "fc1", "down_proj": "fc2"}
+            mapped = _nemo_proj_map.get(proj_name)
+            if mapped is None:
+                # gate_proj or unknown — drop (Nemotron-H is GLU, not SwiGLU).
+                tq_groups.pop(base, None)
+                continue
+            grouped_experts.setdefault((layer_prefix, mapped), {})[expert_id] = tq_groups.pop(base)
             continue
         m = qw_pat.match(base)
         if m:
@@ -536,11 +971,14 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         # P15: compiled decode helpers, cached per (in_f, out_f, bits, K).
         _DECODE_COMPILED = {}
 
-        def _get_compiled_decode(in_f, out_f, bits, K):
-            key = (in_f, out_f, bits, K)
+        def _get_compiled_decode(in_f, out_f, bits, K, swiglu_limit=0.0):
+            limit_milli = int(round(float(swiglu_limit or 0.0) * 1000.0))
+            key = (in_f, out_f, bits, K, limit_milli)
             if key in _DECODE_COMPILED:
                 return _DECODE_COMPILED[key]
-            fused_gu = make_fused_gate_up_swiglu_decode(in_f, out_f, bits, K)
+            fused_gu = make_fused_gate_up_swiglu_decode(
+                in_f, out_f, bits, K, swiglu_limit=swiglu_limit
+            )
             # P19 (fused rot+gather) was tested but regressed 44.6 → 34.2 tok/s
             # in real decode despite +3 μs microbench win. Likely shmem/occupancy
             # interaction with other kernels. Reverted to split path.
@@ -563,6 +1001,8 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             dp = self.down_proj
             if not isinstance(gp, TurboQuantSwitchLinear) or not isinstance(up, TurboQuantSwitchLinear):
                 return _ORIG_SWITCHGLU_CALL(self, x, indices)
+            _activation = getattr(self, "activation", None)
+            _swiglu_limit = getattr(_activation, "swiglu_limit", 0.0) or 0.0
 
             # Decode fast path: batch=1, K=topk, broadcast mode.
             # Detect by: x has flattenable-to-(1, in_f) layout AND indices is 1D-equivalent.
@@ -577,7 +1017,9 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
 
             if can_fast:
                 idx_flat = indices.reshape(-1).astype(mx.uint32)
-                compiled_mlp = _get_compiled_decode(gp.in_features, gp.out_features, gp.bits, K)
+                compiled_mlp = _get_compiled_decode(
+                    gp.in_features, gp.out_features, gp.bits, K, _swiglu_limit
+                )
                 y = compiled_mlp(
                     x_flat.astype(mx.float32),
                     gp.packed, gp.norms, up.packed, up.norms,
@@ -607,6 +1049,7 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                 gp.codebook, gp.signs,
                 idx,
                 bits=gp.bits,
+                swiglu_limit=_swiglu_limit,
             )
             x_out = self.down_proj(x_act, idx, sorted_indices=do_sort)
             if do_sort:
@@ -901,5 +1344,18 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         print("  bfloat16 enabled", flush=True)
 
     if not skip_params_eval:
+        # mx.synchronize alone only flushes the dispatch queue; it does
+        # not force MLX's lazy parameter materialization. Without an
+        # explicit evaluate, TQ-hydrated weights remain deferred and the
+        # FIRST /v1/chat/completions request pays the full materialization
+        # cost mid-decode — producing garbage logits, hallucinated
+        # thinking content, and degenerate repetition on short prompts.
+        # Force materialization here so the returned handle is truly ready.
+        _evaluate = getattr(mx, "eval", None)
+        if _evaluate is not None:
+            try:
+                _evaluate(model.parameters())
+            except Exception as _e:
+                print(f"  [hydrate] parameter materialization failed: {_e!r}", flush=True)
         mx.synchronize()
     print("  Hydration complete", flush=True)

@@ -6,7 +6,7 @@ The loop runs forever. You emit completion only when you've traced every dimensi
 
 ## What each iteration does
 
-1. **Read the checklist state:** `cat /Users/eric/jang/ralph_runner/AUDIT_CHECKLIST.md`
+1. **Read the checklist state:** `cat <repo>/ralph_runner/AUDIT_CHECKLIST.md`
 2. **Pick ONE investigation angle** using the selection policy below. Announce it in a short (≤ 40 word) opening statement.
 3. **Trace it deeply** — read real files, follow the call chain, run real commands, observe actual outputs. Cross-check against memory files and documented rules.
 4. **Discover new concerns** — as you trace, NEW questions will surface. Append them to the checklist as `[ ]` items in the appropriate section (or create a new section). Every iteration must net-add at least 1 new question, not just close existing ones.
@@ -112,7 +112,7 @@ When closing an item, write the evidence inline under the item, like:
 3. No AI attribution in commits.
 4. Author line is Jinho Jang, not Eric Jang.
 5. Never write to `research/`.
-6. Never `rm` anything under `/Volumes/EricsLLMDrive/`.
+6. Never `rm` anything under `<external-ssd>/`.
 7. Never `git push --force`.
 8. Pre-authorized writes — make the fix, commit, move on. Do NOT stop to ask per-item.
 9. If a fix requires a long-running job, announce it and continue — do not block Ralph iteration.
@@ -150,10 +150,10 @@ Each iteration, append a one-line entry to `ralph_runner/INVESTIGATION_LOG.md`:
 - Last Ralph commit: `git log --oneline --grep="audit(ralph)" | head -5`
 - Checklist state: `grep -c "^- \[.\]" ralph_runner/AUDIT_CHECKLIST.md` (total) + `grep -c "^- \[ \]" ralph_runner/AUDIT_CHECKLIST.md` (open)
 - Memory index: `head -60 ~/.claude/projects/-Users-eric-jang/memory/MEMORY.md`
-- Full pytest: `cd jang-tools && /Users/eric/jang/.venv/bin/python3 -m pytest tests/`
+- Full pytest: `cd jang-tools && <repo>/.venv/bin/python3 -m pytest tests/`
 - XCTest: `cd JANGStudio && xcodebuild test -project JANGStudio.xcodeproj -scheme JANGStudio -destination 'platform=macOS' -only-testing:JANGStudioTests 2>&1 | grep -E "Executed|TEST" | tail -3`
 - Swift tests: `cd jang-runtime && swift test 2>&1 | tail -3`
-- Ralph unit tests: `cd /Users/eric/jang && /Users/eric/jang/.venv/bin/python3 -m pytest ralph_runner/tests/ -q`
+- Ralph unit tests: `cd <repo> && <repo>/.venv/bin/python3 -m pytest ralph_runner/tests/ -q`
 
 ## End-of-turn
 

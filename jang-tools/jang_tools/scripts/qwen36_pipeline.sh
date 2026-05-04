@@ -4,10 +4,10 @@
 #       → Swift decode smoke → report
 #
 # Usage: bash /tmp/qwen36_pipeline.sh [MODEL_DIR]
-#   default MODEL_DIR: /Users/eric/models/Qwen3.6-35B-A3B-JANGTQ_2L
+#   default MODEL_DIR: ~/models/Qwen3.6-35B-A3B-JANGTQ_2L
 set -e
 
-MODEL=${1:-/Users/eric/models/Qwen3.6-35B-A3B-JANGTQ_2L}
+MODEL=${1:-~/models/Qwen3.6-35B-A3B-JANGTQ_2L}
 echo "=== Pipeline target: $MODEL ==="
 
 if [ ! -d "$MODEL" ]; then
@@ -46,7 +46,7 @@ python3 /tmp/test_qwen36_python.py "$MODEL" || {
 # Step 4: Swift decode smoke (chat REPL — auto-quit after one prompt via stdin pipe)
 echo
 echo "[4/5] Swift decode smoke (one prompt via vmlxctl chat REPL)"
-VMLXCTL=/Users/eric/vmlx/swift/.build/arm64-apple-macosx/debug/vmlxctl
+VMLXCTL=vmlxctl
 if [ ! -x "$VMLXCTL" ]; then
   echo "  vmlxctl not built — skipping"
 else

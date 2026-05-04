@@ -6,7 +6,7 @@ Autonomous test harness for JANG Studio. Converts small test models through ever
 
 ```bash
 # Activate tier 1 and run next pending combo
-cd /Users/eric/jang && python3 -m ralph_runner.runner --tier 1
+cd <repo> && python3 -m ralph_runner.runner --tier 1
 python3 -m ralph_runner.runner --next
 
 # Check status

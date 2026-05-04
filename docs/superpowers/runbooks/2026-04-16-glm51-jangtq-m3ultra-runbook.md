@@ -20,18 +20,18 @@ patched runtime are present.
 
 ```bash
 # Existing JANGTQ artifact
-ls -la /Volumes/EricsLLMDrive/GLM-5.1-JANGTQ_1L/ | head
+ls -la <external-ssd>/GLM-5.1-JANGTQ_1L/ | head
 # Should show: config.json, jang_config.json, model-*-of-00204.safetensors
 
-cat /Volumes/EricsLLMDrive/GLM-5.1-JANGTQ_1L/jang_config.json
+cat <external-ssd>/GLM-5.1-JANGTQ_1L/jang_config.json
 # Should show: weight_format=mxtq, profile=JANGTQ_1L, mxtq_seed=42,
 # mxtq_bits={attention:8, shared_expert:8, routed_expert:2}
 
 # Existing standard JANG artifact (for A/B baseline)
-ls -la /Volumes/EricsLLMDrive/GLM-5.1-JANG_1L/ | head
+ls -la <external-ssd>/GLM-5.1-JANG_1L/ | head
 
 # The MLA SDPA fp32 patch (canonical fix for the L==1 absorb bug)
-ls -la /Users/eric/jang/research/deepseek_v32_patched.py
+ls -la <repo>/research/deepseek_v32_patched.py
 ```
 
 If any are missing, stop here — the artifacts predate this runbook.
@@ -45,7 +45,7 @@ accumulates the dim-512 contraction in bf16, drifting after ~50
 tokens into "1.1.1.1..." attractor loops. Without this fix GLM 5.1
 JANGTQ_1L decodes garbage past short answers.
 
-The fix is in `/Users/eric/jang/research/deepseek_v32_patched.py`.
+The fix is in `<repo>/research/deepseek_v32_patched.py`.
 Apply it to the active mlx_lm install (whichever Python env you use
 for inference):
 
@@ -60,7 +60,7 @@ MLXLM_DIR=$(dirname $(python3 -c "import mlx_lm; print(mlx_lm.__file__)"))
 cp -p $MLXLM_DIR/models/deepseek_v32.py $MLXLM_DIR/models/deepseek_v32.py.bak
 
 # Drop in the patched version
-cp /Users/eric/jang/research/deepseek_v32_patched.py $MLXLM_DIR/models/deepseek_v32.py
+cp <repo>/research/deepseek_v32_patched.py $MLXLM_DIR/models/deepseek_v32.py
 
 # Verify the patch is the float32-cast-on-L==1 variant (not the older
 # always-prefill workaround). Look for "astype(mx.float32)" inside
@@ -79,14 +79,14 @@ Verify the JANGTQ_1L artifact decodes coherent text via the JANGTQ
 loader.
 
 ```bash
-cd /Users/eric/jang
+cd <repo>
 python3 - <<'PY'
 import time
 from jang_tools.load_jangtq import load_jangtq_model
 from mlx_lm import generate
 
 t0 = time.time()
-m, tok = load_jangtq_model("/Volumes/EricsLLMDrive/GLM-5.1-JANGTQ_1L")
+m, tok = load_jangtq_model("<external-ssd>/GLM-5.1-JANGTQ_1L")
 print(f"load wall: {time.time() - t0:.1f}s")
 
 # Three prompts: factual recall, reasoning, multi-step
@@ -127,7 +127,7 @@ coherence.
 python3 - <<'PY'
 import time
 from mlx_lm import load, generate
-m, tok = load("/Volumes/EricsLLMDrive/GLM-5.1-JANG_1L")
+m, tok = load("<external-ssd>/GLM-5.1-JANG_1L")
 for p in [
     "The capital of France is",
     "If I have 3 apples and eat 1, how many remain?",
@@ -185,7 +185,7 @@ MMLU 50-question subset on both artifacts and compare scores.
 
 ```bash
 # Use the existing MMLU harness if present
-ls /Users/eric/jang/jang-tools/jang_tools/eval_*.py /Users/eric/jang/research/run_mmlu*.py 2>/dev/null
+ls <repo>/jang-tools/jang_tools/eval_*.py <repo>/research/run_mmlu*.py 2>/dev/null
 
 # Else: a minimal eval loop
 python3 - <<'PY'
@@ -200,7 +200,7 @@ questions = [
     # First 50 MMLU questions or use a stable seed from datasets lib
     # Format: {"prompt": "...", "answer": "A"}
 ]
-# ... see /Users/eric/jang/research/run_mmlu*.py if present, else build one
+# ... see <repo>/research/run_mmlu*.py if present, else build one
 PY
 ```
 
@@ -240,10 +240,10 @@ port for vmlx-swift parity, which is its own ~1-week project.
 
 ## File map
 
-- Existing JANGTQ artifact: `/Volumes/EricsLLMDrive/GLM-5.1-JANGTQ_1L/` (191 GB)
-- Existing JANG_1L baseline: `/Volumes/EricsLLMDrive/GLM-5.1-JANG_1L/` (233 GB)
-- Patched runtime file: `/Users/eric/jang/research/deepseek_v32_patched.py`
-- JANGTQ Python loader: `/Users/eric/jang/jang-tools/jang_tools/load_jangtq.py`
-- Reference (MiniMax): `/Users/eric/jang/research/JANGTQ-REFERENCE.md`
-- Quality baseline: `/Users/eric/jang/research/GLM-5.1-RUNTIME-AUDIT.md`
-- Swift runtime (GLM 4 MoE only — NOT GLM 5.1 yet): `/Users/eric/vmlx/swift/Sources/vMLXLLM/Models/GLM4MoEJANGTQ.swift`
+- Existing JANGTQ artifact: `<external-ssd>/GLM-5.1-JANGTQ_1L/` (191 GB)
+- Existing JANG_1L baseline: `<external-ssd>/GLM-5.1-JANG_1L/` (233 GB)
+- Patched runtime file: `<repo>/research/deepseek_v32_patched.py`
+- JANGTQ Python loader: `<repo>/jang-tools/jang_tools/load_jangtq.py`
+- Reference (MiniMax): `<repo>/research/JANGTQ-REFERENCE.md`
+- Quality baseline: `<repo>/research/GLM-5.1-RUNTIME-AUDIT.md`
+- Swift runtime (GLM 4 MoE only — NOT GLM 5.1 yet): `~/vmlx/swift/Sources/vMLXLLM/Models/GLM4MoEJANGTQ.swift`

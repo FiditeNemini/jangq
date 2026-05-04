@@ -42,6 +42,8 @@
 ## Highlights
 
 - **397B on 128 GB Mac** — JANG_1L: 112 GB, 36 tok/s, 86.5% MMLU with reasoning
+- **DeepSeek-V4-Flash runtime** — first MLX runtime for DSV4's hybrid **SWA + CSA + HSA** attention (sliding-window + compressor-pool + hash-sparse) with mHC residuals and 1M-context pool quant cache
+- **JangPress for routed-MoE** — load 167 GB Kimi-K2.6 on a 128 GB Mac via `mmap` + `madvise` cold-tier eviction (see [`docs/JANGPRESS.md`](https://github.com/jjang-ai/jangq/blob/main/docs/JANGPRESS.md))
 - **Nemotron-Cascade-2 in 10 GB** — IMO Gold Medal reasoning model at 130 tok/s on 16 GB MacBooks
 - **MiniMax: only JANG works** — MLX scores 25% (random), JANG scores 74%
 - **Nemotron-3-Super-120B in 43 GB** — first working Nemotron-H quantization for Apple Silicon
@@ -136,15 +138,66 @@ The more experts a model has, the worse MLX performs at low bits:
 - **256 experts** (122B, MiniMax): MLX 2-bit breaks badly, JANG dominates
 - **512 experts** (397B, Super-120B): MLX NaN/crash below 4-bit, only JANG works
 
+## DeepSeek-V4-Flash runtime — Hybrid SWA + CSA + HSA attention
+
+DSV4-Flash is the first DeepSeek-class model whose attention is **not**
+plain MLA. JANG ships the only Apple-Silicon runtime that handles all
+three layer types correctly:
+
+| Layer type | Description | JANG path |
+|---|---|---|
+| **SWA** (Sliding-Window Attention) | local windowed attention; cheap fast layers | `jang_tools.dsv4.mlx_model.DSV4SlidingWindow` |
+| **CSA** (Compressor / Compressed-State Attention) | per-layer compressor pool + windowed buffer; carries pooled-K/V across the whole context | `DeepseekV4Cache` + `accumulate_windows` + `update_pool` |
+| **HSA** (Hash-Sparse Attention via Indexer) | indexer chooses top-K hash buckets per-token; sparse attention over the global compressed pool | `Indexer` module + `DSV4LayerCache` indexer state |
+| **mHC residuals** | multi-Head-Compressed residual stream stabilises 43-layer 284B model | residual-axis fix in `mlx_model.py` |
+| **Pool quant cache** | quantized streaming KV pool with `RotatingKVCache.trim()`-style proportional row trim (mirrors `llama.cpp` `dsv4_clear_rows`) | `DeepseekV4Cache.trim(n)` |
+
+End-to-end verified: 1M-context pool accumulation, multi-turn `/v1/chat/completions`
+with prefix-cache reuse, dual-mode reasoning (`enable_thinking=true|false`),
+20.5 tok/s decode on M3 Ultra @ JANGTQ2 (79.5 GB), 24.5 tok/s on Swift.
+
+```bash
+# Convert from FP8 source bundle (~50 min on M3 Ultra)
+jang-convert-dsv4-jangtq /path/to/DeepSeek-V4-Flash --out ~/models/DSV4-Flash-JANGTQ
+
+# Inference (Python)
+python -m jang_tools.load_jangtq ~/models/DSV4-Flash-JANGTQ
+```
+
+For runtime traps (chat-template injection, repetition collapse with
+`enable_thinking=ON`, `rope_parameters` vs `rope_scaling`, mandatory
+`tq_bits` strip on Swift), see the in-package
+[`jang_tools/dsv4/README.md`](jang_tools/dsv4/README.md).
+
+## JangPress — fit routed-MoE bundles bigger than RAM
+
+Routed-MoE bundles like Kimi-K2.6 (167 GB), MiniMax-M2.7, and DSV4-Flash
+JANGTQ would normally OOM on a 128 GB Mac. JangPress is the load-time
+memory policy in [`osaurus-ai/vmlx-swift-lm`](https://github.com/osaurus-ai/vmlx-swift-lm)
+that combines mmap-backed safetensors, per-token router-aware
+`MADV_DONTNEED` over canonical routed-expert pages, and an optional
+prestack overlay to keep post-load RSS around 1 GB on 128 GB hosts.
+
+This package ships the JANG-side glue:
+
+```bash
+# Serve a 167 GB Kimi bundle on a 128 GB Mac
+cd scripts/jangpress
+./kimi_serve.sh ~/.mlxstudio/models/JANGQ-AI/Kimi-K2.6-Med-JANGTQ 100 8082
+./kimi_mmlu.sh Kimi-K2.6-Med-JANGTQ chat 8082
+```
+
+Full guide: [`docs/JANGPRESS.md`](https://github.com/jjang-ai/jangq/blob/main/docs/JANGPRESS.md).
+
 ## Install
 
 ```bash
-pip install "jang[mlx]>=2.1.5"
+pip install "jang[mlx]>=2.5.18"
 ```
 
 For Vision-Language models:
 ```bash
-pip install "jang[vlm]>=2.1.5"
+pip install "jang[vlm]>=2.5.18"
 ```
 
 ## Quick Start
@@ -354,7 +407,7 @@ On MoE models, attention is only 1-5% of parameters. Boosting it to 8-bit costs 
 *\* 추론 모드 사용*
 
 ```bash
-pip install "jang[mlx]>=2.1.5"
+pip install "jang[mlx]>=2.5.18"
 ```
 
 [GitHub](https://github.com/jjang-ai/jangq) · [HuggingFace](https://huggingface.co/JANGQ-AI) · [MLX Studio](https://mlx.studio) · [PyPI](https://pypi.org/project/jang/)
