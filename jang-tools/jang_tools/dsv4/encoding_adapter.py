@@ -7,18 +7,65 @@ import os
 import sys
 from pathlib import Path
 
+def _default_encoding_dirs() -> list[Path]:
+    """Shallow-search standard local DSV4 model roots for encoding_dsv4.py."""
+    dirs: list[Path] = []
+
+    def add(path: Path) -> None:
+        if path not in dirs:
+            dirs.append(path)
+
+    roots = [Path.home() / "models"]
+    # Accept either the canonical name or the historical typo'd one.
+    extra_root = (
+        os.environ.get("VMLX_MODELS_DIR")
+        or os.environ.get("VLLM_MODELS_DIR")
+        or os.environ.get("VMLINUX_MODELS_DIR")
+    )
+    if extra_root:
+        roots.insert(0, Path(extra_root).expanduser())
+    volumes = Path("/Volumes")
+    if volumes.exists():
+        try:
+            roots.extend(p for p in volumes.iterdir() if p.is_dir())
+        except Exception:
+            pass
+
+    for root in roots:
+        try:
+            if not root.exists():
+                continue
+            add(root / "Sources" / "DeepSeek-V4-Flash" / "encoding")
+            for pattern in (
+                "DeepSeek-V4-Flash*/encoding",
+                "JANGQ/DeepSeek-V4-Flash*/encoding",
+                "*/DeepSeek-V4-Flash*/encoding",
+                "*/*DeepSeek-V4-Flash*/encoding",
+            ):
+                for match in root.glob(pattern):
+                    add(match)
+        except Exception:
+            continue
+    return dirs
+
 def _load_encoding_module(encoding_dir: Path | None = None):
     d = encoding_dir
     if d is None:
         env = os.environ.get("DSV4_ENCODING_DIR")
-        if not env:
+        if env:
+            d = Path(env)
+        else:
+            for candidate in _default_encoding_dirs():
+                if (candidate / "encoding_dsv4.py").exists():
+                    d = candidate
+                    break
+        if d is None:
             raise RuntimeError(
                 "DSV4 encoding_dsv4.py module path not set. Either pass "
                 "encoding_dir=Path('<source>/encoding') or set the "
                 "DSV4_ENCODING_DIR env var to the directory containing "
                 "encoding_dsv4.py from your DeepSeek-V4-Flash bundle."
             )
-        d = Path(env)
     f = d / "encoding_dsv4.py"
     if not f.exists():
         raise FileNotFoundError(

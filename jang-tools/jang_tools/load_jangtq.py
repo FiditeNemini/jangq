@@ -151,6 +151,45 @@ def load_jangtq_model(model_path, skip_params_eval=False):
         eos_ids = [eos_ids]
     if eos_ids is None:
         eos_ids = []
+    # Merge generation_config.json eos_token_id into the list. Fixes two
+    # bug classes observed live 2026-05-04:
+    #   (a) config.json eos_token_id is null but generation_config.json
+    #       has the real EOS — engine registered empty eos list and the
+    #       model emitted the EOS token as visible content (MiniMax:
+    #       200020 = "[e~[" loops endlessly after the first answer).
+    #   (b) config.json eos_token_id is a single int but generation_config
+    #       lists multiple — Ling-2.6 ships [156892, 156895] in
+    #       generation_config but only 156895 in config; the secondary
+    #       turn-boundary stop is silently dropped.
+    # Reading generation_config.json as a strict superset rather than a
+    # fallback handles both cases.
+    try:
+        from pathlib import Path as _P
+        import json as _json
+        _gc_path = _P(model_path) / "generation_config.json"
+        if _gc_path.is_file():
+            _gc = _json.loads(_gc_path.read_text())
+            _gc_eos = _gc.get("eos_token_id")
+            _added = []
+            if isinstance(_gc_eos, int):
+                if _gc_eos not in eos_ids:
+                    eos_ids = list(eos_ids) + [_gc_eos]
+                    _added.append(_gc_eos)
+            elif isinstance(_gc_eos, list):
+                for x in _gc_eos:
+                    if isinstance(x, int) and x not in eos_ids:
+                        eos_ids = list(eos_ids) + [int(x)]
+                        _added.append(int(x))
+            if _added:
+                print(
+                    f"  [load_jangtq] merged eos_token_id from "
+                    f"generation_config.json: +{_added} → {eos_ids}",
+                    flush=True,
+                )
+    except Exception as _gc_err:
+        warnings.warn(
+            f"generation_config.json eos merge failed: {_gc_err}"
+        )
     # DSV4-Flash needs <｜User｜> as a turn-boundary stop in addition to
     # <｜end▁of▁sentence｜>. Upstream DSV4 + early jang bundles ship eos as
     # single int, leaving the model free to auto-continue into a fake user
@@ -362,6 +401,45 @@ def _hydrate_dsv4_jangtq_streaming(
     import mlx.core as mx
 
     weight_files = sorted(model_path.glob("model-*.safetensors"))
+
+    # JANGTQ-PRESTACK STANDARD detection: if the bundle ships routed-expert
+    # tensors pre-stacked under `{prefix}.{ffn|mlp|block_sparse_moe}.switch_mlp.{proj}`,
+    # the streaming-restack hot path is unnecessary — defer to the generic
+    # loader (which now has a prestack_pat branch and creates
+    # TurboQuantSwitchLinear directly from 3D tensors). This avoids the
+    # 65 GB pre-stacked sidecar entirely on freshly converted DSV4 bundles.
+    _is_prestacked = False
+    for sf_path in weight_files[:1]:
+        try:
+            with safe_open(str(sf_path), framework="numpy") as sf:
+                for key in sf.keys():
+                    if (
+                        ".switch_mlp.gate_proj.tq_packed" in key
+                        or ".switch_mlp.up_proj.tq_packed" in key
+                        or ".switch_mlp.down_proj.tq_packed" in key
+                        or ".switch_mlp.gate_up_proj.tq_packed" in key
+                    ):
+                        _is_prestacked = True
+                        break
+        except Exception:
+            pass
+        if _is_prestacked:
+            break
+    if _is_prestacked:
+        print(
+            "  DSV4 bundle is JANGTQ-PRESTACK format — deferring to generic "
+            "loader (skipping streaming restack + sidecar write)",
+            flush=True,
+        )
+        return _hydrate_jangtq_model(
+            model=model,
+            model_path=model_path,
+            mxtq_seed=mxtq_seed,
+            mxtq_bits_map=None,  # generic loader infers from per-tensor tq_bits
+            model_config=getattr(model, "config", None),
+            skip_params_eval=skip_params_eval,
+        )
+
     dsv4_pat = re.compile(r"^(layers\.\d+\.ffn\.)experts\.(\d+)\.(w[123])$")
     mm_map = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
     grouped = {}
@@ -714,6 +792,16 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         rf"^({_VLM_PREFIX}backbone\.layers\.\d+\.mixer\.)"
         rf"experts\.(\d+)\.(gate_proj|up_proj|down_proj)$"
     )
+    # JANGTQ-PRESTACK STANDARD (effective 2026-05-04): bundles MAY ship routed
+    # expert tensors pre-stacked along axis 0 directly under
+    # `{prefix}.{ffn|mlp|block_sparse_moe}.switch_mlp.{gate_proj|down_proj|up_proj|gate_up_proj}.{tq_packed|tq_norms|tq_bits}`
+    # with shapes [n_experts, out, packed_in] (3D) / [n_experts, out] (2D) / [1] (scalar).
+    # When matched, the bundle bypasses the sidecar / streaming-restack hot path
+    # entirely — TurboQuantSwitchLinear is built from the file as-is.
+    prestack_pat = re.compile(
+        rf"^({_VLM_PREFIX}layers\.\d+\.(?:ffn|mlp|block_sparse_moe)\.)"
+        rf"switch_mlp\.(gate_up_proj|gate_proj|up_proj|down_proj)$"
+    )
     mm_map  = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
     grouped_experts = {}
     # Pre-stacked tensors go straight into tq_groups with switch_mlp naming (no stacking).
@@ -771,6 +859,34 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                 tq_groups.pop(base, None)
                 continue
             grouped_experts.setdefault((layer_prefix, mapped), {})[expert_id] = tq_groups.pop(base)
+            continue
+        m = prestack_pat.match(base)
+        if m:
+            # JANGTQ-PRESTACK STANDARD: bundle ships routed-expert tensors
+            # pre-stacked under `{prefix}.{ffn|mlp|block_sparse_moe}.switch_mlp.{proj}`
+            # directly. No restacking, no sidecar — load and assign as-is.
+            layer_prefix = m.group(1)
+            proj_name = m.group(2)
+            parts = tq_groups.pop(base)
+            if proj_name == "gate_up_proj":
+                # Split combined gate+up along the output-row axis.
+                packed = parts["packed"]
+                norms = parts["norms"]
+                bits = parts["bits"]
+                mid = packed.shape[-2] // 2
+                for half, name in (
+                    (slice(None, mid), "gate_proj"),
+                    (slice(mid, None), "up_proj"),
+                ):
+                    new_base = f"{layer_prefix}switch_mlp.{name}"
+                    prestacked[new_base] = {
+                        "packed": packed[..., half, :],
+                        "norms": norms[..., half],
+                        "bits": bits,
+                    }
+            else:
+                new_base = f"{layer_prefix}switch_mlp.{proj_name}"
+                prestacked[new_base] = parts
             continue
         m = qw_pat.match(base)
         if m:
@@ -864,16 +980,34 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             print(f"    Skip (not in model): {base}", flush=True)
             continue
 
+        # Read the canonical in_features off the pre-replacement module rather
+        # than recovering it from `packed_cols * vals_per_u32`. The recovery
+        # math is only exact when in_features divides vals_per_u32 cleanly
+        # (true for bits ∈ {1,2,4,8,16} where vals_per_u32 ∈ {32,16,8,4,2}),
+        # but JANGTQ3 ships bits=3 → vals_per_u32=10 which over-rounds for any
+        # in_features not a multiple of 10 (4096 → 4100, 7168 → 7170, 3072 →
+        # 3080). A wrong in_features mis-keys the per-(in_features, seed)
+        # signs cache and the per-(in_features, bits) codebook cache so the
+        # Hadamard rotation applied to x silently mismatches what the weights
+        # were quantized against → garbage decode. Falling back to the math
+        # only when the existing module truly has no in_features attribute
+        # (defensive — every nn.Linear / SwitchLinear we replace exposes it).
+        existing_in = getattr(existing, "in_features", None)
+        if existing_in is None:
+            ew = getattr(existing, "weight", None)
+            if ew is not None:
+                existing_in = int(ew.shape[-1])
+
         if packed.ndim == 3:
             n_exp, out_feat, packed_cols = packed.shape
-            in_features = packed_cols * vals_per_u32
+            in_features = int(existing_in) if existing_in else packed_cols * vals_per_u32
             new_module = TurboQuantSwitchLinear(
                 in_features=in_features, out_features=out_feat,
                 num_experts=n_exp, bits=bits, bias=False, seed=mxtq_seed,
             )
         else:
             out_feat, packed_cols = packed.shape
-            in_features = packed_cols * vals_per_u32
+            in_features = int(existing_in) if existing_in else packed_cols * vals_per_u32
             new_module = TurboQuantLinear(
                 in_features=in_features, out_features=out_feat,
                 bits=bits, bias=False, seed=mxtq_seed,
@@ -1100,16 +1234,18 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             key = ("softmax", k, bool(renorm))
             if key in _ROUTER_CACHE:
                 return _ROUTER_CACHE[key]
+            # mlx 0.29+ removed `precise=True` from `mx.softmax`. fp32 input
+            # already gives a precise computation, so just drop the kwarg.
             if renorm:
                 def _router(gates_f32):
-                    scores = mx.softmax(gates_f32, axis=-1, precise=True)
+                    scores = mx.softmax(gates_f32, axis=-1)
                     inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
                     sel = mx.take_along_axis(scores, inds, axis=-1)
                     sel = sel / (mx.sum(sel, axis=-1, keepdims=True) + 1e-20)
                     return inds, sel
             else:
                 def _router(gates_f32):
-                    scores = mx.softmax(gates_f32, axis=-1, precise=True)
+                    scores = mx.softmax(gates_f32, axis=-1)
                     inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
                     sel = mx.take_along_axis(scores, inds, axis=-1)
                     return inds, sel
@@ -1132,6 +1268,16 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         for _, _mod in model.named_modules():
             _cls = _mod.__class__
             if _cls in _patched_classes or "SparseMoeBlock" not in _cls.__name__:
+                continue
+            # Skip MoE classes whose `gate` is a custom routing module that
+            # already returns `(topk_idx, topk_weight)` — e.g. bailing_hybrid
+            # / Ling-2.6-flash. The P15 patch assumes `self.gate(x)` returns
+            # raw logits; calling it on a Gate that returns a tuple yields
+            # `mx.softmax(<tuple>, axis=-1)` which is a TypeError. Detect by
+            # checking whether `gate` is a plain Linear-like (has `weight`
+            # attribute) or a wrapper module (has `gate_proj` etc).
+            _gate_mod = getattr(_mod, "gate", None)
+            if _gate_mod is None or hasattr(_gate_mod, "gate_proj"):
                 continue
 
             def _patched_moe(self, x):

@@ -1,4 +1,64 @@
+## 2.5.23 — 2026-05-05
+
+- **JANGTQ-PRESTACK STANDARD**: every JANGTQ bundle now ships routed-expert
+  tensors pre-stacked along axis 0 directly in the main shards
+  (`{prefix}.switch_mlp.{proj}.tq_packed` shape `[n_experts, out, packed_in]`).
+  Per-expert keys are forbidden going forward.
+  - `load_jangtq.py` adds `prestack_pat` branch — bundles ship pre-stacked,
+    no runtime restacking, no `jangtq_stacked.safetensors` sidecar.
+  - DSV4 streaming hydrate detects pre-stacked layout and short-circuits to
+    the generic loader (no sidecar pollution in bundle dir).
+  - New tool: `jang_tools.rebundle_jangtq_stacked` — converts existing
+    per-expert JANGTQ bundles to pre-stacked layout without re-quantizing.
+- **`convert_minimax_jangtq.py` updates**:
+  - New `JANGTQ_K` profile: mixed-precision routed experts (4-bit `down_proj`
+    + 2-bit `gate_proj`/`up_proj`) — quality close to 4-bit at much smaller
+    bundle size.
+  - Chat template auto-fix: detects the broken `<think>` always-on pattern
+    in source, injects `enable_thinking is defined and enable_thinking is
+    false` switch, inlines patched template into `tokenizer_config.json`
+    so engines reading inline (vMLX, swift-transformers) get the same
+    template as the standalone `.jinja` file.
+  - Quantization metadata follows JANGTQ-PRESTACK spec: top-level
+    `bits=8` (affine default), separate `routed_expert_bits` (or
+    per-projection map for K), per-module `mxtq_bits` map.
+- **New converters**: `convert_ling_jangtq.py` and `convert_ling_mxfp4.py`
+  for inclusionAI's Bailing-V2.5 hybrid (Ling-2.6-flash). MXFP4 path
+  pre-stacks routed experts at convert time per the new standard.
+- **`capabilities.py`**: adds `bailing_hybrid` family (reasoning=deepseek_r1,
+  tool=deepseek, cache=hybrid, modality=text).
+
 # Changelog
+
+## 2.5.19 — 2026-05-04
+
+### Fixed
+- `allocate_bits_budget` (JANG_4K and other K-quant profiles with
+  `target_bits >= 4`) no longer downgrades routed expert MLP tensors
+  (`gate_proj` / `up_proj` / `down_proj` and Mixtral `w1` / `w2` / `w3`)
+  below the profile's namesake bit width on 256+ expert MoE models. Without
+  this guard, JANG_4K compensated for the CRITICAL→8-bit boost by
+  downgrading rarely-activated routed experts to 3-bit; trivial prompts
+  hit those experts more often than calibration data does and caused
+  repetition loops on inference. JANG_4K on 256+ MoE now matches
+  JANG_4M behaviour (slight overshoot vs strict budget) instead of
+  silently degrading routed experts. 2-/3-bit profiles keep the existing
+  intentionally-aggressive routed compression. Dense models and <256-expert
+  MoE are unaffected.
+- `convert_minimax_jangtq.py` now pads non-32-aligned MiniMax expert counts
+  in the artifact itself. MiniMax-M2.7-Small has 154 routed experts, which
+  benchmarks slower in the per-token router/top-k path than 160/192/256-wide
+  expert dimensions. The converter writes `num_local_experts` at the next
+  32-expert boundary, pads gate rows with zeros, pads
+  `e_score_correction_bias` with `-10000.0`, and emits inert zeroed TQ tensors
+  for dummy experts so runtime selection and logits stay unchanged.
+- Added `jang_tools.pad_minimax_jangtq_experts`, an idempotent migration tool
+  for existing MiniMax JANGTQ artifacts. It rewrites shards so tensor names stay
+  unique for loaders that glob `model*.safetensors` instead of honoring only
+  `model.safetensors.index.json`.
+- `dsv4/encoding_adapter.py::_default_encoding_dirs` now accepts the canonical
+  `VMLX_MODELS_DIR` env var alongside the historical typo'd `VMLINUX_MODELS_DIR`
+  (kept as a fallback for backward compatibility).
 
 ## 2.5.18 — 2026-05-04
 

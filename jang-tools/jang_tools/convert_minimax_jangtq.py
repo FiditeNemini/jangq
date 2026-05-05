@@ -47,16 +47,29 @@ SEED = 42
 
 try:
     # Canonical profile names: JANGTQ{N}. Legacy JANGTQ_2L / _4M etc accepted.
+    # JANGTQ_K is mixed-precision: 4-bit down_proj + 2-bit gate_proj/up_proj
+    # — same total budget as ~3-bit but quality close to 4-bit by spending
+    # the bits on the matmul whose output enters the residual stream.
     _PROFILE_BITS = {
         "JANGTQ2": 2, "JANGTQ_2L": 2, "JANGTQ_2S": 2,
         "JANGTQ3": 3, "JANGTQ_3L": 3, "JANGTQ_3S": 3,
         "JANGTQ4": 4, "JANGTQ_4M": 4, "JANGTQ_4K": 4,
+        "JANGTQ_K": "mixed", "JANGTQK": "mixed",
     }
     _PROFILE_NORM = PROFILE.upper()
     if _PROFILE_NORM not in _PROFILE_BITS:
         raise ValueError(f"unknown profile {PROFILE!r}; expected one of {sorted(_PROFILE_BITS)}")
     EXPERT_BITS = _PROFILE_BITS[_PROFILE_NORM]
-    PROFILE = f"JANGTQ{EXPERT_BITS}"
+    if EXPERT_BITS == "mixed":
+        PROFILE = "JANGTQ_K"
+        # Per-projection bit map for mixed K profile.
+        # w1=gate_proj, w2=down_proj, w3=up_proj (MiniMax / Mixtral convention).
+        # down_proj gets 4-bit (more sensitive — output enters residual stream),
+        # gate_proj/up_proj get 2-bit (less sensitive — gated/multiplied).
+        _MIXED_W_BITS = {"w1": 2, "w2": 4, "w3": 2}
+    else:
+        _MIXED_W_BITS = None
+        PROFILE = f"JANGTQ{EXPERT_BITS}"
 
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -64,6 +77,23 @@ try:
         config = json.load(f)
     n_layers = config.get("num_hidden_layers", 62)
     n_experts = config.get("num_local_experts", 256)
+    hidden_size = config.get("hidden_size", 3072)
+    intermediate_size = config.get("intermediate_size", 1536)
+
+    # MiniMax-M2.7-Small ships 154 experts. That non-32-aligned router width
+    # is measurably slower in decode than the 160/192/256 expert shapes because
+    # every token runs gate → sigmoid+bias → top-k on the expert dimension.
+    # Pad to the next 32-expert boundary in the artifact itself instead of
+    # papering over it in vMLX. Dummy experts have zero gate rows and a large
+    # negative correction bias, so they are never selected and cannot affect
+    # output quality.
+    EXPERT_PAD_MULTIPLE = 32
+    n_experts_original = int(n_experts)
+    n_experts_padded = (
+        ((n_experts_original + EXPERT_PAD_MULTIPLE - 1) // EXPERT_PAD_MULTIPLE)
+        * EXPERT_PAD_MULTIPLE
+    )
+    expert_pad_count = n_experts_padded - n_experts_original
 
 
     # === Bit assignment ===
@@ -93,8 +123,17 @@ try:
         if "shared_expert" in name:
             return (8, "affine")
 
-        # Routed expert MLP (w1/w2/w3 = gate/down/up) — MXTQ EXPERT_BITS
+        # Routed expert MLP (w1/w2/w3 = gate/down/up) — MXTQ at the
+        # per-projection bit width. Mixed-K spends 4-bit on w2 (down_proj,
+        # output entering residual) and 2-bit on w1/w3 (gated activations).
         if "experts" in name and (".w1" in name or ".w2" in name or ".w3" in name):
+            if _MIXED_W_BITS is not None:
+                # Identify the projection
+                for proj_key, proj_bits in _MIXED_W_BITS.items():
+                    if f".{proj_key}." in name or name.endswith(f".{proj_key}.weight"):
+                        return (proj_bits, "mxtq")
+                # Fallback if naming surprised us
+                return (2, "mxtq")
             return (EXPERT_BITS, "mxtq")
 
         # Default — affine 8-bit (catch unmapped)
@@ -107,8 +146,17 @@ try:
     print("=" * 60)
     print(f"  Source: {SRC}")
     print(f"  Output: {OUT}")
-    print(f"  Layers: {n_layers}, Experts: {n_experts}")
-    print(f"  Profile: attn=affine-8, expert=mxtq-{EXPERT_BITS}, gate=fp16")
+    if expert_pad_count:
+        print(
+            f"  Layers: {n_layers}, Experts: {n_experts_original} "
+            f"→ {n_experts_padded} (router-aligned pad +{expert_pad_count})"
+        )
+    else:
+        print(f"  Layers: {n_layers}, Experts: {n_experts_original}")
+    if _MIXED_W_BITS is not None:
+        print(f"  Profile: attn=affine-8, expert=mxtq-mixed (down=4, gate/up=2), gate=fp16")
+    else:
+        print(f"  Profile: attn=affine-8, expert=mxtq-{EXPERT_BITS}, gate=fp16")
     print(flush=True)
 
     # Scan tensors
@@ -235,6 +283,12 @@ try:
             tensor = tensor.astype(np.float32)
 
         if method == "passthrough":
+            if expert_pad_count and tensor_name.endswith(".block_sparse_moe.gate.weight"):
+                pad = np.zeros((expert_pad_count, tensor.shape[1]), dtype=tensor.dtype)
+                tensor = np.concatenate([tensor, pad], axis=0)
+            elif expert_pad_count and tensor_name.endswith(".block_sparse_moe.e_score_correction_bias"):
+                pad = np.full((expert_pad_count,), -10000.0, dtype=tensor.dtype)
+                tensor = np.concatenate([tensor, pad], axis=0)
             t16 = tensor.astype(np.float16)
             add_tensor(tensor_name, t16)
             total_passthrough += 1
@@ -262,6 +316,38 @@ try:
         if (total_mxtq + total_affine) % 200 == 0:
             gc.collect()
 
+    # Add inert padded experts for non-32-aligned MiniMax variants. These
+    # tensors are never routed to because their e_score_correction_bias is
+    # -10000, but their presence lets mlx_lm instantiate and hydrate the model
+    # with the aligned `num_local_experts` written below.
+    if expert_pad_count:
+        vals_per_u32 = 32 // EXPERT_BITS
+        packed_hidden = (hidden_size + vals_per_u32 - 1) // vals_per_u32
+        packed_inter = (intermediate_size + vals_per_u32 - 1) // vals_per_u32
+        dummy_shapes = {
+            "w1": (intermediate_size, packed_hidden),
+            "w2": (hidden_size, packed_inter),
+            "w3": (intermediate_size, packed_hidden),
+        }
+        print(
+            f"\n  Adding {expert_pad_count} inert padded experts per layer "
+            f"({n_experts_original}→{n_experts_padded})",
+            flush=True,
+        )
+        for layer in range(n_layers):
+            for expert_id in range(n_experts_original, n_experts_padded):
+                for proj_name, shape in dummy_shapes.items():
+                    base = f"model.layers.{layer}.block_sparse_moe.experts.{expert_id}.{proj_name}"
+                    add_tensor(f"{base}.tq_packed", np.zeros(shape, dtype=np.uint32))
+                    add_tensor(
+                        f"{base}.tq_norms",
+                        np.zeros((shape[0],), dtype=np.float16),
+                    )
+                    add_tensor(
+                        f"{base}.tq_bits",
+                        np.array([EXPERT_BITS], dtype=np.uint8),
+                    )
+
     flush_shard()
 
     if skipped_resume > 0:
@@ -288,11 +374,54 @@ try:
     with open(OUT / "model.safetensors.index.json", "w") as f:
         json.dump(index, f, indent=2)
 
-    # Write config
+    # Write config — JANGTQ-PRESTACK spec metadata.
+    # bits=8 is the AFFINE default for non-routed weights. routed_expert_bits
+    # carries the routed-expert MXTQ width (or per-projection map for K).
     config.pop("quantization_config", None)
-    config["quantization"] = {"group_size": 64, "bits": EXPERT_BITS}
+    if _MIXED_W_BITS is not None:
+        # Mixed K profile — per-projection routed bits.
+        # `routed_expert_bits` is the dict; loaders that expect a scalar fall
+        # back to the dominant bits (4 = down_proj) for budget calculations.
+        routed_map = {
+            "gate_proj": _MIXED_W_BITS["w1"],
+            "down_proj": _MIXED_W_BITS["w2"],
+            "up_proj":   _MIXED_W_BITS["w3"],
+        }
+        mxtq_bits_top = {
+            "routed_expert": routed_map,
+            "attention": 8,
+            "shared_expert": 8,
+            "embed_tokens": 8,
+            "lm_head": 8,
+            "norms_router_biases": 16,
+        }
+        config["quantization"] = {
+            "bits": 8,                       # default for affine paths
+            "mode": "affine",
+            "group_size": 64,
+            "routed_expert_bits": routed_map,
+            "mxtq_bits": mxtq_bits_top,
+        }
+        config["mxtq_bits"] = mxtq_bits_top  # top-level for §418 fallback
+    else:
+        mxtq_bits_top = {
+            "routed_expert": EXPERT_BITS,
+            "attention": 8,
+            "shared_expert": 8,
+            "embed_tokens": 8,
+            "lm_head": 8,
+            "norms_router_biases": 16,
+        }
+        config["quantization"] = {
+            "bits": 8,
+            "mode": "affine",
+            "group_size": 64,
+            "routed_expert_bits": EXPERT_BITS,
+            "mxtq_bits": mxtq_bits_top,
+        }
+        config["mxtq_bits"] = mxtq_bits_top
     config["weight_format"] = "mxtq"
-    config["mxtq_bits"] = EXPERT_BITS
+    config["num_local_experts"] = n_experts_padded
     with open(OUT / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
@@ -307,19 +436,23 @@ try:
             "architecture": "minimax_m2",
         },
         "mxtq_seed": SEED,
-        "mxtq_bits": {
-            "attention": 8,
-            "shared_expert": 8,
-            "routed_expert": EXPERT_BITS,
-            "embed_tokens": 8,
-            "lm_head": 8,
-        },
+        "mxtq_bits": mxtq_bits_top,
         "quantization": {
             "method": "affine+mxtq",
             "group_size": 64,
-            "bits_default": EXPERT_BITS,
+            "bits_default": (
+                4 if _MIXED_W_BITS is not None else EXPERT_BITS
+            ),
         },
     }
+    if expert_pad_count:
+        jang_config["expert_padding"] = {
+            "original_num_local_experts": n_experts_original,
+            "padded_num_local_experts": n_experts_padded,
+            "multiple": EXPERT_PAD_MULTIPLE,
+            "dummy_bias": -10000.0,
+            "reason": "router decode speed alignment",
+        }
     # Stamp Tier-1 capabilities for vmlx CapabilityDetector. Idempotent.
     from jang_tools.capabilities import build_capabilities
     caps = build_capabilities(jang_config, config, OUT)
@@ -374,6 +507,51 @@ try:
                 print("  [osaurus-fix] tokenizer_class: TokenizersBackend → GPT2Tokenizer", flush=True)
         except Exception as _e:
             print(f"  [osaurus-fix] skipped: {_e}", flush=True)
+
+    # --- MiniMax M2 chat-template enable_thinking fix -----------------------------
+    # The official MiniMax-M2.7 chat_template.jinja unconditionally appends
+    # `]~b]ai\n<think>\n` at the generation prompt — there is no
+    # `{% if enable_thinking %}` switch, so callers cannot disable reasoning.
+    # The patched version (synced with JANG_2L 2026-04-14) wraps the `<think>`
+    # injection in `{%- if enable_thinking is defined and enable_thinking is
+    # false -%}{%- else -%}{{- '<think>' ~ '\n' }}{%- endif -%}`. Apply that
+    # patch in-place if the broken pattern is detected. Idempotent.
+    _ct_path = OUT / "chat_template.jinja"
+    if _ct_path.exists():
+        try:
+            _ct_text = _ct_path.read_text()
+            _broken = "{{- ']~b]ai' ~ '\\n' ~ '<think>' ~ '\\n' }}"
+            _fixed = (
+                "{{- ']~b]ai' ~ '\\n' }}\n"
+                "    {%- if enable_thinking is defined and enable_thinking is false -%}\n"
+                "    {%- else -%}\n"
+                "    {{- '<think>' ~ '\\n' }}\n"
+                "    {%- endif -%}"
+            )
+            if _broken in _ct_text and _fixed not in _ct_text:
+                _ct_text = _ct_text.replace(_broken, _fixed)
+                _ct_path.write_text(_ct_text)
+                print(
+                    "  [minimax-fix] chat_template.jinja patched: "
+                    "enable_thinking switch added (was unconditionally forced ON)",
+                    flush=True,
+                )
+            # Always inline into tokenizer_config["chat_template"] so engines
+            # that read inline (Swift swift-transformers, vMLX engine) get the
+            # same template the standalone .jinja file ships.
+            with open(_tok_cfg) as f:
+                _tc = json.load(f)
+            if _tc.get("chat_template") != _ct_text:
+                _tc["chat_template"] = _ct_text
+                with open(_tok_cfg, "w") as f:
+                    json.dump(_tc, f, indent=2, ensure_ascii=False)
+                print(
+                    "  [minimax-fix] tokenizer_config.json: "
+                    "chat_template inlined (matches chat_template.jinja)",
+                    flush=True,
+                )
+        except Exception as _e:
+            print(f"  [minimax-fix] chat-template patch skipped: {_e}", flush=True)
 
     # Build Swift runtime sidecar so Swift runtimes (vmlx-swift-lm, vmlxctl,
     # Osaurus) can load without fatalError. Python loader doesn't need it, but

@@ -57,6 +57,15 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "gemma3":           ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3_text":      ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3n":          ("gemma4",      "gemma4",      "gemma4",   False, "hybrid"),
+    # Bailing v2.5 (Ling) — hybrid MLA + Lightning Linear Attention + MoE + MTP.
+    # think_in_template=False because Ling's chat template defaults to
+    # `detailed thinking off` and only opens `<think>` when the user supplies
+    # `detailed thinking on` in their system message. With think_in_template=True,
+    # the deepseek_r1 reasoning parser assumes the assistant turn opens INSIDE
+    # a think block and routes ALL output to `reasoning_content`, leaving
+    # `content` null — visible as empty UI bubbles on thinking-off prompts.
+    "bailing_hybrid":   ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
+    "bailing_moe_v2_5": ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
     # Llama 3.x (dense) — base + instruct
     "llama":            ("llama",       None,          "llama",    False, "kv"),
     "llama3":           ("llama",       None,          "llama",    False, "kv"),

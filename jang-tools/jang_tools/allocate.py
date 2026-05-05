@@ -321,7 +321,12 @@ MLP_ASYMMETRY_FLOORS = {
 _MLP_ASYMMETRY_MIN_EXPERTS = 256
 
 
-def _apply_mlp_asymmetry_floor(name: str, bits: int, num_experts: int) -> int:
+def _apply_mlp_asymmetry_floor(
+    name: str,
+    bits: int,
+    num_experts: int,
+    base_bits: int = 0,
+) -> int:
     """
     Apply MLP asymmetry bit floors for 256+ expert models.
 
@@ -333,12 +338,33 @@ def _apply_mlp_asymmetry_floor(name: str, bits: int, num_experts: int) -> int:
     GLM-5.1 (256 experts) + MiniMax M2.7 (256 experts) + Qwen3.6 (256 routed)
     all need the floor to avoid repetition loops at 2-bit MLPs. Threshold
     constant is now an exported sentinel so a test can pin it.
+
+    K-quant compensation guard (2026-05-04): when ``base_bits >= 4`` (i.e. the
+    profile's namesake bits is 4 or more), routed expert ``up_proj`` / ``w3``
+    are not allowed to drop below ``base_bits`` during budget compensation.
+    Without this guard, JANG_4K on 256-expert MoE pushes a fraction of routed
+    experts to 3-bit; rarely-activated experts at 3-bit produce repetition
+    loops on trivial prompts. The guard makes JANG_4K behave like JANG_4M on
+    MoE (slight ~2 % overshoot vs strict budget) while keeping the existing
+    K-quant behaviour for dense models and 2-/3-bit profiles where dropping
+    routed ``up_proj`` to a smaller width is intentional.
     """
     if num_experts < _MLP_ASYMMETRY_MIN_EXPERTS:
         return bits
     name_lower = name.lower()
     if "shared_expert" in name_lower:
         return bits  # shared_expert is already CRITICAL, don't touch
+    if base_bits >= 4:
+        # K-quant compensation guard. Mirrors JANG_4M behaviour on 256+ MoE:
+        # routed expert MLP tensors (gate / up / down) stay at the namesake
+        # bit width instead of being downgraded to fund the CRITICAL boost.
+        for component in (
+            "gate_proj", "gate_up_proj", "w1",
+            "up_proj", "w3",
+            "down_proj", "w2",
+        ):
+            if _is_routed_expert_mlp(name_lower, component):
+                return max(bits, base_bits)
     for component, floor in MLP_ASYMMETRY_FLOORS.items():
         if component in name_lower:
             return max(bits, floor)
@@ -633,8 +659,13 @@ def allocate_bits_budget(
             for name, n_blocks in compress_tensors:
                 if remaining <= 0:
                     break
-                # Apply MLP asymmetry floor: don't downgrade below the floor
-                floor = _apply_mlp_asymmetry_floor(name, lower_bits, num_experts)
+                # Apply MLP asymmetry floor: don't downgrade below the floor.
+                # Threading ``base_bits`` lets the floor protect routed
+                # ``up_proj`` / ``w3`` at the namesake bit width for K-quant
+                # profiles (JANG_4K and above) on 256+ expert MoE models.
+                floor = _apply_mlp_asymmetry_floor(
+                    name, lower_bits, num_experts, base_bits=base_bits
+                )
                 if floor > lower_bits:
                     continue  # Can't downgrade this tensor (floor prevents it)
                 savings = (base_bits - lower_bits) * n_blocks
@@ -1041,7 +1072,9 @@ def allocate_bits_budget_compact(
             for name, n_blocks in compress_tensors:
                 if remaining <= 0:
                     break
-                floor = _apply_mlp_asymmetry_floor(name, lower_bits, num_experts)
+                floor = _apply_mlp_asymmetry_floor(
+                    name, lower_bits, num_experts, base_bits=base_bits
+                )
                 if floor > lower_bits:
                     continue
                 savings = (base_bits - lower_bits) * n_blocks
