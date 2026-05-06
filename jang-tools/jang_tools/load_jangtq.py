@@ -611,15 +611,27 @@ def _hydrate_dsv4_jangtq_streaming(
         _orig_switchglu_call = SwitchGLU.__call__
         _decode_compiled = {}
 
-        def _get_compiled_decode(in_f, out_f, bits, k, swiglu_limit=0.0):
+        def _get_compiled_decode(in_f, out_f, bits, k, swiglu_limit=0.0, dp_bits=None):
+            # Codex 2026-05-06 + external report (jang-tools 2.5.23 MiniMax-
+            # M2.7-JANGTQ_K end-to-end test): JANGTQ_K is a mixed-bit profile
+            # (gate=2 / up=2 / down=4). Without ``dp_bits`` the gather_dn
+            # kernel below builds with gate_proj's bit width, then unpacks
+            # down_proj.packed at the wrong stride — invisible on uniform-bit
+            # bundles (4M, CRACK), but on JANGTQ_K it produces silent garbage
+            # that compounds layer-by-layer into multilingual token salad.
+            # Default ``dp_bits=None`` falls back to ``bits`` so uniform-bit
+            # callers get the previous behavior unchanged.
+            if dp_bits is None:
+                dp_bits = bits
             limit_milli = int(round(float(swiglu_limit or 0.0) * 1000.0))
-            cache_key = (in_f, out_f, bits, k, limit_milli)
+            cache_key = (in_f, out_f, bits, dp_bits, k, limit_milli)
             if cache_key in _decode_compiled:
                 return _decode_compiled[cache_key]
             fused_gu = make_fused_gate_up_swiglu_decode(
                 in_f, out_f, bits, k, swiglu_limit=swiglu_limit
             )
-            gather_dn = make_gather_tq_decode_per_row(out_f, in_f, bits, k)
+            # NB: gather_dn uses dp_bits, NOT bits.
+            gather_dn = make_gather_tq_decode_per_row(out_f, in_f, dp_bits, k)
 
             def _mlp(x_flat, pg, ng, pu, nu, pd, nd, cb_gate, cb_down, signs_in, signs_dn, idx_flat):
                 x_rot = hadamard_rotate_metal(x_flat, signs_in)
@@ -648,7 +660,8 @@ def _hydrate_dsv4_jangtq_streaming(
             if can_fast and not getattr(self, "training", False):
                 idx_flat = indices.reshape(-1).astype(mx.uint32)
                 compiled_mlp = _get_compiled_decode(
-                    gp.in_features, gp.out_features, gp.bits, k, swiglu_limit
+                    gp.in_features, gp.out_features, gp.bits, k, swiglu_limit,
+                    dp_bits=dp.bits,
                 )
                 y = compiled_mlp(
                     x_flat.astype(mx.float32),

@@ -43,7 +43,9 @@ that path lives in the bigger ``_hydrate_jangtq_model``.)
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+import os
+import re
+from typing import Any, Dict, List
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -118,8 +120,24 @@ def hydrate_jangtq(
         else:
             regular[k] = v
 
+    # Codex 2026-05-06: same hard-fail-on-skip contract as load_jangtq.py:977.
+    # MTP / eh_proj / shared_head / embed_tokens.tq_* are documented
+    # non-inference paths and may legitimately not have modules; everything
+    # else MUST swap or we silently fp16-fallback weights and produce garbage.
+    _allowlist_patterns = (
+        re.compile(r"\.mtp\."),
+        re.compile(r"\.eh_proj\."),
+        re.compile(r"\.shared_head\."),
+        re.compile(r"\.embed_tokens\.tq_"),
+    )
+    _allow_hydrate_skips = os.environ.get(
+        "VMLX_JANGTQ_ALLOW_HYDRATE_SKIPS", ""
+    ).lower() in ("1", "true", "yes")
+
     n_swapped = 0
     n_skipped = 0
+    _missed_required: List[str] = []
+
     for base, parts in tq_groups.items():
         packed = parts.get("packed")
         norms = parts.get("norms")
@@ -131,14 +149,51 @@ def hydrate_jangtq(
         try:
             existing = _walk_attr(model, base)
         except (AttributeError, IndexError, KeyError):
-            n_skipped += 1
+            # Module not in the inference model. Allowlisted paths are OK to
+            # skip silently (they're documented non-inference). Anything else
+            # is a hard fail — silent skip used to let Ling/MiniMax/DSV4 load
+            # with most TQ tensors fp16-fallback'd, producing garbage at temp=0.
+            if any(pat.search(base) for pat in _allowlist_patterns):
+                n_skipped += 1
+                continue
+            if _allow_hydrate_skips:
+                n_skipped += 1
+                continue
+            _missed_required.append(base)
             continue
 
-        vals_per_u32 = 32 // bits
+        # Codex 2026-05-06: in_features must NOT be derived blindly from
+        # packed_cols * (32 // bits). For 3-bit (and any non-power-of-2 width)
+        # the packer leaves 32 % bits bits unused per u32, so packed_cols *
+        # (32 // bits) overshoots the true in_features. Read the expected
+        # value from the existing nn.Linear / SwitchLinear that's about to be
+        # replaced; cross-check against the derived value for power-of-2
+        # widths and prefer the explicit attribute on mismatch.
+        derived_vals_per_u32 = 32 // max(bits, 1)
+        expected_in = (
+            getattr(existing, "in_features", None)
+            or getattr(existing, "input_dims", None)
+        )
+        if not isinstance(expected_in, int) or expected_in <= 0:
+            expected_in = None
+
         if packed.ndim == 3:
             # Pre-stacked SwitchLinear: shape (n_experts, out, packed_in)
             n_experts, out_features, packed_cols = packed.shape
-            in_features = packed_cols * vals_per_u32
+            derived_in = int(packed_cols) * derived_vals_per_u32
+            in_features = expected_in if expected_in is not None else derived_in
+            if expected_in is not None and expected_in != derived_in:
+                # Power-of-2 widths should match exactly; mismatch indicates
+                # corrupt bundle. Non-power-of-2 widths (3-bit) legitimately
+                # diverge — log the gap so it's visible in noticeable cases.
+                if bits in (2, 4, 8) and not _allow_hydrate_skips:
+                    raise RuntimeError(
+                        f"[jangtq_hydrate] {base}: in_features mismatch "
+                        f"(expected={expected_in}, derived={derived_in}, "
+                        f"bits={bits}, packed_cols={packed_cols}). "
+                        f"Bundle is corrupt; refusing to swap. "
+                        f"Override: VMLX_JANGTQ_ALLOW_HYDRATE_SKIPS=1"
+                    )
             new_module = TurboQuantSwitchLinear(
                 in_features=in_features,
                 out_features=out_features,
@@ -150,7 +205,17 @@ def hydrate_jangtq(
         elif packed.ndim == 2:
             # Plain Linear: shape (out, packed_in)
             out_features, packed_cols = packed.shape
-            in_features = packed_cols * vals_per_u32
+            derived_in = int(packed_cols) * derived_vals_per_u32
+            in_features = expected_in if expected_in is not None else derived_in
+            if expected_in is not None and expected_in != derived_in:
+                if bits in (2, 4, 8) and not _allow_hydrate_skips:
+                    raise RuntimeError(
+                        f"[jangtq_hydrate] {base}: in_features mismatch "
+                        f"(expected={expected_in}, derived={derived_in}, "
+                        f"bits={bits}, packed_cols={packed_cols}). "
+                        f"Bundle is corrupt; refusing to swap. "
+                        f"Override: VMLX_JANGTQ_ALLOW_HYDRATE_SKIPS=1"
+                    )
             new_module = TurboQuantLinear(
                 in_features=in_features,
                 out_features=out_features,
@@ -159,8 +224,13 @@ def hydrate_jangtq(
                 seed=mxtq_seed,
             )
         else:
-            # Unknown shape — skip.
-            n_skipped += 1
+            # Unknown shape — collect as missed so caller sees it.
+            if _allow_hydrate_skips or any(
+                pat.search(base) for pat in _allowlist_patterns
+            ):
+                n_skipped += 1
+            else:
+                _missed_required.append(base)
             continue
 
         new_module.packed = packed
@@ -170,6 +240,24 @@ def hydrate_jangtq(
         # to free the placeholder zeros that __init__ allocated.
         del existing
         n_swapped += 1
+
+    # Hard fail if anything required was missed. This mirrors the
+    # load_jangtq.py:977 contract that landed in jang 2.5.25.
+    if _missed_required:
+        sample = ", ".join(_missed_required[:8])
+        more = (
+            f" (+{len(_missed_required) - 8} more)"
+            if len(_missed_required) > 8
+            else ""
+        )
+        raise RuntimeError(
+            f"[jangtq_hydrate] {len(_missed_required)} TQ tensor(s) "
+            f"reference modules absent from the inference model: {sample}{more}. "
+            f"This usually means the bundle's TQ keys don't align with the "
+            f"loaded model class. To proceed anyway (silently fp16-fallback "
+            f"these weights — output may be garbage at temp=0), set "
+            f"VMLX_JANGTQ_ALLOW_HYDRATE_SKIPS=1."
+        )
 
     # Telemetry — caller can ignore but useful when debugging
     # missing-parameter errors.
