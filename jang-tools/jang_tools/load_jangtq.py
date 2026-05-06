@@ -1105,9 +1105,19 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         # P15: compiled decode helpers, cached per (in_f, out_f, bits, K).
         _DECODE_COMPILED = {}
 
-        def _get_compiled_decode(in_f, out_f, bits, K, swiglu_limit=0.0):
+        def _get_compiled_decode(in_f, out_f, bits, K, swiglu_limit=0.0, dp_bits=None):
+            # JANGTQ_K (per-projection mixed bits): gate_proj/up_proj share `bits`
+            # (fused gate+up kernel requires gate==up), but down_proj may differ —
+            # MiniMax-M2.7-JANGTQ_K ships gate=2, up=2, down=4. Without splitting
+            # the gather kernel's bit width, the down_proj's 4-bit packed tensors
+            # would be unpacked as 2-bit → wrong indices into the (correct) 4-bit
+            # codebook → garbage output. dp_bits=None defaults to the legacy
+            # uniform-bits behavior (bits) so existing JANGTQ2/3/4 callers are
+            # unchanged byte-for-byte.
+            if dp_bits is None:
+                dp_bits = bits
             limit_milli = int(round(float(swiglu_limit or 0.0) * 1000.0))
-            key = (in_f, out_f, bits, K, limit_milli)
+            key = (in_f, out_f, bits, dp_bits, K, limit_milli)
             if key in _DECODE_COMPILED:
                 return _DECODE_COMPILED[key]
             fused_gu = make_fused_gate_up_swiglu_decode(
@@ -1116,7 +1126,7 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             # P19 (fused rot+gather) was tested but regressed 44.6 → 34.2 tok/s
             # in real decode despite +3 μs microbench win. Likely shmem/occupancy
             # interaction with other kernels. Reverted to split path.
-            gather_dn = make_gather_tq_decode_per_row(out_f, in_f, bits, K)
+            gather_dn = make_gather_tq_decode_per_row(out_f, in_f, dp_bits, K)
 
             def _mlp(x_flat, pg, ng, pu, nu, pd, nd, cb_gate, cb_down, signs_in, signs_dn, idx):
                 x_rot = hadamard_rotate_metal(x_flat, signs_in)
@@ -1151,8 +1161,14 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
 
             if can_fast:
                 idx_flat = indices.reshape(-1).astype(mx.uint32)
+                # JANGTQ_K: dp.bits may differ from gp.bits (e.g. 4 vs 2 on
+                # MiniMax-M2.7-JANGTQ_K). Pass both so the gather_dn kernel
+                # built inside _get_compiled_decode unpacks down_proj weights
+                # at the correct bit width. Cache key includes both bits, so
+                # JANGTQ2 (uniform) and JANGTQ_K layers don't share kernels.
                 compiled_mlp = _get_compiled_decode(
-                    gp.in_features, gp.out_features, gp.bits, K, _swiglu_limit
+                    gp.in_features, gp.out_features, gp.bits, K, _swiglu_limit,
+                    dp_bits=dp.bits,
                 )
                 y = compiled_mlp(
                     x_flat.astype(mx.float32),
