@@ -79,9 +79,10 @@ def collect_activation_norms_mlx(
         calibration_texts = _default_calibration_texts()
     calibration_texts = calibration_texts[:n_samples]
 
-    inner = model.model
-    embed = inner['embed_tokens']
-    n_layers = len(inner['layers'])
+    inner = _inner_model(model)
+    embed = _get_module(inner, "embed_tokens")
+    layers = _get_module(inner, "layers")
+    n_layers = len(layers)
 
     act_stats = {}
 
@@ -94,10 +95,10 @@ def collect_activation_norms_mlx(
         mx.eval(h)
 
         for layer_idx in range(n_layers):
-            layer = inner['layers'][layer_idx]
+            layer = layers[layer_idx]
 
             # Capture input to attention block (after input_layernorm)
-            normed = layer['input_layernorm'](h)
+            normed = _get_module(layer, "input_layernorm")(h)
             mx.eval(normed)
             act_np = np.array(normed[0].astype(mx.float32))
             _accumulate(act_stats, f"layers.{layer_idx}.attn_input", act_np)
@@ -117,6 +118,29 @@ def collect_activation_norms_mlx(
 
     print(f"  Collected norms for {len(result)} layer inputs")
     return result
+
+
+def _inner_model(model):
+    """Return the layer-owning object across mlx-lm wrapper variants.
+
+    Older mlx-lm CausalLM wrappers expose `model.model`; newer Gemma/MoE
+    classes can return the actual layer-owning `Model` directly. Conversion
+    code should accept both instead of assuming one wrapper shape.
+    """
+    candidate = getattr(model, "model", None)
+    if candidate is not None:
+        return candidate
+    return model
+
+
+def _get_module(container, name: str):
+    if isinstance(container, dict):
+        return container[name]
+    try:
+        return container[name]
+    except Exception:
+        pass
+    return getattr(container, name)
 
 
 def _accumulate(acc: dict, key: str, activations: np.ndarray) -> None:

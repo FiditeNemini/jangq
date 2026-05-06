@@ -709,7 +709,11 @@ def _hydrate_dsv4_jangtq_streaming(
             flush=True,
         )
     except Exception as e:
-        print(f"  DSV4 SwitchGLU fusion skipped: {e}", flush=True)
+        raise RuntimeError(
+            "DSV4 JANGTQ SwitchGLU fusion failed. DSV4 routed experts require "
+            "the fused limited-SwiGLU path; refusing to continue with stock "
+            f"SwitchGLU. Original error: {e}"
+        ) from e
 
     from jang_tools.loader import _fix_quantized_bits
     _fix_quantized_bits(model, {})
@@ -1160,21 +1164,9 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     #     Calls the dynamic-shape-detection helpers
     #     `fused_gate_up_swiglu_matmul` + `gather_tq_matmul` directly.
     #
-    # Class-level monkey-patch because Python looks up `__call__` on the type.
-    # Env override: JANGTQ_DISABLE_FUSED_SWITCHGLU=1 skips the patch entirely
-    # and leaves mlx_lm's stock SwitchGLU.__call__ (per-projection path) in
-    # place. Useful for runtime debugging — if loops disappear with this
-    # flag set, the bug is in the fused kernel pipeline (Hadamard rotate →
-    # gate/up SwiGLU → rotate → gather down) rather than API/cache plumbing.
-    _disable_fused = os.environ.get("JANGTQ_DISABLE_FUSED_SWITCHGLU", "0") in ("1", "true", "yes")
+    # Class-level patch because Python looks up `__call__` on the type.
+    # Production rule: fused SwitchGLU is mandatory for JANGTQ.
     try:
-        if _disable_fused:
-            print(
-                "  SwitchGLU fusion DISABLED via JANGTQ_DISABLE_FUSED_SWITCHGLU=1 "
-                "(stock mlx_lm per-projection path; debugging only)",
-                flush=True,
-            )
-            raise RuntimeError("fused-switchglu disabled by env")
         from mlx_lm.models.switch_layers import SwitchGLU, _gather_sort, _scatter_unsort
         from jang_tools.turboquant.fused_gate_up_kernel import (
             fused_gate_up_matmul, fused_gate_up_swiglu_matmul,
@@ -1302,7 +1294,11 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         )
         print(f"  Patched SwitchGLU class for fused gate+up ({patched} TQ instances)", flush=True)
     except Exception as _e:
-        print(f"  SwitchGLU fusion skipped: {_e}", flush=True)
+        raise RuntimeError(
+            "JANGTQ SwitchGLU fusion failed. This fast path is mandatory for "
+            "correct JANGTQ routed-expert decoding; refusing to continue with "
+            f"stock SwitchGLU. Original error: {_e}"
+        ) from _e
 
     # P15: mx.compile ONLY pure router math (mlx_lm pattern — free function,
     # no closures over self, shapeless so prefill/decode share one graph).

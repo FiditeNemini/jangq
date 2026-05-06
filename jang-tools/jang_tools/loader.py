@@ -319,7 +319,14 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
     if _tq_cfg and _tq_cfg.get("enabled", False):
         try:
             from .turboquant.config import TurboQuantConfig, make_turboquant_cache
-            n_layers = len(model.layers)
+            try:
+                _native_cache = model.make_cache()
+                _native_cache_types = [type(c).__name__ for c in _native_cache]
+                n_layers = len(_native_cache)
+                del _native_cache
+            except Exception:
+                n_layers = len(model.layers)
+                _native_cache_types = []
             tq_config = TurboQuantConfig.from_jang_config(jang_cfg, n_layers)
             if tq_config:
                 _key_dim = _text_cfg.get("head_dim", 128)
@@ -331,20 +338,29 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
                 _layer_type_list = _text_cfg.get("layer_types", [])
                 _hybrid_pattern = _text_cfg.get("hybrid_override_pattern",
                                     _model_cfg.get("hybrid_override_pattern", ""))
+                try:
+                    _logical_layers = int(
+                        _text_cfg.get("num_hidden_layers")
+                        or _model_cfg.get("num_hidden_layers")
+                        or len(getattr(model, "layers", []) or [])
+                        or n_layers
+                    )
+                except Exception:
+                    _logical_layers = n_layers
                 if _layer_type_list:
                     # Qwen3.5 style: explicit layer_types list
                     _layer_types = [
                         "attention" if lt == "full_attention" else "ssm"
-                        for lt in _layer_type_list[:n_layers]
+                        for lt in _layer_type_list[:_logical_layers]
                     ]
-                    while len(_layer_types) < n_layers:
+                    while len(_layer_types) < _logical_layers:
                         _layer_types.append("attention")
                 elif _hybrid_pattern:
                     # Nemotron pattern: M=Mamba(SSM), *=attention, E=MoE(MLP), -=MLP
                     # Only M and * get cache entries. E and - are pure MLP (no cache).
                     # Must match model's make_cache() which skips E/- layers.
                     _layer_types = []
-                    for ch in _hybrid_pattern[:n_layers]:
+                    for ch in _hybrid_pattern[:_logical_layers]:
                         if ch == "M":
                             _layer_types.append("ssm")
                         elif ch == "*":
@@ -352,10 +368,31 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
                         # E and - layers: no cache entry (skip)
                 else:
                     _layer_types = ["attention"] * n_layers
+                if len(_layer_types) != n_layers:
+                    if _native_cache_types:
+                        _layer_types = [
+                            "ssm" if t in ("ArraysCache", "MambaCache", "BatchMambaCache")
+                            else "attention"
+                            for t in _native_cache_types
+                        ]
+                        logger.warning(
+                            "  TurboQuant cache layout inferred from native "
+                            "make_cache types (%d slots)",
+                            n_layers,
+                        )
+                    else:
+                        logger.warning(
+                            "  TurboQuant cache layout mismatch: detector produced "
+                            "%d entries for %d native cache slots; falling back "
+                            "to all-attention",
+                            len(_layer_types),
+                            n_layers,
+                        )
+                        _layer_types = ["attention"] * n_layers
                 _n_attn = sum(1 for t in _layer_types if t == "attention")
                 _n_ssm = sum(1 for t in _layer_types if t == "ssm")
                 _n_cache = len(_layer_types)  # may be < n_layers for Nemotron
-                _n_skip = n_layers - _n_cache
+                _n_skip = max(0, _logical_layers - _n_cache)
                 if _n_ssm > 0 or _n_skip > 0:
                     logger.info(f"  Hybrid model: {_n_attn} attention + {_n_ssm} SSM"
                                 + (f" + {_n_skip} no-cache" if _n_skip else "") + " layers")
