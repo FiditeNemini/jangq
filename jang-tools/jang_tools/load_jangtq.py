@@ -968,6 +968,31 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         else:
             setattr(cur, last, new_mod)
 
+    # Hydrate-skip allowlist (Codex 2026-05-05 #3): the legacy "Skip (not in
+    # model)" branch silently dropped TQ tensors whose target module didn't
+    # exist on the loaded mlx_lm class. That's correct ONLY for documented
+    # non-inference paths (multi-token-prediction heads, training-only
+    # auxiliaries). Any other miss means the loader is silently
+    # under-replacing — a model loads but routes through fp16 fallback or
+    # raises mid-decode, both worse than failing fast at load time.
+    #
+    # Allowlist regexes match the substring of the missing key. Anything
+    # NOT matching one of these → hard-fail with VerificationError-style
+    # context. Override: VMLX_JANGTQ_ALLOW_HYDRATE_SKIPS=1 keeps legacy
+    # silent-skip behavior for emergency loads (NOT recommended).
+    _hydrate_allowlist = (
+        # Multi-Token-Prediction layer (DSV4) — used only at training time.
+        re.compile(r"\.mtp\."),
+        re.compile(r"\.eh_proj\."),
+        re.compile(r"\.shared_head\."),
+        # Embedding tied to lm_head — handled via .embed_tokens path.
+        re.compile(r"\.embed_tokens\.tq_"),
+    )
+    _allow_skips = os.environ.get(
+        "VMLX_JANGTQ_ALLOW_HYDRATE_SKIPS", "0"
+    ).lower() in ("1", "true", "yes")
+    _missed_required: list[str] = []
+
     for base, parts in list(tq_groups.items()):
         packed = parts["packed"]
         norms = parts["norms"]
@@ -977,7 +1002,19 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         try:
             existing = get_module(model, base)
         except (AttributeError, IndexError, KeyError):
-            print(f"    Skip (not in model): {base}", flush=True)
+            allowlisted = any(p.search(base) for p in _hydrate_allowlist)
+            if allowlisted:
+                print(f"    Skip allowlisted (not in model): {base}", flush=True)
+                continue
+            if _allow_skips:
+                print(
+                    f"    Skip (env override; not in model): {base}",
+                    flush=True,
+                )
+                continue
+            # Real silent miss — defer hard-fail to end of loop so all
+            # missing modules are reported at once.
+            _missed_required.append(base)
             continue
 
         # Read the canonical in_features off the pre-replacement module rather
@@ -1019,6 +1056,27 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         n_replaced += 1
 
     print(f"  Replaced {n_replaced} modules", flush=True)
+
+    # Hydrate-skip enforcement (Codex 2026-05-05 #3). Any TQ keys whose
+    # target module is missing AND not on the documented allowlist
+    # (mtp/eh_proj/shared_head/embed_tokens) are real silent-misses.
+    # Hard-fail at load time so they don't manifest as fp16-fallback
+    # garbage or mid-decode crashes.
+    if _missed_required:
+        head = _missed_required[:8]
+        more = (
+            f" (+{len(_missed_required)-8} more)"
+            if len(_missed_required) > 8
+            else ""
+        )
+        raise RuntimeError(
+            f"JANGTQ load: {len(_missed_required)} TQ tensor groups have no "
+            f"target module on the loaded model class — this means the model "
+            f"would silently route through fp16 fallback or crash mid-decode. "
+            f"First {len(head)}: {head}{more}. Override (NOT recommended): "
+            f"VMLX_JANGTQ_ALLOW_HYDRATE_SKIPS=1."
+        )
+
     del tq_groups
     gc.collect()
 
@@ -1090,7 +1148,20 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     #     `fused_gate_up_swiglu_matmul` + `gather_tq_matmul` directly.
     #
     # Class-level monkey-patch because Python looks up `__call__` on the type.
+    # Env override: JANGTQ_DISABLE_FUSED_SWITCHGLU=1 skips the patch entirely
+    # and leaves mlx_lm's stock SwitchGLU.__call__ (per-projection path) in
+    # place. Useful for runtime debugging — if loops disappear with this
+    # flag set, the bug is in the fused kernel pipeline (Hadamard rotate →
+    # gate/up SwiGLU → rotate → gather down) rather than API/cache plumbing.
+    _disable_fused = os.environ.get("JANGTQ_DISABLE_FUSED_SWITCHGLU", "0") in ("1", "true", "yes")
     try:
+        if _disable_fused:
+            print(
+                "  SwitchGLU fusion DISABLED via JANGTQ_DISABLE_FUSED_SWITCHGLU=1 "
+                "(stock mlx_lm per-projection path; debugging only)",
+                flush=True,
+            )
+            raise RuntimeError("fused-switchglu disabled by env")
         from mlx_lm.models.switch_layers import SwitchGLU, _gather_sort, _scatter_unsort
         from jang_tools.turboquant.fused_gate_up_kernel import (
             fused_gate_up_matmul, fused_gate_up_swiglu_matmul,

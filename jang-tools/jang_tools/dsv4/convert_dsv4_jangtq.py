@@ -96,6 +96,13 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
         # JANGTQ format: MXTQ codebook for 2-bit, affine for 3+.
         if FORMAT == "jang":
             return profile_bits, "affine", 32
+        # V3 variant: hash-routed layers 0-2 get 4-bit MXTQ floor (no soft
+        # routing → quantization noise can't average out), rest at profile_bits.
+        if VARIANT == "V3":
+            m = re.match(r"^layers\.(\d+)\.", n)
+            if m and int(m.group(1)) < 3:
+                return 4, "mxtq", 0
+            return profile_bits, "mxtq", 0
         if profile_bits in (3, 4, 5, 6, 8):
             return profile_bits, "affine", 32
         return profile_bits, "mxtq", 0
@@ -141,10 +148,12 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
         profile_name = f"JANG_{profile_bits}L"
     elif VARIANT == "K":
         profile_name = "JANGTQ_K" if profile_bits == 2 else f"JANGTQ{profile_bits}_K"
+    elif VARIANT == "V3":
+        profile_name = "JANGTQ_V3" if profile_bits == 2 else f"JANGTQ{profile_bits}_V3"
     else:
         profile_name = f"JANGTQ{profile_bits}"
     print(f"[convert] profile: {profile_name} (format={FORMAT}, variant={VARIANT})")
-    drop_mtp = (VARIANT == "K")
+    drop_mtp = (VARIANT in ("K", "V3"))
     if drop_mtp:
         print("[convert] MTP head: DROP (variant=K, ~6.5B params unused at decode)")
     print(f"[convert] scanning for .weight keys (skip sibling .scale)...")
@@ -486,9 +495,11 @@ def main() -> int:
                     help="Routed-expert bit count.")
     ap.add_argument("--format", default="jangtq", choices=("jang", "jangtq"),
                     help="jang=standard affine everywhere; jangtq=MXTQ for 2-bit routed.")
-    ap.add_argument("--variant", default="std", choices=("std", "K"),
+    ap.add_argument("--variant", default="std", choices=("std", "K", "V3"),
                     help="std=legacy with MTP shipped; K=MAX-QUALITY 70-80GB "
-                         "profile (drops MTP head, all non-routed stay 8-bit).")
+                         "profile (drops MTP head, all non-routed stay 8-bit); "
+                         "V3=K + hash layers 0-2 routed lifted to 4-bit MXTQ "
+                         "(target ~80% MMLU, ~80GB).")
     args = ap.parse_args()
     global FORMAT, VARIANT
     FORMAT = args.format

@@ -273,7 +273,12 @@ def main(src=None, out=None, awq_scales_file=None):
 
     # Config / jang_config
     config.pop("quantization_config", None)
-    config["quantization"] = {"group_size": 64, "bits": 2}
+    # quantization.bits is the AFFINE-fallback default (control plane:
+    # attention/embed/head/shared_expert), NOT routed-expert bits. Codex
+    # 2026-05-05 #8: every JANGTQ converter should write affine 8 here.
+    # The actual per-tensor routed bits live in jang_config.mxtq_bits.
+    config["quantization"] = {"group_size": 64, "bits": 8}
+    config["weight_format"] = "mxtq"
     jang_config = {
         "weight_format": "mxtq",
         "profile": "JANGTQ_2L",

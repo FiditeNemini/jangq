@@ -42,6 +42,9 @@ from safetensors.numpy import save_file
 _ap = argparse.ArgumentParser(add_help=False)
 _ap.add_argument("--progress", choices=["json", "off"], default="off")
 _ap.add_argument("--quiet-text", action="store_true")
+# Codex 2026-05-05 #2: prestack post-process for spec compliance.
+_ap.add_argument("--no-prestack", action="store_true",
+                 help="skip rebundle post-process (debug only; produces non-spec bundle)")
 _args, _rest = _ap.parse_known_args()
 sys.argv = [sys.argv[0]] + _rest
 
@@ -363,7 +366,11 @@ try:
     # the per-expert layout on disk so a future omni runtime can re-read.
     out_config["weight_format"] = "mxtq"
     out_config["mxtq_bits"] = EXPERT_BITS
-    out_config["quantization"] = {"group_size": 64, "bits": EXPERT_BITS}
+    # Codex 2026-05-05 #8: quantization.bits is the affine control-plane
+    # default, NOT routed expert bits. Routed bits live in
+    # jang_config.mxtq_bits (and out_config.mxtq_bits above for §418
+    # backwards compat). Use 8 as the affine fallback floor.
+    out_config["quantization"] = {"group_size": 64, "bits": 8}
     # Stamp source provenance
     out_config["_jang_source"] = full_config.get("model_type", "NemotronH_Nano_Omni_Reasoning_V3")
     out_config["_jang_modality"] = "text"  # vision/audio dropped in this bundle
@@ -461,6 +468,26 @@ try:
         print(f"  [sidecar] FAILED: {_e} — run "
               f"`python3 -m jang_tools.build_jangtq_sidecar {OUT}` manually before upload",
               flush=True)
+
+    if not _args.no_prestack:
+        print(f"\n  Prestacking (JANGTQ-PRESTACK-SPEC compliance)...")
+        try:
+            from jang_tools.rebundle_jangtq_stacked import rebundle
+            import shutil as _shutil
+            _tmp = OUT.parent / (OUT.name + ".prestack_tmp")
+            if _tmp.exists():
+                _shutil.rmtree(_tmp)
+            rebundle(OUT, _tmp)
+            _backup = OUT.parent / (OUT.name + ".per_expert_backup")
+            if _backup.exists():
+                _shutil.rmtree(_backup)
+            OUT.rename(_backup)
+            _tmp.rename(OUT)
+            _shutil.rmtree(_backup)
+            print(f"  Prestack complete.")
+        except Exception as _re:
+            print(f"  [prestack] FAILED: {_re} — bundle remains per-expert layout.",
+                  flush=True)
 
     print(f"\n  Done!")
     print(f"  MXTQ tensors:        {total_mxtq}")

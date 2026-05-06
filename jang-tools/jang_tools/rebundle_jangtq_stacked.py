@@ -136,6 +136,24 @@ def match_per_expert_rule(base: str) -> tuple[str, int, str, str] | None:
     return None
 
 
+def rebundle(src, dst, *, shard_bytes: int = 1_000_000_000, dry_run: bool = False):
+    """Programmatic entry point for converters to call after their per-expert
+    quantization pass completes. Equivalent to running the CLI on (src, dst).
+
+    Codex 2026-05-05 #2: every JANGTQ converter that emits per-expert layout
+    should call this as a final step so the SHIPPED bundle is prestack-spec
+    compliant. Old per-expert bundles need the CLI form to migrate.
+    """
+    import argparse as _ap
+    args = _ap.Namespace(
+        src=Path(src),
+        dst=Path(dst),
+        shard_bytes=shard_bytes,
+        dry_run=dry_run,
+    )
+    return _rebundle_impl(args)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("src", type=Path, help="source bundle (per-expert JANGTQ)")
@@ -145,7 +163,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="report planned mapping without writing")
     args = ap.parse_args()
+    return _rebundle_impl(args)
 
+
+def _rebundle_impl(args):
     SRC: Path = args.src.expanduser().resolve()
     DST: Path = args.dst.expanduser().resolve()
     if not SRC.is_dir():

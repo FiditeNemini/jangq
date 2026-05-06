@@ -294,7 +294,10 @@ def convert(src: Path, dst: Path, profile: str, awq_scales_file: Path | None = N
     # Rewrite config.json — strip compressed-tensors quantization_config,
     # add a mlx-style one for affine weights, tag jang metadata
     config.pop("quantization_config", None)
-    config["quantization"] = {"group_size": 64, "bits": 2 if profile != "3L" else 3}
+    # quantization.bits = AFFINE control-plane fallback (8), NOT routed
+    # bits. Codex 2026-05-05 #8: ditto for every JANGTQ converter.
+    config["quantization"] = {"group_size": 64, "bits": 8}
+    config["weight_format"] = "mxtq"
     with (dst / "config.json").open("w") as f:
         json.dump(config, f, indent=2)
 
@@ -350,14 +353,40 @@ def convert(src: Path, dst: Path, profile: str, awq_scales_file: Path | None = N
     print(f"  written to: {dst}", flush=True)
 
 
+def _maybe_prestack(out_dir):
+    """Codex 2026-05-05 #2: post-process to JANGTQ-PRESTACK-SPEC compliance."""
+    print(f"\n  Prestacking (JANGTQ-PRESTACK-SPEC compliance)...")
+    try:
+        from jang_tools.rebundle_jangtq_stacked import rebundle
+        import shutil as _shutil
+        _tmp = out_dir.parent / (out_dir.name + ".prestack_tmp")
+        if _tmp.exists():
+            _shutil.rmtree(_tmp)
+        rebundle(out_dir, _tmp)
+        _backup = out_dir.parent / (out_dir.name + ".per_expert_backup")
+        if _backup.exists():
+            _shutil.rmtree(_backup)
+        out_dir.rename(_backup)
+        _tmp.rename(out_dir)
+        _shutil.rmtree(_backup)
+        print(f"  Prestack complete.")
+    except Exception as _re:
+        print(f"  [prestack] FAILED: {_re} — bundle remains per-expert layout.",
+              flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True, type=Path)
     ap.add_argument("--dst", required=True, type=Path)
     ap.add_argument("--profile", choices=("1L", "2L", "3L"), default="1L")
     ap.add_argument("--awq-scales", type=Path, default=None)
+    ap.add_argument("--no-prestack", action="store_true",
+                    help="skip rebundle post-process (debug only; produces non-spec bundle)")
     args = ap.parse_args()
     convert(args.src, args.dst, args.profile, args.awq_scales)
+    if not args.no_prestack:
+        _maybe_prestack(args.dst)
 
 
 if __name__ == "__main__":

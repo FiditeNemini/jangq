@@ -17,6 +17,13 @@ from safetensors.numpy import save_file
 _ap = argparse.ArgumentParser(add_help=False)
 _ap.add_argument("--progress", choices=["json", "off"], default="off")
 _ap.add_argument("--quiet-text", action="store_true")
+# Codex 2026-05-05 #2: per JANGTQ-PRESTACK-SPEC, every JANGTQ bundle must
+# ship prestacked. This converter writes per-expert layout for clarity,
+# then post-processes via rebundle() into a sibling tmp dir, swaps it in
+# place. Default ON; opt out with --no-prestack for debugging the raw
+# per-expert output.
+_ap.add_argument("--no-prestack", action="store_true",
+                 help="skip rebundle post-process (debug only; produces non-spec bundle)")
 _args, _rest = _ap.parse_known_args()
 sys.argv = [sys.argv[0]] + _rest
 
@@ -567,6 +574,32 @@ try:
             sys.argv = _saved_argv
     except (Exception, SystemExit) as _e:
         print(f"  [sidecar] FAILED: {_e} — run `python3 -m jang_tools.build_jangtq_sidecar {OUT}` manually before upload", flush=True)
+
+    # Codex 2026-05-05 #2: prestack post-process. Runs rebundle() over the
+    # just-written per-expert bundle, swaps the prestacked output in place.
+    # Skip via --no-prestack for raw per-expert debugging.
+    if not _args.no_prestack:
+        print(f"\n  Prestacking (JANGTQ-PRESTACK-SPEC compliance)...")
+        try:
+            from jang_tools.rebundle_jangtq_stacked import rebundle
+            import shutil as _shutil
+            _tmp = OUT.parent / (OUT.name + ".prestack_tmp")
+            if _tmp.exists():
+                _shutil.rmtree(_tmp)
+            rebundle(OUT, _tmp)
+            # Atomic-ish swap: move tmp to OUT, original to backup, then
+            # remove backup.
+            _backup = OUT.parent / (OUT.name + ".per_expert_backup")
+            if _backup.exists():
+                _shutil.rmtree(_backup)
+            OUT.rename(_backup)
+            _tmp.rename(OUT)
+            _shutil.rmtree(_backup)
+            print(f"  Prestack complete; output is JANGTQ-PRESTACK-SPEC compliant.")
+        except Exception as _re:
+            print(f"  [prestack] FAILED: {_re} — bundle remains in legacy per-expert layout. "
+                  f"Run `python -m jang_tools.rebundle_jangtq_stacked {OUT} {OUT}_prestacked` manually.",
+                  flush=True)
 
     print(f"\n  Done!")
     print(f"  MXTQ tensors: {total_mxtq}")

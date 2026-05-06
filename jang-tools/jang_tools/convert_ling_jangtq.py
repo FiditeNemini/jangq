@@ -31,6 +31,10 @@ from safetensors.numpy import save_file
 _ap = argparse.ArgumentParser(add_help=False)
 _ap.add_argument("--progress", choices=["json", "off"], default="off")
 _ap.add_argument("--quiet-text", action="store_true")
+# Codex 2026-05-05 #2: post-process per-expert output through rebundle()
+# so the SHIPPED bundle is JANGTQ-PRESTACK-SPEC compliant. Default ON.
+_ap.add_argument("--no-prestack", action="store_true",
+                 help="skip rebundle post-process (debug only; produces non-spec bundle)")
 _args, _rest = _ap.parse_known_args()
 sys.argv = [sys.argv[0]] + _rest
 
@@ -461,6 +465,28 @@ try:
             f"`python3 -m jang_tools.build_jangtq_sidecar {OUT}` manually before upload",
             flush=True,
         )
+
+    # Codex 2026-05-05 #2: prestack post-process for spec compliance.
+    if not _args.no_prestack:
+        print(f"\n  Prestacking (JANGTQ-PRESTACK-SPEC compliance)...")
+        try:
+            from jang_tools.rebundle_jangtq_stacked import rebundle
+            import shutil as _shutil
+            _tmp = OUT.parent / (OUT.name + ".prestack_tmp")
+            if _tmp.exists():
+                _shutil.rmtree(_tmp)
+            rebundle(OUT, _tmp)
+            _backup = OUT.parent / (OUT.name + ".per_expert_backup")
+            if _backup.exists():
+                _shutil.rmtree(_backup)
+            OUT.rename(_backup)
+            _tmp.rename(OUT)
+            _shutil.rmtree(_backup)
+            print(f"  Prestack complete.")
+        except Exception as _re:
+            print(f"  [prestack] FAILED: {_re} — bundle remains per-expert layout. "
+                  f"Run `python -m jang_tools.rebundle_jangtq_stacked {OUT} {OUT}_prestacked` manually.",
+                  flush=True)
 
     print(f"\n  Done!")
     print(f"  MXTQ tensors:        {total_mxtq}")

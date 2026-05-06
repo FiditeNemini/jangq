@@ -51,41 +51,60 @@ def install_switchglu_fused_decode() -> bool:
     `TurboQuantSwitchLinear` instances exist — the patched call
     falls back to the original implementation per-instance.
 
-    Failures (missing `mlx_lm`, missing kernels) are swallowed and
-    return False; the caller continues at the unpatched (slower)
-    speed rather than crashing.
+    Failures (missing `mlx_lm`, missing kernels) propagate as
+    `RuntimeError`; the caller is responsible for handling them. The old
+    swallow-and-warn behavior masked import errors that meant the
+    fused path was silently NEVER active. Codex 2026-05-05 #4.
     """
     global _INSTALLED
     if _INSTALLED:
         return False
 
-    try:
-        from mlx_lm.models.switch_layers import (
-            SwitchGLU,
-            _gather_sort,
-            _scatter_unsort,
-        )
-        from jang_tools.turboquant.tq_kernel import TurboQuantSwitchLinear
-        from jang_tools.turboquant.fused_gate_up_kernel import (
-            fused_gate_up_swiglu_matmul,
-            make_fused_gate_up_swiglu_decode,
-        )
-        from jang_tools.turboquant.gather_tq_kernel import (
-            make_gather_tq_decode_per_row,
-        )
-        from jang_tools.turboquant.hadamard_kernel import hadamard_rotate_metal
-    except Exception as exc:  # noqa: BLE001
-        print(f"[switchglu_fused_decode] not installed: {exc}", flush=True)
-        return False
+    # Imports raise (do NOT swallow) — silent install failures meant
+    # Laguna/Mistral users were stuck at unpatched dispatch counts
+    # without any way to tell.
+    from mlx_lm.models.switch_layers import (
+        SwitchGLU,
+        _gather_sort,
+        _scatter_unsort,
+    )
+    from jang_tools.turboquant.tq_kernel import TurboQuantSwitchLinear
+    from jang_tools.turboquant.fused_gate_up_kernel import (
+        fused_gate_up_swiglu_matmul,
+        make_fused_gate_up_swiglu_decode,
+    )
+    from jang_tools.turboquant.gather_tq_kernel import (
+        make_gather_tq_decode_per_row,
+    )
+    from jang_tools.turboquant.hadamard_kernel import hadamard_rotate_metal
 
     decode_compiled: dict = {}
 
-    def _get_compiled_decode(in_f: int, out_f: int, bits: int, K: int):
-        key = (in_f, out_f, bits, K)
+    def _get_compiled_decode(
+        in_f: int,
+        out_f: int,
+        bits: int,
+        K: int,
+        swiglu_limit: float = 0.0,
+        dp_bits=None,
+    ):
+        # JANGTQ_K mixed-bit (Codex 2026-05-05 #4): gate/up share `bits`
+        # (fused gate+up kernel constraint), but down_proj may differ —
+        # MiniMax-M2.7-JANGTQ_K ships gate=2, up=2, down=4. Without
+        # threading `dp_bits` through, the down_proj packed tensors are
+        # unpacked at the wrong bit width → wrong codebook indices →
+        # garbage decode. Defaults to `bits` for legacy uniform callers
+        # so JANGTQ2/3/4 paths are byte-identical.
+        if dp_bits is None:
+            dp_bits = bits
+        limit_milli = int(round(float(swiglu_limit or 0.0) * 1000.0))
+        key = (in_f, out_f, bits, dp_bits, K, limit_milli)
         if key in decode_compiled:
             return decode_compiled[key]
-        fused_gu = make_fused_gate_up_swiglu_decode(in_f, out_f, bits, K)
-        gather_dn = make_gather_tq_decode_per_row(out_f, in_f, bits, K)
+        fused_gu = make_fused_gate_up_swiglu_decode(
+            in_f, out_f, bits, K, swiglu_limit=swiglu_limit
+        )
+        gather_dn = make_gather_tq_decode_per_row(out_f, in_f, dp_bits, K)
 
         def _mlp(x_flat, pg, ng, pu, nu, pd, nd, cb_gate, cb_down, signs_in, signs_dn, idx):
             x_rot = hadamard_rotate_metal(x_flat, signs_in)
@@ -105,6 +124,11 @@ def install_switchglu_fused_decode() -> bool:
         dp = self.down_proj
         if not isinstance(gp, TurboQuantSwitchLinear) or not isinstance(up, TurboQuantSwitchLinear):
             return orig_call(self, x, indices)
+        # Pull DSV4-style limited SwiGLU clamp from the SwitchGLU's
+        # activation if present (DSV4 sets `swiglu_limit=10` on its
+        # activation module). Codex 2026-05-05 #4 — was missing.
+        _activation = getattr(self, "activation", None)
+        _swiglu_limit = float(getattr(_activation, "swiglu_limit", 0.0) or 0.0)
 
         # Decode fast path: batch=1, K=topk, broadcast mode.
         x_sq = x
@@ -118,7 +142,10 @@ def install_switchglu_fused_decode() -> bool:
 
         if can_fast:
             idx_flat = indices.reshape(-1).astype(mx.uint32)
-            compiled_mlp = _get_compiled_decode(gp.in_features, gp.out_features, gp.bits, K)
+            compiled_mlp = _get_compiled_decode(
+                gp.in_features, gp.out_features, gp.bits, K,
+                swiglu_limit=_swiglu_limit, dp_bits=dp.bits,
+            )
             y = compiled_mlp(
                 x_flat.astype(mx.float32),
                 gp.packed, gp.norms, up.packed, up.norms,
@@ -148,6 +175,7 @@ def install_switchglu_fused_decode() -> bool:
             gp.codebook, gp.signs,
             idx,
             bits=gp.bits,
+            swiglu_limit=_swiglu_limit,
         )
         x_out = self.down_proj(x_act, idx, sorted_indices=do_sort)
         if do_sort:
