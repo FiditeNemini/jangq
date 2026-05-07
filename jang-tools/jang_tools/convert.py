@@ -145,6 +145,24 @@ def _get_tensor_group_size(tensor_name: str, default_gs: int, num_experts: int =
     return default_gs
 
 
+def _get_mlx_compatible_group_size(in_dim: int, requested_gs: int) -> int | None:
+    """Return the largest MLX-supported group size that divides ``in_dim``.
+
+    ``mx.quantize`` only supports group sizes 32/64/128 and requires the last
+    dimension to be divisible by the group size. Large-MoE profiles may request
+    group_size=128 globally, but DSV4 and other architectures also contain tiny
+    projection matrices such as (4, 32). Those should shrink to group_size=32
+    instead of falling into the generic RTN fallback, whose block-flat scales do
+    not match MLX's per-row ``(out_dim, n_groups)`` layout.
+    """
+    if in_dim <= 0:
+        return None
+    for gs in (128, 64, 32):
+        if gs <= requested_gs and in_dim % gs == 0:
+            return gs
+    return None
+
+
 def convert_model(
     model_path: str | Path,
     output_path: str | Path,
@@ -631,6 +649,22 @@ def convert_model(
 
             # Per-tensor group_size: router/gate gets gs=64, experts get model default
             tensor_gs = _get_tensor_group_size(tensor_name, block_size, num_experts)
+            compatible_gs = _get_mlx_compatible_group_size(
+                int(weights.shape[-1]), int(tensor_gs)
+            )
+            if compatible_gs is None:
+                passthrough[tensor_name] = weights.astype(np.float16)
+                print(
+                    f"    Passthrough (f16, MLX group-size incompatible): "
+                    f"{tensor_name} \u2192 {weights.shape}, requested_gs={tensor_gs}"
+                )
+                continue
+            if compatible_gs != tensor_gs:
+                print(
+                    f"    Adjust group_size: {tensor_name} in_dim={weights.shape[-1]} "
+                    f"{tensor_gs}\u2192{compatible_gs}"
+                )
+                tensor_gs = compatible_gs
 
             if is_3d:
                 weights = weights.reshape(-1, weights.shape[-1])

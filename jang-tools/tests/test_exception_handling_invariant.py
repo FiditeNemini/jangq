@@ -118,7 +118,7 @@ def test_no_bare_except_exception_pass():
         # mx.clear_cache() — Metal cache is an optimization; convert
         # succeeds either way. Exception means MLX unavailable or
         # mid-teardown; safe to continue.
-        ("jang_tools/convert.py", 724),
+        ("jang_tools/convert.py", 780),
         ("jang_tools/convert_mxtq_to_jang.py", 369),
         # f.get_tensor(scale_key) — probing for optional `_scale_inv`
         # tensor for FP8 scaling. Missing → scale_inv stays None → caller
