@@ -244,3 +244,19 @@ Runtime TurboQuant KV, if later enabled for ZAYA, must be a typed partial codec:
 only the standard KV sub-cache may be encoded. The CCA convolution state,
 previous hidden state, router path, RoPE offsets, and no-state placeholders must
 remain native until separate numeric parity tests prove otherwise.
+
+Current vMLX Python handoff state:
+
+```text
+typed record: zaya_cca_v1
+CCA record payload: standard KV pages + terminal conv_state + terminal prev_hs
+MoE payload: explicit ZayaNoStateCache/no_state slot
+generic TurboQuant KV: disabled for ZAYA CCA
+native status fields: /health, /v1/cache/stats, /v1/models/{id}/capabilities
+```
+
+The source contract now includes prompt-boundary restore, block-disk
+round-trip, and fresh L2 disk-hit continuation-logit checks on the small ZAYA
+runtime. Full-model production sign-off still requires live ZAYA JANGTQ4/MXFP4
+multi-turn cache-hit and L2-restart tests; JANGTQ2 remains a separate quality
+investigation.
