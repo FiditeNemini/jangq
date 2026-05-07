@@ -26,6 +26,10 @@ from typing import Any
 
 # (family, reasoning_parser, tool_parser, think_in_template, cache_type)
 FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
+    # ZAYA / Zyphra — CCA attention + top-1 MoE. Keep reasoning disabled in
+    # converter metadata until ZAYA thinking passes live API gates; native XML
+    # tools remain supported.
+    "zaya":              ("zaya",        None,          "zaya_xml", False, "hybrid"),
     # Qwen 3.5 / 3.6 family (hybrid SSM + attention)
     "qwen3_5":          ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
     "qwen3_5_text":     ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
