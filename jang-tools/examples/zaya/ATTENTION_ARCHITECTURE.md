@@ -257,6 +257,8 @@ native status fields: /health, /v1/cache/stats, /v1/models/{id}/capabilities
 
 The source contract now includes prompt-boundary restore, block-disk
 round-trip, and fresh L2 disk-hit continuation-logit checks on the small ZAYA
-runtime. Full-model production sign-off still requires live ZAYA JANGTQ4/MXFP4
-multi-turn cache-hit and L2-restart tests; JANGTQ2 remains a separate quality
-investigation.
+runtime. A direct full-bundle ZAYA MXFP4 probe also passed typed in-memory
+prefix restore and fresh L2 disk restore with continuation-logit `maxdiff=0.0`.
+Full production sign-off still requires server/API ZAYA JANGTQ4/MXFP4
+multi-turn cache-hit, L2-restart, and tool-row tests; JANGTQ2 remains a
+separate quality investigation.
