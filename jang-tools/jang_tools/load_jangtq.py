@@ -999,11 +999,11 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     # silent-skip behavior for emergency loads (NOT recommended).
     _hydrate_allowlist = (
         # Multi-Token-Prediction layer (DSV4) — used only at training time.
-        re.compile(r"\.mtp\."),
-        re.compile(r"\.eh_proj\."),
-        re.compile(r"\.shared_head\."),
-        # Embedding tied to lm_head — handled via .embed_tokens path.
-        re.compile(r"\.embed_tokens\.tq_"),
+        re.compile(r"(^|\.)mtp\."),
+        re.compile(r"(^|\.)eh_proj(\.|$)"),
+        re.compile(r"(^|\.)shared_head(\.|$)"),
+        # Embedding tied to lm_head — exact embed_tokens TQ aux group only.
+        re.compile(r"(^|\.)embed_tokens$"),
     )
     _allow_skips = os.environ.get(
         "VMLX_JANGTQ_ALLOW_HYDRATE_SKIPS", "0"

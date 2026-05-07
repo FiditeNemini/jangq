@@ -50,6 +50,97 @@ SEED = 42
 FORMAT = "jangtq"  # set by main() from --format flag: "jang" or "jangtq"
 VARIANT = "std"    # set by main() from --variant flag: "std" or "K"
 
+CRITICAL_F32_RE = re.compile(
+    r"^(hc_head_(?:fn|base|scale)|"
+    r"layers\.\d+\.hc_(?:attn|ffn)_(?:fn|base|scale)|"
+    r"layers\.\d+\.attn\.attn_sink|"
+    r"layers\.\d+\.ffn\.gate\.bias)$"
+)
+
+
+def read_passthrough(idx: ShardIndex, name: str) -> np.ndarray:
+    """Read tensors that should not be quantized.
+
+    DSV4 control tensors are small but numerically load-bearing. The old
+    converter read all passthrough tensors as fp16, which destroyed the F32
+    mHC/Sinkhorn/sink/router controls and produced the local broken bundle.
+    Preserve true source F32 when present, and store critical controls as F32
+    even if a bad source copy already rounded them.
+    """
+    if idx.dtype_of(name) == torch.float32 or CRITICAL_F32_RE.match(name):
+        return idx.read_tensor(name, out_dtype=torch.float32).numpy().astype(np.float32)
+    src_dtype = idx.dtype_of(name)
+    if src_dtype in (torch.int64, torch.int32, torch.int16, torch.int8, torch.uint8):
+        return idx.read_tensor(name).numpy()
+    out_dtype = torch.float16
+    tensor = idx.read_tensor(name, out_dtype=out_dtype)
+    if tensor.dtype == torch.bfloat16:
+        return tensor.float().numpy().astype(np.float16)
+    return tensor.numpy()
+
+
+def finalize_jangtq_bundle(dst: Path, *, prestack: bool, build_sidecar: bool) -> None:
+    """Finalize a DSV4 JANGTQ artifact for shipping.
+
+    The converter naturally emits per-expert TQ triplets. Shipping bundles
+    should be pre-stacked into switch_mlp layout, and Swift-compatible runtimes
+    need a deterministic Hadamard signs/codebook sidecar. Fail loudly on either
+    finalization error; a half-finalized bundle is worse than no bundle.
+    """
+    if prestack:
+        from jang_tools.rebundle_jangtq_stacked import rebundle
+
+        tmp = dst.parent / f"{dst.name}.prestack_tmp"
+        old = dst.parent / f"{dst.name}.perexpert_tmp"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        if old.exists():
+            shutil.rmtree(old)
+
+        rebundle(dst, tmp)
+        if not (tmp / "model.safetensors.index.json").is_file():
+            raise RuntimeError(f"prestack failed: missing index in {tmp}")
+        dst.rename(old)
+        tmp.rename(dst)
+        shutil.rmtree(old)
+        print("[convert] prestack complete; routed experts are switch_mlp layout", flush=True)
+
+    if build_sidecar:
+        from jang_tools.build_jangtq_sidecar import main as build_jangtq_sidecar
+
+        old_argv = sys.argv[:]
+        try:
+            sys.argv = ["build_jangtq_sidecar", str(dst)]
+            build_jangtq_sidecar()
+        finally:
+            sys.argv = old_argv
+        if not (dst / "jangtq_runtime.safetensors").is_file():
+            raise RuntimeError("sidecar build completed but jangtq_runtime.safetensors is missing")
+        print("[convert] jangtq_runtime.safetensors sidecar present", flush=True)
+
+
+def build_routed_expert_bit_plan(profile_bits: int) -> dict:
+    """Return explicit routed-expert bit metadata for config files.
+
+    `mxtq_bits.routed_expert` is a role default. V3 is intentionally mixed:
+    the hash-routed layers use 4-bit MXTQ while the smooth-routed layers use
+    the requested profile width. Store that plan explicitly so loaders/audits
+    never infer uniform routed bits from the scalar default.
+    """
+    plan = {
+        "default_bits": profile_bits,
+        "codec": "mxtq" if FORMAT == "jangtq" else "affine",
+    }
+    if FORMAT == "jangtq" and VARIANT == "V3":
+        plan.update(
+            {
+                "hash_layer_indices": [0, 1, 2],
+                "hash_layer_bits": 4,
+                "smooth_layer_bits": profile_bits,
+            }
+        )
+    return plan
+
 
 def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
     """Map tensor name → (bits, method, group_size).
@@ -136,7 +227,14 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
     return 16, "passthrough", 0
 
 
-def convert(src: Path, dst: Path, profile_bits: int) -> None:
+def convert(
+    src: Path,
+    dst: Path,
+    profile_bits: int,
+    *,
+    prestack: bool = True,
+    build_sidecar: bool = True,
+) -> None:
     import mlx.core as mx
     from jang_tools.turboquant.linear import tq_quantize_weight
 
@@ -207,9 +305,7 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
         bits, method, gsz = classify(name, profile_bits)
 
         if method == "passthrough":
-            t = idx.read_tensor(name, out_dtype=torch.float16)
-            arr = t.numpy() if t.dtype != torch.bfloat16 else t.float().numpy().astype(np.float16)
-            add_tensor(name, arr)
+            add_tensor(name, read_passthrough(idx, name))
             totals["passthrough"] += 1
 
         elif method == "affine":
@@ -298,6 +394,11 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
     # config.json + jang_config.json
     src_cfg = json.loads((src / "config.json").read_text())
     src_cfg.pop("quantization_config", None)
+    if drop_mtp:
+        # The current JANG DSV4 runtime explicitly drops mtp.* in
+        # Model.sanitize() and does not instantiate an MTP decode head. Keep
+        # config metadata honest so validators do not expect missing weights.
+        src_cfg["num_nextn_predict_layers"] = 0
 
     # transformers 4.45+ renamed `rope_scaling` → `rope_parameters` and
     # `type` → `rope_type` inside the dict. Older DeepSeek source configs
@@ -336,9 +437,9 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
     # Mirror the Swift-required metadata INSIDE the quantization dict so the
     # vMLX strict Codable decoder finds it whether it looks at top-level or
     # quantization sub-object (existing bundles ship both).
+    routed_expert_bit_plan = build_routed_expert_bit_plan(profile_bits)
     if FORMAT == "jangtq":
-        quant_cfg["routed_expert_bits"] = profile_bits
-        quant_cfg["mxtq_bits"] = {
+        mxtq_bits_meta = {
             "routed_expert": profile_bits,
             "attention": nonrouted_bits_meta,
             "shared_expert": nonrouted_bits_meta,
@@ -348,12 +449,18 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
             "lm_head": 8,
             "norms_router_hc": 16,
         }
+        quant_cfg["routed_expert_bits"] = profile_bits
+        quant_cfg["routed_expert_bit_plan"] = routed_expert_bit_plan
+        quant_cfg["mxtq_bits"] = mxtq_bits_meta
     src_cfg["quantization"] = quant_cfg
     # Top-level Swift-required keys (DeepseekV4JANGTQ §414 Codable decode +
     # build_jangtq_sidecar.py's seed lookup). Without these, the Swift loader
     # falls back to defaults that may mismatch the bundle's actual codec.
     if FORMAT == "jangtq":
+        src_cfg["weight_format"] = "mxtq"
         src_cfg["routed_expert_bits"] = profile_bits
+        src_cfg["routed_expert_bit_plan"] = routed_expert_bit_plan
+        src_cfg["mxtq_bits"] = mxtq_bits_meta
         src_cfg["mxtq_seed"] = SEED
         src_cfg["group_size"] = 32
     src_cfg["_name_or_path"] = f"DSV4-Flash-{profile_name}"
@@ -367,22 +474,35 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
         "variant": VARIANT,
         "mxtq_seed": SEED,
         "drop_mtp": drop_mtp,
+        "critical_f32_preserved": True,
+        "dsv4_runtime_requirements": {
+            "limited_swiglu_tq_patch": FORMAT == "jangtq",
+            "generic_mlx_sinks": False,
+            "native_cache_schema": "deepseek_v4_v7",
+            "generic_turboquant_kv": False,
+        },
+        "quantization": {
+            "method": "affine+mxtq" if FORMAT == "jangtq" else "affine",
+            "routed_experts": {
+                "bits": profile_bits,
+                "codec": "mxtq" if FORMAT == "jangtq" else "affine",
+                "bit_plan": routed_expert_bit_plan,
+            },
+            "non_routed": {
+                "bits": nonrouted_bits_meta,
+                "codec": "affine",
+                "group_size": 32,
+            },
+            "critical_control_tensors": "source-f32",
+        },
         "source_model": str(src),
         "source_config": {
             "n_routed_experts": src_cfg.get("n_routed_experts"),
             "num_hidden_layers": src_cfg.get("num_hidden_layers"),
             "n_hash_layers": src_cfg.get("num_hash_layers"),
         },
-        "mxtq_bits": {
-            "routed_expert": profile_bits,
-            "attention": nonrouted_bits_meta,
-            "shared_expert": nonrouted_bits_meta,
-            "compressor": nonrouted_bits_meta,
-            "indexer": nonrouted_bits_meta,
-            "embed_tokens": 8,
-            "lm_head": 8,
-            "norms_router_hc": 16,
-        },
+        "routed_expert_bit_plan": routed_expert_bit_plan,
+        "mxtq_bits": mxtq_bits_meta if FORMAT == "jangtq" else {},
         # DSV4-Flash chat + reasoning + tool-parser metadata for runtime wiring.
         # Python loader can use this to auto-wire chat encoding; Swift port
         # reads this to know which encoder to use.
@@ -481,6 +601,13 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
     except Exception as _eos_err:
         print(f"[convert] WARN eos list patch failed: {_eos_err}")
 
+    if FORMAT == "jangtq":
+        finalize_jangtq_bundle(
+            dst,
+            prestack=prestack,
+            build_sidecar=build_sidecar,
+        )
+
     elapsed = time.time() - t_start
     print(f"\nDONE in {elapsed:.0f}s ({elapsed/60:.1f} min)")
     print(f"  mxtq={totals['mxtq']}  affine={totals['affine']}  passthrough={totals['passthrough']}")
@@ -500,11 +627,22 @@ def main() -> int:
                          "profile (drops MTP head, all non-routed stay 8-bit); "
                          "V3=K + hash layers 0-2 routed lifted to 4-bit MXTQ "
                          "(target ~80% MMLU, ~80GB).")
+    ap.add_argument("--no-prestack", action="store_true",
+                    help="Debug only: leave per-expert TQ tensors instead of "
+                         "finalizing to JANGTQ-PRESTACK layout.")
+    ap.add_argument("--no-sidecar", action="store_true",
+                    help="Debug only: skip jangtq_runtime.safetensors sidecar.")
     args = ap.parse_args()
     global FORMAT, VARIANT
     FORMAT = args.format
     VARIANT = args.variant
-    convert(args.src, args.dst, args.profile)
+    convert(
+        args.src,
+        args.dst,
+        args.profile,
+        prestack=not args.no_prestack,
+        build_sidecar=not args.no_sidecar,
+    )
     return 0
 
 

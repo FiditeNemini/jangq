@@ -93,6 +93,7 @@ try:
         "JANGTQ2": 2, "JANGTQ_2L": 2, "JANGTQ_2S": 2,
         "JANGTQ3": 3, "JANGTQ_3L": 3, "JANGTQ_3S": 3,
         "JANGTQ4": 4, "JANGTQ_4M": 4, "JANGTQ_4K": 4,
+        "JANGTQ_K": "mixed", "JANGTQK": "mixed",
     }
     # Case-insensitive lookup; canonicalize to JANGTQ{N}.
     _PROFILE_NORM = PROFILE.upper()
@@ -107,7 +108,14 @@ try:
             f"unknown profile {PROFILE!r}; expected one of {sorted(_EXPERT_BITS_BY_PROFILE)}"
         )
     EXPERT_BITS = _EXPERT_BITS_BY_PROFILE[_PROFILE_NORM]
-    PROFILE = f"JANGTQ{EXPERT_BITS}"
+    if EXPERT_BITS == "mixed":
+        PROFILE = "JANGTQ_K"
+        # Same budget as MiniMax JANGTQ_K: gate/up stay 2-bit, down_proj
+        # gets 4-bit because it writes directly back into the residual stream.
+        _MIXED_EXPERT_BITS = {"gate_proj": 2, "up_proj": 2, "down_proj": 4}
+    else:
+        _MIXED_EXPERT_BITS = None
+        PROFILE = f"JANGTQ{EXPERT_BITS}"
 
 
     def get_bits_and_method(tensor_name):
@@ -168,8 +176,12 @@ try:
         # Routed experts (pre-stacked) → MXTQ at profile bits
         #   experts.gate_up_proj  → split into switch_mlp.gate_proj + switch_mlp.up_proj
         #   experts.down_proj     → switch_mlp.down_proj
-        if tensor_name.endswith(".mlp.experts.gate_up_proj") or tensor_name.endswith(".mlp.experts.down_proj"):
-            return (EXPERT_BITS, "mxtq", None)
+        if tensor_name.endswith(".mlp.experts.gate_up_proj"):
+            bits = _MIXED_EXPERT_BITS["gate_proj"] if _MIXED_EXPERT_BITS else EXPERT_BITS
+            return (bits, "mxtq", None)
+        if tensor_name.endswith(".mlp.experts.down_proj"):
+            bits = _MIXED_EXPERT_BITS["down_proj"] if _MIXED_EXPERT_BITS else EXPERT_BITS
+            return (bits, "mxtq", None)
 
         # Anything else → affine 8-bit fallback (keeps conversion total)
         return (8, "affine", None)
@@ -197,7 +209,13 @@ try:
     print(f"  Output:  {OUT}")
     print(f"  Layers:  {n_layers}")
     print(f"  Experts: {n_experts} routed + 1 shared ({shared_exp_inter}d)")
-    print(f"  Profile: expert=MXTQ-{EXPERT_BITS}, attn=affine-8, shared=affine-8, gates=fp16")
+    if _MIXED_EXPERT_BITS:
+        _expert_profile_desc = (
+            "MXTQ-K(gate=2, up=2, down=4)"
+        )
+    else:
+        _expert_profile_desc = f"MXTQ-{EXPERT_BITS}"
+    print(f"  Profile: expert={_expert_profile_desc}, attn=affine-8, shared=affine-8, gates=fp16")
     print(flush=True)
 
 
@@ -413,13 +431,15 @@ try:
 
     # Write config (strip any fp8/awq sections; force the default bits to expert bits)
     config.pop("quantization_config", None)
-    config["quantization"] = {"group_size": 64, "bits": EXPERT_BITS}
+    routed_bits_meta = _MIXED_EXPERT_BITS or EXPERT_BITS
+    default_expert_bits = 2 if _MIXED_EXPERT_BITS else EXPERT_BITS
+    config["quantization"] = {"group_size": 64, "bits": default_expert_bits}
     # Surface the JANGTQ flags at the top level so Swift's
     # `LLMModelFactory.qwen3_5_moe` dispatch can detect MXTQ format
     # without reading the sidecar.
     config["weight_format"] = "mxtq"
     config["mxtq_seed"] = SEED
-    config["mxtq_bits"] = EXPERT_BITS
+    config["mxtq_bits"] = routed_bits_meta
     with open(OUT / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
@@ -447,14 +467,14 @@ try:
             "attention": 8,
             "linear_attention": 8,
             "shared_expert": 8,
-            "routed_expert": EXPERT_BITS,
+            "routed_expert": routed_bits_meta,
             "embed_tokens": 8,
             "lm_head": 8,
         },
         "quantization": {
             "method": "affine+mxtq",
             "group_size": 64,
-            "bits_default": EXPERT_BITS,
+            "bits_default": default_expert_bits,
         },
     }
     # Stamp Tier-1 capabilities (reasoning/tool parser, cache type, modality)

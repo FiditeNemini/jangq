@@ -149,6 +149,24 @@ def test_hydrate_skips_unknown_module_paths():
     assert leftover == {}
 
 
+def test_hydrate_does_not_allowlist_arbitrary_embed_tokens_paths():
+    """Only embed_tokens.tq_* aux paths are optional.
+
+    A missing `embed_tokens.extra` TQ group is a real hydrate miss and must
+    hard-fail instead of silently falling back to unhydrated weights.
+    """
+    model = _ToyModel(n_layers=1)
+    bits = 2
+    weights = {
+        "model.embed_tokens.extra.tq_packed": _make_tq_packed(64, 64, bits),
+        "model.embed_tokens.extra.tq_norms": _make_tq_norms(64),
+        "model.embed_tokens.extra.tq_bits": mx.array([bits], dtype=mx.uint8),
+    }
+
+    with pytest.raises(RuntimeError, match="model\\.embed_tokens\\.extra"):
+        hydrate_jangtq(model, weights)
+
+
 def test_hydrate_handles_incomplete_triplets():
     """If a triplet is missing one of packed/norms/bits the helper
     skips it rather than crashing."""

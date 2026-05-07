@@ -121,14 +121,14 @@ def hydrate_jangtq(
             regular[k] = v
 
     # Codex 2026-05-06: same hard-fail-on-skip contract as load_jangtq.py:977.
-    # MTP / eh_proj / shared_head / embed_tokens.tq_* are documented
+    # MTP / eh_proj / shared_head / embed_tokens TQ groups are documented
     # non-inference paths and may legitimately not have modules; everything
     # else MUST swap or we silently fp16-fallback weights and produce garbage.
     _allowlist_patterns = (
-        re.compile(r"\.mtp\."),
-        re.compile(r"\.eh_proj\."),
-        re.compile(r"\.shared_head\."),
-        re.compile(r"\.embed_tokens\.tq_"),
+        re.compile(r"(^|\.)mtp\."),
+        re.compile(r"(^|\.)eh_proj(\.|$)"),
+        re.compile(r"(^|\.)shared_head(\.|$)"),
+        re.compile(r"(^|\.)embed_tokens$"),
     )
     _allow_hydrate_skips = os.environ.get(
         "VMLX_JANGTQ_ALLOW_HYDRATE_SKIPS", ""
