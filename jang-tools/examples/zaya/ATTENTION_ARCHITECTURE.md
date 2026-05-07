@@ -212,3 +212,35 @@ Before a runtime claims ZAYA compatibility:
 7. Require mxtq_bits dictionary decoding and jangtq_runtime.safetensors.
 8. Preserve tokenizer/chat template files from the source snapshot.
 ```
+
+## vMLX Typed Restore Handoff
+
+The initial vMLX Python runtime represents each CCA attention layer as:
+
+```text
+CacheList(KVCache(), ArraysCache(2))
+ArraysCache[0] = convolution tail state, runtime layout [B, total_padding, packed_qk_dim]
+ArraysCache[1] = previous hidden state, runtime layout [B, 1, hidden_size]
+```
+
+Odd MoE layers have no recurrent state and should use an explicit no-state
+placeholder so cache lists stay aligned to the 80-layer model schedule. A
+restore path that reconstructs only the 40 CCA attention layers is incomplete.
+
+For prefix/paged/L2 enablement, do not rely on a generic `CacheList` or generic
+hybrid-SSM serializer. The typed restore record should preserve:
+
+```text
+layer index
+layer role: cca_attention | zaya_moe_no_state
+standard KV state for CCA layers
+CCA convolution tail state
+CCA previous hidden state
+prompt length / N-1 refeed convention
+model + tokenizer/template + cache schema hash
+```
+
+Runtime TurboQuant KV, if later enabled for ZAYA, must be a typed partial codec:
+only the standard KV sub-cache may be encoded. The CCA convolution state,
+previous hidden state, router path, RoPE offsets, and no-state placeholders must
+remain native until separate numeric parity tests prove otherwise.
