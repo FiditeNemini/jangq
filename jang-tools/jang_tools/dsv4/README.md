@@ -68,6 +68,11 @@ DSV4 differs significantly from V3:
 - SwiGLU clamp: `silu(min(gate, 10)) * clip(up, ±10)`.
 - Compressor + Indexer for compressed long-context attention (compress_ratios `{4, 128}`
   alternating across middle 41 layers).
+- Ratio-4 compressor rows are overlapping: decode state must retain the
+  previous complete window plus the current partial/complete window, then build
+  rows from previous-window first-half features and current-window second-half
+  features. `DeepseekV4Cache.accumulate_overlap_windows()` owns this state for
+  MLX cache/paged/L2 compatibility; a plain remainder buffer is wrong.
 
 ## Verification
 
@@ -75,3 +80,8 @@ DSV4 differs significantly from V3:
 MLX runtime against the torch reference at varying granularities. See
 `research/DSV-EXHAUSTIVE-VARIABLES-GUIDE.md` for the full bug catalog (13
 identified runtime bugs — all fixed in `mlx_model.py`).
+
+Focused overlap-cache contracts live in
+`tests/test_dsv4_overlap_cache.py`. They pin source-equivalent prefill
+retention, decode-boundary row construction, and `Compressor` pool growth for
+`compress_ratio=4`.

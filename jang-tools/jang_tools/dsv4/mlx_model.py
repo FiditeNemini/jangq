@@ -579,6 +579,136 @@ class DeepseekV4Cache:
         pool_base = max(0, start_pos) - (buf_kv.shape[1] if buf_kv is not None else 0)
         return kv[:, :usable], gate[:, :usable], pool_base
 
+    def accumulate_overlap_windows(self, kv, gate, state_key, ratio, start_pos, head_dim):
+        """Accumulate DSV4 ratio-4 overlap-compressor windows.
+
+        Source DSV4 keeps two logical windows for overlap compression:
+        ``state[:ratio]`` is the previous complete window and
+        ``state[ratio:]`` is the current partial/complete window. When the
+        current window completes during decode, the new compressed row uses
+        previous-window first-half features plus current-window second-half
+        features. A plain remainder buffer loses that previous window and
+        silently emits a zero-left-half row at every decode boundary.
+
+        ``gate`` is expected to already include the per-position APE term.
+        Returns tensors shaped ``(B, rows, 2 * ratio, head_dim)`` that are
+        ready for softmax over the window axis.
+        """
+        state = self._branch_state(state_key)
+        B = kv.shape[0]
+        out_dim = kv.shape[-1]
+
+        def _empty():
+            return (
+                mx.zeros((B, 0, 2 * ratio, head_dim), dtype=kv.dtype),
+                mx.zeros((B, 0, 2 * ratio, head_dim), dtype=gate.dtype),
+            )
+
+        def _make_row(prev_kv, prev_gate, cur_kv, cur_gate):
+            row_kv = mx.zeros((B, 1, 2 * ratio, head_dim), dtype=kv.dtype)
+            row_gate = mx.full(
+                (B, 1, 2 * ratio, head_dim),
+                -float("inf"),
+                dtype=gate.dtype,
+            )
+            if prev_kv is not None:
+                row_kv[:, 0, :ratio] = prev_kv[:, :, :head_dim]
+                row_gate[:, 0, :ratio] = prev_gate[:, :, :head_dim]
+            row_kv[:, 0, ratio:] = cur_kv[:, :, head_dim:]
+            row_gate[:, 0, ratio:] = cur_gate[:, :, head_dim:]
+            return row_kv, row_gate
+
+        if start_pos == 0:
+            usable = (kv.shape[1] // ratio) * ratio
+            remainder_kv = kv[:, usable:]
+            remainder_gate = gate[:, usable:]
+            if usable >= ratio:
+                state["buffer_kv"] = (
+                    mx.concatenate([kv[:, usable - ratio:usable], remainder_kv], axis=1)
+                    if remainder_kv.shape[1]
+                    else kv[:, usable - ratio:usable]
+                )
+                state["buffer_gate"] = (
+                    mx.concatenate([gate[:, usable - ratio:usable], remainder_gate], axis=1)
+                    if remainder_gate.shape[1]
+                    else gate[:, usable - ratio:usable]
+                )
+            else:
+                state["buffer_kv"] = remainder_kv
+                state["buffer_gate"] = remainder_gate
+            if usable == 0:
+                rows, gate_rows = _empty()
+                return rows, gate_rows, start_pos
+
+            W = usable // ratio
+            full_kv = kv[:, :usable].reshape(B, W, ratio, out_dim)
+            full_gate = gate[:, :usable].reshape(B, W, ratio, out_dim)
+            rows = mx.zeros((B, W, 2 * ratio, head_dim), dtype=kv.dtype)
+            gate_rows = mx.full(
+                (B, W, 2 * ratio, head_dim),
+                -float("inf"),
+                dtype=gate.dtype,
+            )
+            rows[:, :, ratio:] = full_kv[:, :, :, head_dim:]
+            rows[:, 1:, :ratio] = full_kv[:, :-1, :, :head_dim]
+            gate_rows[:, :, ratio:] = full_gate[:, :, :, head_dim:]
+            gate_rows[:, 1:, :ratio] = full_gate[:, :-1, :, :head_dim]
+            return rows, gate_rows, start_pos
+
+        buf_kv, buf_gate = state["buffer_kv"], state["buffer_gate"]
+        if buf_kv is not None and buf_kv.shape[1] >= ratio:
+            prev_kv, prev_gate = buf_kv[:, :ratio], buf_gate[:, :ratio]
+            partial_kv, partial_gate = buf_kv[:, ratio:], buf_gate[:, ratio:]
+        else:
+            prev_kv = prev_gate = None
+            partial_kv = buf_kv
+            partial_gate = buf_gate
+
+        prior_partial_len = partial_kv.shape[1] if partial_kv is not None else 0
+        current_kv = (
+            mx.concatenate([partial_kv, kv], axis=1)
+            if partial_kv is not None and partial_kv.shape[1]
+            else kv
+        )
+        current_gate = (
+            mx.concatenate([partial_gate, gate], axis=1)
+            if partial_gate is not None and partial_gate.shape[1]
+            else gate
+        )
+
+        row_kvs = []
+        row_gates = []
+        while current_kv.shape[1] >= ratio:
+            cur_kv = current_kv[:, :ratio]
+            cur_gate = current_gate[:, :ratio]
+            row_kv, row_gate = _make_row(prev_kv, prev_gate, cur_kv, cur_gate)
+            row_kvs.append(row_kv)
+            row_gates.append(row_gate)
+            prev_kv, prev_gate = cur_kv, cur_gate
+            current_kv = current_kv[:, ratio:]
+            current_gate = current_gate[:, ratio:]
+
+        if prev_kv is not None:
+            state["buffer_kv"] = (
+                mx.concatenate([prev_kv, current_kv], axis=1)
+                if current_kv.shape[1]
+                else prev_kv
+            )
+            state["buffer_gate"] = (
+                mx.concatenate([prev_gate, current_gate], axis=1)
+                if current_gate.shape[1]
+                else prev_gate
+            )
+        else:
+            state["buffer_kv"] = current_kv
+            state["buffer_gate"] = current_gate
+
+        pool_base = max(0, start_pos - prior_partial_len)
+        if not row_kvs:
+            rows, gate_rows = _empty()
+            return rows, gate_rows, pool_base
+        return mx.concatenate(row_kvs, axis=1), mx.concatenate(row_gates, axis=1), pool_base
+
     def update_pool(self, new_pooled, state_key):
         state = self._branch_state(state_key)
         pool = state["pooled"]
@@ -614,23 +744,37 @@ class Compressor(nn.Module):
         B, _, _ = x.shape
         kv = self.wkv(x)
         gate = self.wgate(x)
-        if cache is None:
+        if cache is not None and self.overlap:
+            pos = start_pos + mx.arange(gate.shape[1])
+            ape = mx.take(self.ape.astype(gate.dtype), pos % self.compress_ratio, axis=0)
+            gate = gate + ape[None]
+            kv, gate, pool_base = cache.accumulate_overlap_windows(
+                kv, gate, state_key, self.compress_ratio, start_pos, self.head_dim
+            )
+            already_windowed = True
+        elif cache is None:
             usable = (kv.shape[1] // self.compress_ratio) * self.compress_ratio
             ready_kv, ready_gate = kv[:, :usable], gate[:, :usable]
             pool_base = start_pos
+            already_windowed = False
         else:
             ready_kv, ready_gate, pool_base = cache.accumulate_windows(
                 kv, gate, state_key, self.compress_ratio, start_pos
             )
-        if ready_kv.shape[1] == 0:
+            already_windowed = False
+        has_rows = kv.shape[1] > 0 if already_windowed else ready_kv.shape[1] > 0
+        if not has_rows:
             new_pooled = mx.zeros((B, 0, self.head_dim), dtype=x.dtype)
         else:
-            W = ready_kv.shape[1] // self.compress_ratio
-            kv = ready_kv.reshape(B, W, self.compress_ratio, self.out_dim)
-            gate = ready_gate.reshape(B, W, self.compress_ratio, self.out_dim) + self.ape.astype(ready_gate.dtype)
-            if self.overlap:
-                kv = self._overlap_transform(kv, 0.0)
-                gate = self._overlap_transform(gate, -float("inf"))
+            if already_windowed:
+                W = kv.shape[1]
+            else:
+                W = ready_kv.shape[1] // self.compress_ratio
+                kv = ready_kv.reshape(B, W, self.compress_ratio, self.out_dim)
+                gate = ready_gate.reshape(B, W, self.compress_ratio, self.out_dim) + self.ape.astype(ready_gate.dtype)
+                if self.overlap:
+                    kv = self._overlap_transform(kv, 0.0)
+                    gate = self._overlap_transform(gate, -float("inf"))
             weights = mx.softmax(gate.astype(mx.float32), axis=2, precise=True).astype(kv.dtype)
             new_pooled = (kv * weights).sum(axis=2)
             new_pooled = self.norm(new_pooled.astype(x.dtype))

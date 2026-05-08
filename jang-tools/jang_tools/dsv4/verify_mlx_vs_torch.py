@@ -53,6 +53,11 @@ def _compress_ratio_for_layer(cfg_json: dict, layer_id: int) -> int:
     return 4 if (layer_id - 1) % 2 else 128
 
 
+def _window_size_for_mask(mlx_layer, fallback: int) -> int:
+    args = getattr(mlx_layer, "args", None)
+    return int(getattr(args, "sliding_window", fallback))
+
+
 def diff(name: str, mlx_t: mx.array, torch_t: torch.Tensor):
     """Print max/mean abs diff."""
     a = np.array(mlx_t, copy=False).astype(np.float32)
@@ -126,7 +131,7 @@ def run(mlx_bundle: Path, source_dir: Path, layer_id: int = 0):
     mask_m = create_attention_mask(
         x_m[:, :, 0, :],
         cache=None,
-        window_size=mcfg.sliding_window,
+        window_size=_window_size_for_mask(mlx_layer, torch_cfg.window_size),
         return_array=True,
     )
     y_m = mlx_layer(x_m, mask=mask_m, cache=None, input_ids=ids_m)
