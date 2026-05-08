@@ -32,7 +32,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -49,6 +51,9 @@ from jang_tools.dsv4.weight_loader import ShardIndex
 SEED = 42
 FORMAT = "jangtq"  # set by main() from --format flag: "jang" or "jangtq"
 VARIANT = "std"    # set by main() from --variant flag: "std" or "K"
+_V3_PLAN_CACHE_PATH: str | None = None
+_V3_PLAN_CACHE: dict | None = None
+_V3_PLAN_CONFIG_CACHE: dict | None = None
 
 CRITICAL_F32_RE = re.compile(
     r"^(hc_head_(?:fn|base|scale)|"
@@ -139,7 +144,182 @@ def build_routed_expert_bit_plan(profile_bits: int) -> dict:
                 "smooth_layer_bits": profile_bits,
             }
         )
+        plan.update(_v3_plan_metadata())
     return plan
+
+
+def _v3_plan_metadata() -> dict:
+    plan, _cfg = _load_v3_plan()
+    path = os.environ.get("DSV4_V3_PLAN_PATH", "").strip()
+    if plan is None or not path:
+        return {}
+
+    routed_layer_bits: dict[str, int] = {}
+    bit_counts: dict[str, int] = {}
+    for logical, bits_raw in plan.items():
+        bits = int(bits_raw)
+        bit_counts[str(bits)] = bit_counts.get(str(bits), 0) + 1
+        m = re.match(
+            r"^model\.layers\.(\d+)\.mlp\.switch_mlp\.SWITCH_MLP_LAYER$",
+            logical,
+        )
+        if m:
+            routed_layer_bits[m.group(1)] = bits
+
+    plan_path = Path(path)
+    return {
+        "plan_source": "DSV4_V3_PLAN_PATH",
+        "plan_file": plan_path.name,
+        "plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+        "routed_layer_bits": dict(sorted(
+            routed_layer_bits.items(), key=lambda item: int(item[0])
+        )),
+        "plan_bit_counts": dict(sorted(
+            bit_counts.items(), key=lambda item: int(item[0])
+        )),
+    }
+
+
+def _reset_v3_plan_cache_for_tests() -> None:
+    global _V3_PLAN_CACHE_PATH, _V3_PLAN_CACHE, _V3_PLAN_CONFIG_CACHE
+    _V3_PLAN_CACHE_PATH = None
+    _V3_PLAN_CACHE = None
+    _V3_PLAN_CONFIG_CACHE = None
+
+
+def _load_v3_plan() -> tuple[dict, dict] | tuple[None, None]:
+    """Load the optional JANG v3 bit plan.
+
+    Internal docs have long described `DSV4_V3_PLAN_PATH`, but the canonical
+    converter used to ignore it and only hardcoded the first three hash-routed
+    layers at 4-bit. Keep the load path local and cheap: one JSON read, cached
+    by path, and no imports from the heavier calibration/consolidation tools.
+    """
+    global _V3_PLAN_CACHE_PATH, _V3_PLAN_CACHE, _V3_PLAN_CONFIG_CACHE
+    path = os.environ.get("DSV4_V3_PLAN_PATH", "").strip()
+    if not path:
+        return None, None
+    if _V3_PLAN_CACHE is not None and _V3_PLAN_CACHE_PATH == path:
+        return _V3_PLAN_CACHE, _V3_PLAN_CONFIG_CACHE or {}
+
+    data = json.loads(Path(path).read_text())
+    if "plan" in data and isinstance(data["plan"], dict):
+        plan = data["plan"]
+        cfg = data.get("config", {})
+    elif isinstance(data, dict):
+        plan = data
+        cfg = {}
+    else:
+        raise ValueError(f"DSV4_V3_PLAN_PATH={path} is not a JSON object")
+
+    _V3_PLAN_CACHE_PATH = path
+    _V3_PLAN_CACHE = plan
+    _V3_PLAN_CONFIG_CACHE = cfg if isinstance(cfg, dict) else {}
+    return _V3_PLAN_CACHE, _V3_PLAN_CONFIG_CACHE
+
+
+def _v3_logical_from_source(n: str) -> str | None:
+    """Map DSV4 source tensor names to JANG v3 logical bit-plan names."""
+    if n.endswith((".scales", ".biases", ".scale")):
+        return None
+    if "_norm." in n or n.endswith("norm.weight"):
+        return None
+    if n.endswith((".attn_sink", ".bias", ".ape", ".tid2eid")):
+        return None
+    if not n.endswith(".weight"):
+        return None
+    if "hc_" in n and n.endswith(("_base", "_fn", "_scale")):
+        return None
+
+    m = re.match(r"^mtp\.(\d+)\.(.+)$", n)
+    if m:
+        midx, rest = m.groups()
+        prefix = f"mtp.{midx}"
+    else:
+        m = re.match(r"^layers\.(\d+)\.(.+)$", n)
+        if m:
+            lidx, rest = m.groups()
+            prefix = f"model.layers.{lidx}"
+        else:
+            if n == "embed.weight":
+                return "model.embed_tokens"
+            if n == "head.weight":
+                return "lm_head"
+            return None
+
+    m = re.match(r"^ffn\.experts\.\d+\.(w[123])\.weight$", rest)
+    if m:
+        proj = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}[m.group(1)]
+        return f"{prefix}.mlp.switch_mlp.{proj}"
+    m = re.match(r"^ffn\.shared_experts\.(w[123])\.weight$", rest)
+    if m:
+        proj = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}[m.group(1)]
+        return f"{prefix}.mlp.shared_experts.{proj}"
+    if rest == "ffn.gate.weight":
+        return f"{prefix}.mlp.gate"
+    m = re.match(r"^attn\.(wq_a|wq_b|wkv|wo_a|wo_b)\.weight$", rest)
+    if m:
+        sub = m.group(1)
+        if sub in ("wq_a", "wkv"):
+            return f"{prefix}.self_attn._wq_a_kv_fused"
+        return f"{prefix}.self_attn.{sub}"
+    m = re.match(r"^attn\.indexer\.(wq_b|weights_proj)\.weight$", rest)
+    if m:
+        return f"{prefix}.self_attn.indexer.{m.group(1)}"
+    m = re.match(r"^attn\.indexer\.compressor\.(wkv|wgate)\.weight$", rest)
+    if m:
+        return f"{prefix}.self_attn.indexer.compressor.{m.group(1)}"
+    m = re.match(r"^attn\.compressor\.(wkv|wgate)\.weight$", rest)
+    if m:
+        return f"{prefix}.self_attn.compressor.{m.group(1)}"
+    if rest in ("e_proj.weight", "h_proj.weight"):
+        return f"{prefix}.{rest.replace('.weight', '')}"
+    return None
+
+
+def _lookup_v3_plan(name: str) -> tuple[int, str, int] | None:
+    """Return a converter classification from DSV4_V3_PLAN_PATH, if present."""
+    if FORMAT != "jangtq" or VARIANT != "V3":
+        return None
+
+    plan, cfg = _load_v3_plan()
+    if plan is None:
+        return None
+
+    logical = _v3_logical_from_source(name)
+    if logical is None:
+        return None
+    if ".mlp.switch_mlp." in logical and logical.endswith(
+        (".gate_proj", ".down_proj", ".up_proj")
+    ):
+        coalesced = logical.rsplit(".", 1)[0] + ".SWITCH_MLP_LAYER"
+        if coalesced in plan:
+            logical = coalesced
+
+    bits_raw = plan.get(logical)
+    if bits_raw is None:
+        return None
+    bits = int(bits_raw)
+    default_gs = int((cfg or {}).get("default_gs", 32))
+
+    if bits == 16:
+        return 16, "passthrough", 0
+    if ".mlp.switch_mlp." in logical:
+        # The shipped DSV4 JANGTQ prestack path is TQ switch_mlp-first. An
+        # 8-bit affine routed layer would bypass rebundle_jangtq_stacked and
+        # rely on mixed affine-routed/TQ-routed MoE hydration that has not
+        # passed live DSV4 gates. Fail here instead of producing another
+        # bundle that "loads" but is semantically unproven.
+        if bits not in (2, 4):
+            raise ValueError(
+                f"DSV4 V3 affine routed plan is not currently supported for "
+                f"{logical}: requested {bits}-bit. Use routed 2/4-bit MXTQ "
+                "or implement/prove affine-routed prestack/runtime support."
+            )
+        return bits, "mxtq", 0
+    if bits not in (2, 3, 4, 5, 6, 8):
+        raise ValueError(f"unsupported DSV4 V3 plan bit width for {logical}: {bits}")
+    return bits, "affine", default_gs
 
 
 def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
@@ -180,6 +360,10 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
     # Router gate.weight (non-MoE-expert) → fp16 passthrough
     if n.endswith(".gate.weight") and "experts" not in n:
         return 16, "passthrough", 0
+
+    plan_hit = _lookup_v3_plan(n)
+    if plan_hit is not None:
+        return plan_hit
 
     # Routed experts
     if re.search(r"ffn\.experts\.\d+\.(w1|w2|w3)\.weight$", n):
