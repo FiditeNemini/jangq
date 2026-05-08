@@ -204,6 +204,20 @@ try:
             return False
         w = mx.array(tensor_np.astype(np.float16))
         qw, qs, qb = mx.quantize(w, group_size=GROUP, bits=BITS)
+        # MLX quantize flattens rank-3 SwitchLinear stacks as
+        # (n_experts, out * packed_in) for affine mode. Runtime
+        # QuantizedSwitchLinear expects (n_experts, out, packed_in), with
+        # matching rank-3 scales/biases. Preserve the pre-stacked expert
+        # contract at conversion time so new Ling MXFP4 bundles do not need
+        # runtime shape repair.
+        if tensor_np.ndim == 3 and qw.ndim == 2:
+            n_experts, out_dim, _in_dim = tensor_np.shape
+            if qw.shape[0] == n_experts and qw.shape[1] % out_dim == 0:
+                qw = qw.reshape(n_experts, out_dim, qw.shape[1] // out_dim)
+            if qs.ndim == 2 and qs.shape[0] == n_experts and qs.shape[1] % out_dim == 0:
+                qs = qs.reshape(n_experts, out_dim, qs.shape[1] // out_dim)
+            if qb.ndim == 2 and qb.shape[0] == n_experts and qb.shape[1] % out_dim == 0:
+                qb = qb.reshape(n_experts, out_dim, qb.shape[1] // out_dim)
         add_tensor(f"{base}.weight", np.array(qw))
         add_tensor(f"{base}.scales", np.array(qs).astype(np.float16))
         add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))

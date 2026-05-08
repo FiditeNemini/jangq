@@ -1,3 +1,13 @@
+## Unreleased
+
+- `convert_ling_mxfp4.py` now preserves rank-3 pre-stacked
+  `switch_mlp` expert tensors after MLX affine quantization. `mx.quantize`
+  flattens `(n_experts, out, in)` stacks to `(n_experts, out * packed_in)`;
+  the converter reshapes weight/scales/biases back to
+  `(n_experts, out, packed_in)` / `(n_experts, out, groups)` before writing
+  shards so new Ling MXFP4 bundles do not hit vMLX/MLX strict-load shape
+  errors like `(256, 524288)` vs `(256, 1024, 512)`.
+
 ## 2.5.23 — 2026-05-05
 
 - **JANGTQ-PRESTACK STANDARD**: every JANGTQ bundle now ships routed-expert
