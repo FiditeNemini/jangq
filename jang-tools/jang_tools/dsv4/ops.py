@@ -48,8 +48,10 @@ def precompute_freqs_cis(
         if low == high:
             high += 0.001
         ramp = torch.clamp((torch.arange(dim // 2).float() - low) / (high - low), 0, 1)
-        freqs_scaled = freqs / factor
-        freqs = freqs_scaled * (1 - ramp) + freqs * ramp
+        # Match DeepSeek-V4-Flash/inference/model.py: low-frequency bins stay
+        # unscaled and the ramp blends toward interpolated high-frequency bins.
+        # The previous reversed blend made parity probes report false RoPE drift.
+        freqs = freqs * (1 - ramp) + (freqs / factor) * ramp
     t = torch.arange(seqlen).float()
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
@@ -146,47 +148,36 @@ def hc_split_sinkhorn(
     iters: int = 20,
     eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Split a mix vector into (pre, post, comb) via Sinkhorn normalization.
+    """Split a mix vector into source-compatible mHC weights.
 
-    The reference CUDA kernel `hc_split_sinkhorn` takes (mixes, scale,
-    base, mult, iters, eps) and returns (pre, post, comb).
+    Mirrors ``DeepSeek-V4-Flash/inference/kernel.py::hc_split_sinkhorn``:
 
-    Layout of mixes[..., mix_hc=(2+mult)*mult]:
-      first mult entries  → pre
-      next mult entries   → post
-      last mult*mult entr → comb (flat, reshaped to (mult, mult))
+    - ``pre = sigmoid(raw) + eps`` with no 1D normalization.
+    - ``post = 2 * sigmoid(raw)`` with no eps.
+    - ``comb = softmax(row) + eps`` then column-normalize once, followed by
+      ``iters - 1`` row/column Sinkhorn iterations.
 
-    Each segment gets its own scale and base applied, then the comb
-    matrix is Sinkhorn-normalized to have row/column sums = 1.
-
-    Per mHC in the paper: the mixing coefficients come from a constraint
-    that the "manifold" structure is preserved — hence doubly-stochastic
-    comb matrix via Sinkhorn.
+    This differs from an older pure-PyTorch approximation that normalized
+    ``pre`` and missed the factor-of-two in ``post``. That approximation is
+    invalid for parity probes because it makes BF16-identical MLX layers look
+    numerically broken even when the runtime matches the source kernel.
     """
-    # mixes: (..., mix_hc)
     mh = hc_mult
-    # split: pre (mh), post (mh), comb (mh*mh)
     pre_raw = mixes[..., :mh]
     post_raw = mixes[..., mh:2 * mh]
-    comb_raw = mixes[..., 2 * mh:]  # mh*mh
+    comb_raw = mixes[..., 2 * mh:]
 
-    # apply scales & bases (scale has 3 entries: one per pre/post/comb)
-    # hc_base has mix_hc = 2mh + mh*mh entries, one per output position
     base_pre = hc_base[:mh]
     base_post = hc_base[mh:2 * mh]
     base_comb = hc_base[2 * mh:]
 
-    pre = torch.sigmoid(pre_raw * hc_scale[0] + base_pre) + eps        # (..., mh)
-    post = torch.sigmoid(post_raw * hc_scale[1] + base_post) + eps     # (..., mh)
+    pre = torch.sigmoid(pre_raw * hc_scale[0] + base_pre) + eps
+    post = 2 * torch.sigmoid(post_raw * hc_scale[1] + base_post)
     comb = (comb_raw * hc_scale[2] + base_comb).view(*mixes.shape[:-1], mh, mh)
 
-    # Normalize pre to sum-to-1 (Sinkhorn-lite for 1D is just normalize)
-    pre = pre / pre.sum(-1, keepdim=True)
-
-    # Sinkhorn on comb: iterate row-normalize, column-normalize `iters` times
-    # to produce a doubly-stochastic matrix.
-    comb = comb.exp()
-    for _ in range(iters):
+    comb = torch.softmax(comb, dim=-1) + eps
+    comb = comb / (comb.sum(-2, keepdim=True) + eps)
+    for _ in range(max(iters - 1, 0)):
         comb = comb / (comb.sum(-1, keepdim=True) + eps)   # row-normalize
         comb = comb / (comb.sum(-2, keepdim=True) + eps)   # col-normalize
 

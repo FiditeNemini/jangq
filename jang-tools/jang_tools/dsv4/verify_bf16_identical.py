@@ -5,7 +5,11 @@ the bug is in the MLX architecture (attention, mHC, gate, etc.),
 not in quantization.
 
 Run:
-  python -m jang_tools.dsv4.verify_bf16_identical --source <path/to/DeepSeek-V4-Flash> --layer 3
+  python -m jang_tools.dsv4.verify_bf16_identical --source <path/to/DeepSeek-V4-Flash> --layer 0
+
+Only compress_ratio=0 layers are source-equivalent in this tool. The current
+PyTorch reference intentionally omits DSV4 CSA/HSA compressor/indexer
+attention, so compressed layers would produce false parity failures.
 """
 
 from __future__ import annotations
@@ -20,10 +24,22 @@ import torch
 import mlx.core as mx
 
 from jang_tools.dsv4 import mlx_register
+from mlx_lm.models.base import create_attention_mask
+
 from jang_tools.dsv4.mlx_model import ModelArgs as MLXArgs, DeepseekV4DecoderLayer
 from jang_tools.dsv4.layer_forward import DSV4Config, Block, load_block_from_shards
 from jang_tools.dsv4.weight_loader import ShardIndex
 from jang_tools.dsv4.ops import precompute_freqs_cis
+
+
+def _compress_ratio_for_layer(cfg_json: dict, layer_id: int) -> int:
+    ratios = cfg_json.get("compress_ratios")
+    if isinstance(ratios, list) and 0 <= layer_id < len(ratios):
+        return int(ratios[layer_id] or 0)
+    num_layers = int(cfg_json.get("num_hidden_layers", 43))
+    if layer_id == 0 or layer_id == num_layers - 1:
+        return 0
+    return 4 if (layer_id - 1) % 2 else 128
 
 
 def _to_mx(t: torch.Tensor) -> mx.array:
@@ -122,9 +138,18 @@ def _build_mlx_layer_from_torch(torch_blk: Block, mlx_cfg: MLXArgs) -> DeepseekV
 
 
 def run(source_dir: Path, layer_id: int):
-    print(f"[torch] indexing + loading layer {layer_id}...")
-    src_idx = ShardIndex(source_dir)
+    print(f"[torch] checking layer {layer_id}...", flush=True)
     cfg_json = json.loads((source_dir / "config.json").read_text())
+    compress_ratio = _compress_ratio_for_layer(cfg_json, layer_id)
+    if compress_ratio:
+        raise SystemExit(
+            f"Layer {layer_id} has compress_ratio={compress_ratio}. "
+            "verify_bf16_identical is source-equivalent only for "
+            "compress_ratio=0 layers until the PyTorch DSV4 reference ports "
+            "CSA/HSA compressor/indexer sparse attention."
+        )
+    src_idx = ShardIndex(source_dir)
+    print(f"[torch] indexing + loading layer {layer_id}...")
     torch_cfg = DSV4Config.from_config_json(cfg_json)
     torch_blk = load_block_from_shards(layer_id, torch_cfg, src_idx).eval()
 
@@ -153,7 +178,17 @@ def run(source_dir: Path, layer_id: int):
     print("=== Full layer forward diff (identical bf16 weights) ===")
     with torch.inference_mode():
         y_t = torch_blk(x_t, fc, ids_t)
-    y_m = mlx_layer(x_m, mask=None, cache=None, input_ids=ids_m)
+    # The real model path always supplies an explicit causal/sliding-window
+    # mask array because the DSV4 attention-sink path must be masked during
+    # prefill. Passing mask=None here makes MLX attention non-causal and turns
+    # this parity probe into a false runtime failure.
+    mask_m = create_attention_mask(
+        x_m[:, :, 0, :],
+        cache=None,
+        window_size=mlx_cfg.sliding_window,
+        return_array=True,
+    )
+    y_m = mlx_layer(x_m, mask=mask_m, cache=None, input_ids=ids_m)
     mx.eval(y_m)
     diff("layer_output", y_m, y_t, report_sample=True)
 
@@ -161,7 +196,7 @@ def run(source_dir: Path, layer_id: int):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", required=True, type=Path)
-    ap.add_argument("--layer", type=int, default=3)
+    ap.add_argument("--layer", type=int, default=0)
     args = ap.parse_args()
     run(args.source, args.layer)
     return 0
