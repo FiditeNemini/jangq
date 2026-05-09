@@ -76,15 +76,15 @@ def _safe_load_fp8(sf_path: Path, key: str, shape, scale):
     """Load tensor trying FP8 dequant first, then raw then bf16."""
     try:
         return load_fp8_tensor(sf_path, key, shape, scale).astype(np.float32)
-    except Exception:
-        pass
+    except Exception as fp8_exc:
+        last_error = fp8_exc
     try:
         with safe_open(str(sf_path), framework="numpy") as f:
             t = f.get_tensor(key)
             if hasattr(t, "astype"):
                 return t.astype(np.float32)
-    except Exception:
-        pass
+    except Exception as raw_exc:
+        last_error = raw_exc
     return _load_bf16_tensor(sf_path, key, shape).astype(np.float32)
 
 

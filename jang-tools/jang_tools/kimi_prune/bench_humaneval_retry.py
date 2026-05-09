@@ -63,8 +63,8 @@ def run(*, model_path: Path, source_report: Path, seeds: list[int],
         if mx_ is not None:
             try:
                 mx_.random.seed(seed)
-            except Exception:
-                pass
+            except Exception as _seed_exc:
+                print(f"  warning: mlx seed skipped: {_seed_exc}", flush=True)
         for i, p in enumerate(fail_problems):
             if any(r["passed"] for r in retry_results[p["task_id"]]):
                 print(f"  [{i+1}/{len(fail_problems)}] skip {p['task_id']} "

@@ -138,9 +138,8 @@ def _get_module(container, name: str):
         return container[name]
     try:
         return container[name]
-    except Exception:
-        pass
-    return getattr(container, name)
+    except (KeyError, IndexError, TypeError):
+        return getattr(container, name)
 
 
 def _accumulate(acc: dict, key: str, activations: np.ndarray) -> None:

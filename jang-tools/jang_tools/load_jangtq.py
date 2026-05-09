@@ -44,7 +44,13 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 
+from jang_tools.ssm_layout import sanitize_grouped_conv1d_layout
 from jang_tools.turboquant.tq_kernel import TurboQuantLinear, TurboQuantSwitchLinear
+
+
+def _sanitize_grouped_conv1d_layout(weights: dict) -> dict:
+    """Idempotently normalize grouped Conv1d weights after model sanitize."""
+    return sanitize_grouped_conv1d_layout(weights, lambda v: v.moveaxis(2, 1))
 
 
 def _apply_wired_limit_safe_default():
@@ -226,8 +232,8 @@ def load_jangtq_model(model_path, skip_params_eval=False):
         if eos_ids:
             try:
                 tokenizer.eos_token_ids = list(eos_ids)
-            except Exception:
-                pass
+            except (AttributeError, TypeError):
+                tokenizer._jang_eos_token_ids = list(eos_ids)
 
     # Pre-compile Metal kernels + materialize TQ weights so the FIRST
     # /v1/chat/completions request doesn't pay full kernel-JIT + weight-
@@ -303,18 +309,18 @@ def load_jangtq_model(model_path, skip_params_eval=False):
         if cfg_eos_id is not None and getattr(tokenizer, "eos_token_id", None) is None:
             try:
                 tokenizer.eos_token_id = cfg_eos_id
-            except Exception:
-                pass
+            except (AttributeError, TypeError):
+                tokenizer._jang_eos_token_id = cfg_eos_id
         if cfg_eos_tok is not None and getattr(tokenizer, "eos_token", None) in (None, ""):
             try:
                 tokenizer.eos_token = cfg_eos_tok
-            except Exception:
-                pass
+            except (AttributeError, TypeError):
+                tokenizer._jang_eos_token = cfg_eos_tok
         # Expose the chat metadata for caller convenience.
         try:
             tokenizer.jang_chat = chat_cfg
-        except Exception:
-            pass
+        except (AttributeError, TypeError):
+            tokenizer._jang_chat = chat_cfg
 
     print(f"  Done (eos_token_ids={eos_ids})", flush=True)
     return model, tokenizer
@@ -421,8 +427,8 @@ def _hydrate_dsv4_jangtq_streaming(
                     ):
                         _is_prestacked = True
                         break
-        except Exception:
-            pass
+        except Exception as _e:
+            print(f"  [prestack] probe skipped for {sf_path.name}: {_e}", flush=True)
         if _is_prestacked:
             break
     if _is_prestacked:
@@ -587,6 +593,7 @@ def _hydrate_dsv4_jangtq_streaming(
         if shard_regular:
             if hasattr(model, "sanitize"):
                 shard_regular = model.sanitize(shard_regular)
+            shard_regular = _sanitize_grouped_conv1d_layout(shard_regular)
             model.load_weights(list(shard_regular.items()), strict=False)
         del shard_regular
         if shard_i % 10 == 0 or shard_i == len(weight_files):
@@ -1147,6 +1154,7 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             regular = _vlm_minimal_sanitize(model, regular)
         else:
             regular = model.sanitize(regular)
+    regular = _sanitize_grouped_conv1d_layout(regular)
     model.load_weights(list(regular.items()), strict=False)
     del regular
     gc.collect()
@@ -1584,6 +1592,18 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     if _cfg_get(tc, "kv_lora_rank", 0) > 0 or _cfg_get(tc, "model_type", "") == "glm_moe_dsa":
         model.set_dtype(mx.bfloat16)
         print("  bfloat16 enabled", flush=True)
+
+    from jang_tools.jangrt.inference_mode import ensure_inference_mode
+    _infer_report = ensure_inference_mode(model, label="JANGTQ")
+    if _infer_report["training_modules_remaining"]:
+        print(
+            "  [hydrate] WARNING: inference mode left "
+            f"{_infer_report['training_modules_remaining']} training=True modules "
+            f"(examples={_infer_report['remaining_examples']})",
+            flush=True,
+        )
+    elif _infer_report["eval_called"]:
+        print("  [hydrate] inference mode enabled", flush=True)
 
     if not skip_params_eval:
         # mx.synchronize alone only flushes the dispatch queue; it does

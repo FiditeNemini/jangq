@@ -130,7 +130,8 @@ def main():
     p.add_argument("--layer", type=int, default=0)
     args = p.parse_args()
 
-    src_cfg = json.load(open(f"{args.src}/config.json"))
+    with open(f"{args.src}/config.json") as f:
+        src_cfg = json.load(f)
     cfg_t = DSV4Config.from_config_json(src_cfg)
     cfg_m = ModelArgs(
         vocab_size=src_cfg["vocab_size"], hidden_size=src_cfg["hidden_size"],

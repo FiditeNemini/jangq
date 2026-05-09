@@ -24,6 +24,10 @@ from .format.writer import write_jang_v2_model
 from .architectures import detect_architecture, get_layer_config, get_skip_tensors, summarize_architecture
 from .calibrate import calibrate_from_weights, _load_bf16_tensor
 from .allocate import allocate_bits_greedy, allocate_bits_profile, summarize_allocation, JANG_PROFILES
+from .ssm_layout import (
+    forced_passthrough_bits as _shared_forced_passthrough_bits,
+    prepare_mlx_passthrough_tensor as _shared_prepare_mlx_passthrough_tensor,
+)
 
 
 # ── Stale-artifact cleanup (M115, iter 39) ────────────────────────────
@@ -79,6 +83,22 @@ EOS_FIXES: dict[str, dict[int, int]] = {
     "qwen3_moe_vl": {248044: 248046},
     "qwen3_5_vl":  {248044: 248046},
 }
+
+
+def _forced_passthrough_bits(tensor_name: str) -> int | None:
+    """Return the storage bit width for tensors that must not be quantized."""
+    return _shared_forced_passthrough_bits(tensor_name)
+
+
+def _prepare_mlx_passthrough_tensor(tensor_name: str, tensor: np.ndarray) -> np.ndarray:
+    """Prepare non-Linear state tensors for MLX load semantics.
+
+    Qwen3-Next/GatedDeltaNet ships grouped Conv1d weights from HF as
+    (out_channels, 1, kernel). MLX Conv1d stores them as
+    (out_channels, kernel, 1). These tensors are tiny and state-sensitive, so
+    they stay f16 passthrough instead of entering affine/JANG quantization.
+    """
+    return _shared_prepare_mlx_passthrough_tensor(tensor_name, tensor)
 
 
 # Pattern for per-expert 2D tensors (MiniMax/Mixtral style)
@@ -515,6 +535,7 @@ def convert_model(
     # Buffer for per-expert 2D tensors that need stacking
     expert_buffer = {}  # (layer_prefix, wtype) → {expert_id: {weight, scales, biases}}
     passthrough = {}
+    passthrough_bits = {}
 
     total_tensors = len(all_tensors_info)
     for i, (tensor_name, shape, n_blocks, sf_path) in enumerate(all_tensors_info):
@@ -596,6 +617,19 @@ def convert_model(
                 if len(norms) == in_features:
                     awq_scales = compute_awq_scales(norms, alpha=awq_alpha)
                     weights = apply_awq_scaling(weights, awq_scales)
+
+        forced_bits = _forced_passthrough_bits(tensor_name)
+        if forced_bits is not None:
+            passthrough[tensor_name] = _prepare_mlx_passthrough_tensor(
+                tensor_name,
+                weights,
+            )
+            passthrough_bits[tensor_name] = forced_bits
+            print(
+                f"    Passthrough (f16, state/Conv1d): "
+                f"{tensor_name} → {passthrough[tensor_name].shape}"
+            )
+            continue
 
         # MoE router/gate: store as float16 passthrough (no quantization).
         # Gate routing is extremely precision-sensitive — even 8-bit quantization
@@ -777,8 +811,8 @@ def convert_model(
         try:
             import mlx.core as mx
             mx.clear_cache()
-        except Exception:
-            pass
+        except Exception as _e:
+            _metal_cache_clear_error = _e
 
         # --- Store with MLX-ready names and shapes ---
         base_name = tensor_name
@@ -919,6 +953,8 @@ def convert_model(
                 # Skip importance tensors (calibration-only)
                 if tensor_name.endswith(".importance"):
                     continue
+                if tensor_name in passthrough:
+                    continue
                 base = tensor_name.replace(".weight", "")
                 if base in quantized_bases:
                     continue
@@ -941,14 +977,19 @@ def convert_model(
                     except TypeError:
                         tensor = _load_bf16_tensor(sf_path, tensor_name, shape)
 
-                    if tensor.dtype == np.float32:
-                        tensor = tensor.astype(np.float16)
-                    elif tensor.dtype != np.float16:
-                        tensor = tensor.astype(np.float16)
+                    forced_bits = _forced_passthrough_bits(tensor_name)
+                    if forced_bits is not None:
+                        tensor = _prepare_mlx_passthrough_tensor(tensor_name, tensor)
+                        passthrough_bits[tensor_name] = forced_bits
+                    else:
+                        if tensor.dtype == np.float32:
+                            tensor = tensor.astype(np.float16)
+                        elif tensor.dtype != np.float16:
+                            tensor = tensor.astype(np.float16)
 
-                    # Transpose 4D conv weights: PyTorch OIHW → MLX OHWI
-                    if len(tensor.shape) == 4:
-                        tensor = np.transpose(tensor, (0, 2, 3, 1))
+                        # Transpose 4D conv weights: PyTorch OIHW → MLX OHWI
+                        if len(tensor.shape) == 4:
+                            tensor = np.transpose(tensor, (0, 2, 3, 1))
 
                     passthrough[tensor_name] = tensor
 
@@ -971,6 +1012,7 @@ def convert_model(
     # to misinterpret the model format. JANG uses "quantization" key instead.
     model_config.pop("quantization_config", None)
     bit_widths_used = sorted(set(_tensor_bits.values()))
+    passthrough_bit_widths_used = sorted(set(passthrough_bits.values()))
     total_weight_bytes = sum(
         arr.nbytes for name, arr in v2_tensors.items()
         if name.endswith(".weight") and arr.dtype == np.uint32
@@ -987,6 +1029,8 @@ def convert_model(
             "quantization_method": quantization_method,
             "scoring_method": "weight-magnitude" if calibration_method == "weights" else "awq+hessian",
             "bit_widths_used": bit_widths_used,
+            "passthrough_bit_widths_used": passthrough_bit_widths_used,
+            "passthrough_tensor_count": len(passthrough_bits),
             "quantization_scheme": "asymmetric",
             "quantization_backend": "mx.quantize",
             "hadamard_rotation": hadamard,

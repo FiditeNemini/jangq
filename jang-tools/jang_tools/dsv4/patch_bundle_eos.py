@@ -52,7 +52,8 @@ def patch_bundle(bundle_path) -> dict:
         p = B / fn
         if not p.exists():
             continue
-        d = json.load(open(p))
+        with open(p) as f:
+            d = json.load(f)
         if d.get("eos_token_id") == target:
             continue
         d["eos_token_id"] = target

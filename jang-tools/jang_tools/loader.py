@@ -12,6 +12,7 @@ so existing models on HuggingFace continue to work.
 import gc
 import json
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from .ssm_layout import sanitize_grouped_conv1d_layout
 
 try:
     import mlx.core as mx
@@ -34,6 +36,27 @@ JANG_FORMAT_VALUES = ["jang", "jjqf", "mxq"]
 
 # Shard flush threshold for v1 streaming repack (~2 GB)
 _SHARD_FLUSH_BYTES = 2_000_000_000  # Made by Jinho Jang — jangq.ai
+
+
+def _sanitize_grouped_conv1d_layout(weights: dict) -> dict:
+    """Force leftover grouped Conv1d weights into MLX layout.
+
+    Some mlx-lm sanitize paths return successfully without touching dense or
+    already-stacked converted bundles, leaving HF Conv1d layout `(out, 1,
+    kernel)` on disk. MLX Conv1d expects `(out, kernel, 1)`, so keep this
+    idempotent pass after model-specific sanitize too.
+    """
+    def _transpose(value):
+        if _MLX_AVAILABLE and type(value).__module__.startswith("mlx."):
+            return mx.transpose(value, axes=(0, 2, 1))
+        return np.transpose(value, (0, 2, 1))
+
+    return sanitize_grouped_conv1d_layout(weights, _transpose)
+
+
+def _sanitize_qwen3_next_conv1d_layout(weights: dict) -> dict:
+    """Backward-compatible alias for older callers/tests."""
+    return _sanitize_grouped_conv1d_layout(weights)
 
 
 def _find_config_path(model_path: Path) -> Optional[Path]:
@@ -181,6 +204,7 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
                    if not k.endswith(".importance") and not k.startswith("mtp.")}
         if hasattr(model, "sanitize"):
             weights = model.sanitize(weights)
+        weights = _sanitize_qwen3_next_conv1d_layout(weights)
 
         # Nemotron-H: rename switch_mlp keys + dequantize gate weights
         if _needs_gate_dequant:
@@ -317,95 +341,98 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
     # ── TurboQuant KV cache (JANG-exclusive) ──────────────────
     _tq_cfg = jang_cfg.get("turboquant")
     if _tq_cfg and _tq_cfg.get("enabled", False):
-        try:
-            from .turboquant.config import TurboQuantConfig, make_turboquant_cache
+        if os.environ.get("VMLX_DISABLE_TQ_KV") == "1":
+            logger.info("  TurboQuant KV disabled by VMLX_DISABLE_TQ_KV=1")
+        else:
             try:
-                _native_cache = model.make_cache()
-                _native_cache_types = [type(c).__name__ for c in _native_cache]
-                n_layers = len(_native_cache)
-                del _native_cache
-            except Exception:
-                n_layers = len(model.layers)
-                _native_cache_types = []
-            tq_config = TurboQuantConfig.from_jang_config(jang_cfg, n_layers)
-            if tq_config:
-                _key_dim = _text_cfg.get("head_dim", 128)
-                _val_dim = _text_cfg.get("head_dim", 128)
-                if _text_cfg.get("kv_lora_rank", 0) > 0:
-                    _key_dim = _text_cfg.get("qk_nope_head_dim", 128) + _text_cfg.get("qk_rope_head_dim", 64)
-                    _val_dim = _text_cfg.get("v_head_dim", 128)
-                # Detect hybrid layer types from config
-                _layer_type_list = _text_cfg.get("layer_types", [])
-                _hybrid_pattern = _text_cfg.get("hybrid_override_pattern",
-                                    _model_cfg.get("hybrid_override_pattern", ""))
+                from .turboquant.config import TurboQuantConfig, make_turboquant_cache
                 try:
-                    _logical_layers = int(
-                        _text_cfg.get("num_hidden_layers")
-                        or _model_cfg.get("num_hidden_layers")
-                        or len(getattr(model, "layers", []) or [])
-                        or n_layers
-                    )
+                    _native_cache = model.make_cache()
+                    _native_cache_types = [type(c).__name__ for c in _native_cache]
+                    n_layers = len(_native_cache)
+                    del _native_cache
                 except Exception:
-                    _logical_layers = n_layers
-                if _layer_type_list:
-                    # Qwen3.5 style: explicit layer_types list
-                    _layer_types = [
-                        "attention" if lt == "full_attention" else "ssm"
-                        for lt in _layer_type_list[:_logical_layers]
-                    ]
-                    while len(_layer_types) < _logical_layers:
-                        _layer_types.append("attention")
-                elif _hybrid_pattern:
-                    # Nemotron pattern: M=Mamba(SSM), *=attention, E=MoE(MLP), -=MLP
-                    # Only M and * get cache entries. E and - are pure MLP (no cache).
-                    # Must match model's make_cache() which skips E/- layers.
-                    _layer_types = []
-                    for ch in _hybrid_pattern[:_logical_layers]:
-                        if ch == "M":
-                            _layer_types.append("ssm")
-                        elif ch == "*":
-                            _layer_types.append("attention")
-                        # E and - layers: no cache entry (skip)
-                else:
-                    _layer_types = ["attention"] * n_layers
-                if len(_layer_types) != n_layers:
-                    if _native_cache_types:
+                    n_layers = len(model.layers)
+                    _native_cache_types = []
+                tq_config = TurboQuantConfig.from_jang_config(jang_cfg, n_layers)
+                if tq_config:
+                    _key_dim = _text_cfg.get("head_dim", 128)
+                    _val_dim = _text_cfg.get("head_dim", 128)
+                    if _text_cfg.get("kv_lora_rank", 0) > 0:
+                        _key_dim = _text_cfg.get("qk_nope_head_dim", 128) + _text_cfg.get("qk_rope_head_dim", 64)
+                        _val_dim = _text_cfg.get("v_head_dim", 128)
+                    # Detect hybrid layer types from config
+                    _layer_type_list = _text_cfg.get("layer_types", [])
+                    _hybrid_pattern = _text_cfg.get("hybrid_override_pattern",
+                                        _model_cfg.get("hybrid_override_pattern", ""))
+                    try:
+                        _logical_layers = int(
+                            _text_cfg.get("num_hidden_layers")
+                            or _model_cfg.get("num_hidden_layers")
+                            or len(getattr(model, "layers", []) or [])
+                            or n_layers
+                        )
+                    except Exception:
+                        _logical_layers = n_layers
+                    if _layer_type_list:
+                        # Qwen3.5 style: explicit layer_types list
                         _layer_types = [
-                            "ssm" if t in ("ArraysCache", "MambaCache", "BatchMambaCache")
-                            else "attention"
-                            for t in _native_cache_types
+                            "attention" if lt == "full_attention" else "ssm"
+                            for lt in _layer_type_list[:_logical_layers]
                         ]
-                        logger.warning(
-                            "  TurboQuant cache layout inferred from native "
-                            "make_cache types (%d slots)",
-                            n_layers,
-                        )
+                        while len(_layer_types) < _logical_layers:
+                            _layer_types.append("attention")
+                    elif _hybrid_pattern:
+                        # Nemotron pattern: M=Mamba(SSM), *=attention, E=MoE(MLP), -=MLP
+                        # Only M and * get cache entries. E and - are pure MLP (no cache).
+                        # Must match model's make_cache() which skips E/- layers.
+                        _layer_types = []
+                        for ch in _hybrid_pattern[:_logical_layers]:
+                            if ch == "M":
+                                _layer_types.append("ssm")
+                            elif ch == "*":
+                                _layer_types.append("attention")
+                            # E and - layers: no cache entry (skip)
                     else:
-                        logger.warning(
-                            "  TurboQuant cache layout mismatch: detector produced "
-                            "%d entries for %d native cache slots; falling back "
-                            "to all-attention",
-                            len(_layer_types),
-                            n_layers,
-                        )
                         _layer_types = ["attention"] * n_layers
-                _n_attn = sum(1 for t in _layer_types if t == "attention")
-                _n_ssm = sum(1 for t in _layer_types if t == "ssm")
-                _n_cache = len(_layer_types)  # may be < n_layers for Nemotron
-                _n_skip = max(0, _logical_layers - _n_cache)
-                if _n_ssm > 0 or _n_skip > 0:
-                    logger.info(f"  Hybrid model: {_n_attn} attention + {_n_ssm} SSM"
-                                + (f" + {_n_skip} no-cache" if _n_skip else "") + " layers")
-                def _turboquant_make_cache(
-                    _cfg=tq_config, _n=_n_cache, _kd=_key_dim, _vd=_val_dim, _lt=_layer_types
-                ):
-                    return make_turboquant_cache(_cfg, _n, [_kd]*_n, [_vd]*_n, _lt)
-                model.make_cache = _turboquant_make_cache
-                logger.info(f"  TurboQuant enabled: {tq_config.default_key_bits}-bit keys, "
-                            f"{tq_config.default_value_bits}-bit values, "
-                            f"{len(tq_config.critical_layers)} critical layers")
-        except ImportError:
-            logger.warning("  TurboQuant config found but turboquant module not available")
+                    if len(_layer_types) != n_layers:
+                        if _native_cache_types:
+                            _layer_types = [
+                                "ssm" if t in ("ArraysCache", "MambaCache", "BatchMambaCache")
+                                else "attention"
+                                for t in _native_cache_types
+                            ]
+                            logger.warning(
+                                "  TurboQuant cache layout inferred from native "
+                                "make_cache types (%d slots)",
+                                n_layers,
+                            )
+                        else:
+                            logger.warning(
+                                "  TurboQuant cache layout mismatch: detector produced "
+                                "%d entries for %d native cache slots; falling back "
+                                "to all-attention",
+                                len(_layer_types),
+                                n_layers,
+                            )
+                            _layer_types = ["attention"] * n_layers
+                    _n_attn = sum(1 for t in _layer_types if t == "attention")
+                    _n_ssm = sum(1 for t in _layer_types if t == "ssm")
+                    _n_cache = len(_layer_types)  # may be < n_layers for Nemotron
+                    _n_skip = max(0, _logical_layers - _n_cache)
+                    if _n_ssm > 0 or _n_skip > 0:
+                        logger.info(f"  Hybrid model: {_n_attn} attention + {_n_ssm} SSM"
+                                    + (f" + {_n_skip} no-cache" if _n_skip else "") + " layers")
+                    def _turboquant_make_cache(
+                        _cfg=tq_config, _n=_n_cache, _kd=_key_dim, _vd=_val_dim, _lt=_layer_types
+                    ):
+                        return make_turboquant_cache(_cfg, _n, [_kd]*_n, [_vd]*_n, _lt)
+                    model.make_cache = _turboquant_make_cache
+                    logger.info(f"  TurboQuant enabled: {tq_config.default_key_bits}-bit keys, "
+                                f"{tq_config.default_value_bits}-bit values, "
+                                f"{len(tq_config.critical_layers)} critical layers")
+            except ImportError:
+                logger.warning("  TurboQuant config found but turboquant module not available")
 
     # ── Hadamard rotation (input pre-rotation for rotated weights) ──
     # If model was converted with --hadamard, weight rows are Hadamard-rotated.
@@ -539,6 +566,7 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
                     v = v + 1.0
                 fixed[k] = v
             shard_weights = fixed
+        shard_weights = _sanitize_qwen3_next_conv1d_layout(shard_weights)
         try:
             shard_weights = sanitize_weights(
                 model_class.VisionModel, shard_weights, model_config.vision_config)
@@ -701,27 +729,30 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
     # ── TurboQuant for VLM (patch language_model, not top-level model) ──
     _tq_cfg_vlm = jang_cfg.get("turboquant")
     if _tq_cfg_vlm and _tq_cfg_vlm.get("enabled", False):
-        try:
-            from .turboquant.config import TurboQuantConfig, make_turboquant_cache
-            _lang_model = getattr(model, "language_model", None)
-            if _lang_model is not None and hasattr(_lang_model, "layers"):
-                _vlm_n_layers = len(_lang_model.layers)
-                _vlm_tq = TurboQuantConfig.from_jang_config(jang_cfg, _vlm_n_layers)
-                if _vlm_tq:
-                    _vlm_model_cfg = json.loads((path / "config.json").read_text())
-                    _vlm_text_cfg = _vlm_model_cfg.get("text_config", _vlm_model_cfg)
-                    _vlm_kd = _vlm_text_cfg.get("head_dim", 128)
-                    _vlm_vd = _vlm_text_cfg.get("head_dim", 128)
-                    if _vlm_text_cfg.get("kv_lora_rank", 0) > 0:
-                        _vlm_kd = _vlm_text_cfg.get("qk_nope_head_dim", 128) + _vlm_text_cfg.get("qk_rope_head_dim", 64)
-                        _vlm_vd = _vlm_text_cfg.get("v_head_dim", 128)
-                    _vlm_lt = ["attention"] * _vlm_n_layers
-                    def _vlm_tq_make_cache(_c=_vlm_tq, _n=_vlm_n_layers, _k=_vlm_kd, _v=_vlm_vd, _t=_vlm_lt):
-                        return make_turboquant_cache(_c, _n, [_k]*_n, [_v]*_n, _t)
-                    _lang_model.make_cache = _vlm_tq_make_cache
-                    logger.info(f"  TurboQuant VLM enabled: {_vlm_tq.default_key_bits}-bit keys")
-        except ImportError:
-            pass
+        if os.environ.get("VMLX_DISABLE_TQ_KV") == "1":
+            logger.info("  TurboQuant VLM KV disabled by VMLX_DISABLE_TQ_KV=1")
+        else:
+            try:
+                from .turboquant.config import TurboQuantConfig, make_turboquant_cache
+                _lang_model = getattr(model, "language_model", None)
+                if _lang_model is not None and hasattr(_lang_model, "layers"):
+                    _vlm_n_layers = len(_lang_model.layers)
+                    _vlm_tq = TurboQuantConfig.from_jang_config(jang_cfg, _vlm_n_layers)
+                    if _vlm_tq:
+                        _vlm_model_cfg = json.loads((path / "config.json").read_text())
+                        _vlm_text_cfg = _vlm_model_cfg.get("text_config", _vlm_model_cfg)
+                        _vlm_kd = _vlm_text_cfg.get("head_dim", 128)
+                        _vlm_vd = _vlm_text_cfg.get("head_dim", 128)
+                        if _vlm_text_cfg.get("kv_lora_rank", 0) > 0:
+                            _vlm_kd = _vlm_text_cfg.get("qk_nope_head_dim", 128) + _vlm_text_cfg.get("qk_rope_head_dim", 64)
+                            _vlm_vd = _vlm_text_cfg.get("v_head_dim", 128)
+                        _vlm_lt = ["attention"] * _vlm_n_layers
+                        def _vlm_tq_make_cache(_c=_vlm_tq, _n=_vlm_n_layers, _k=_vlm_kd, _v=_vlm_vd, _t=_vlm_lt):
+                            return make_turboquant_cache(_c, _n, [_k]*_n, [_v]*_n, _t)
+                        _lang_model.make_cache = _vlm_tq_make_cache
+                        logger.info(f"  TurboQuant VLM enabled: {_vlm_tq.default_key_bits}-bit keys")
+            except ImportError:
+                pass
 
     elapsed = time.perf_counter() - start
     logger.info(f"JANG v2 VLM loaded in {elapsed:.1f}s")
@@ -911,6 +942,7 @@ def _load_jang_v1(path: Path, jang_cfg: dict, config_path: Path):
                 shard_weights = mx.load(sf)
                 if hasattr(model, "sanitize"):
                     shard_weights = model.sanitize(shard_weights)
+                shard_weights = _sanitize_qwen3_next_conv1d_layout(shard_weights)
                 model.load_weights(list(shard_weights.items()), strict=False)
                 del shard_weights
                 gc.collect()
@@ -918,6 +950,7 @@ def _load_jang_v1(path: Path, jang_cfg: dict, config_path: Path):
             weights = result
             if hasattr(model, "sanitize"):
                 weights = model.sanitize(weights)
+            weights = _sanitize_qwen3_next_conv1d_layout(weights)
             model.load_weights(list(weights.items()), strict=False)
             del weights
             gc.collect()
@@ -1000,6 +1033,7 @@ def _load_jang_v1_vlm(path: Path, jang_cfg: dict, config_path: Path):
                                  if not k.endswith(".importance")}
                 if hasattr(model, "sanitize"):
                     shard_weights = model.sanitize(shard_weights)
+                shard_weights = _sanitize_qwen3_next_conv1d_layout(shard_weights)
                 shard_weights = sanitize_weights(
                     model_class.VisionModel, shard_weights, model_config.vision_config)
                 shard_weights = sanitize_weights(
@@ -1014,6 +1048,7 @@ def _load_jang_v1_vlm(path: Path, jang_cfg: dict, config_path: Path):
                        if not k.endswith(".importance")}
             if hasattr(model, "sanitize"):
                 weights = model.sanitize(weights)
+            weights = _sanitize_qwen3_next_conv1d_layout(weights)
             weights = sanitize_weights(
                 model_class.VisionModel, weights, model_config.vision_config)
             weights = sanitize_weights(
@@ -1476,21 +1511,56 @@ def _patch_hadamard_rotation(model):
             _signs_cache[dim] = generate_random_signs(dim, seed=42)
         return _signs_cache[dim]
 
+    _wrapped_classes = {}
+
+    def _make_wrapped_class(cls):
+        if getattr(cls, "_jang_hadamard_wrapper", False):
+            return cls
+        if cls in _wrapped_classes:
+            return _wrapped_classes[cls]
+
+        class HadamardQuantizedLinear(cls):
+            _jang_hadamard_wrapper = True
+
+            def __call__(self, x, *args, **kwargs):
+                signs = getattr(self, "_hadamard_signs", None)
+                if signs is None:
+                    return super().__call__(x, *args, **kwargs)
+                return super().__call__(hadamard_rotate(x, signs), *args, **kwargs)
+
+        HadamardQuantizedLinear.__name__ = f"Hadamard{cls.__name__}"
+        HadamardQuantizedLinear.__qualname__ = f"Hadamard{cls.__qualname__}"
+        _wrapped_classes[cls] = HadamardQuantizedLinear
+        return HadamardQuantizedLinear
+
+    def _iter_children(module):
+        if isinstance(module, (list, tuple)):
+            for idx, child in enumerate(module):
+                yield str(idx), child
+            return
+        if isinstance(module, dict):
+            for key, child in module.items():
+                yield str(key), child
+            return
+        if hasattr(module, "items"):
+            try:
+                for key, child in module.items():
+                    yield str(key), child
+            except Exception:
+                return
+
     def _wrap_linear(module, name_path):
         """Recursively find and wrap QuantizedLinear layers."""
-        for attr_name in dir(module):
-            if attr_name.startswith("_"):
-                continue
-            try:
-                child = getattr(module, attr_name)
-            except (AttributeError, TypeError):
-                continue
-
+        for attr_name, child in _iter_children(module):
             child_path = f"{name_path}.{attr_name}" if name_path else attr_name
+            child_path_l = child_path.lower()
 
             # Skip: embeddings, norms, gates (not rotated during conversion)
-            if any(skip in child_path.lower() for skip in
-                   ["embed", "lm_head", "norm", ".gate."]):
+            if (
+                attr_name == "gate"
+                or ".gate." in child_path_l
+                or any(skip in child_path_l for skip in ["embed", "lm_head", "norm"])
+            ):
                 continue
 
             if isinstance(child, nn.QuantizedLinear):
@@ -1499,15 +1569,9 @@ def _patch_hadamard_rotation(model):
                     continue
                 in_dim = child.weight.shape[-1] * (32 // child.bits)
                 signs = _get_signs(in_dim)
-                original_call = child.__call__
-
-                def make_rotated_call(orig, s):
-                    def rotated_call(x):
-                        return orig(hadamard_rotate(x, s))
-                    return rotated_call
-
-                child.__call__ = make_rotated_call(original_call, signs)
-            elif hasattr(child, '__dict__') and not callable(child):
+                object.__setattr__(child, "_hadamard_signs", signs)
+                object.__setattr__(child, "__class__", _make_wrapped_class(type(child)))
+            elif hasattr(child, "items") or isinstance(child, (list, tuple, dict)):
                 # Recurse into submodules
                 _wrap_linear(child, child_path)
 
@@ -1602,8 +1666,8 @@ def _fix_quantized_bits(model, weights):
                         except Exception:
                             module.biases = None
                     continue  # done with this module
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("QuantizedLinear metadata fast-path skipped for %s: %s", name, exc)
         try:
             # Infer actual bits and group_size from tensor shapes.
             # weight: (out, in_dim * bits / 32), scales: (out, in_dim / gs)
@@ -1648,8 +1712,8 @@ def _fix_quantized_bits(model, weights):
                     actual_bits = (w_cols * 32) // in_dim
                     if actual_bits != module.bits and actual_bits in (2, 3, 4, 5, 6, 8):
                         module.bits = actual_bits
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("QuantizedLinear bits/group inference skipped for %s: %s", name, exc)
 
 
 def _build_vlm_processor(model_path: Path, eos_token_id=None):

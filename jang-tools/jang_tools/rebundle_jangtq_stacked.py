@@ -381,9 +381,11 @@ def _rebundle_impl(args):
     jc_path = DST / "jang_config.json"
     if jc_path.exists():
         try:
-            jc = json.load(open(jc_path))
+            with open(jc_path) as f:
+                jc = json.load(f)
             jc["routed_expert_layout"] = "prestacked"
-            json.dump(jc, open(jc_path, "w"), indent=2)
+            with open(jc_path, "w") as f:
+                json.dump(jc, f, indent=2)
             print(f"  jang_config.json: routed_expert_layout=prestacked")
         except Exception as e:
             print(f"  warn: jang_config.json patch failed: {e}")

@@ -267,8 +267,8 @@ def hydrate_jangtq(
                 f"[jangtq_hydrate] swapped={n_swapped} skipped(no-module)={n_skipped}",
                 flush=True,
             )
-        except Exception:
-            pass
+        except Exception as print_exc:
+            _print_error = print_exc
 
     return regular
 

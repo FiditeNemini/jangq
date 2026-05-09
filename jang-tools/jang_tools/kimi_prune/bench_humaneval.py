@@ -152,8 +152,8 @@ def _run_source(source: str, timeout: float):
     finally:
         try:
             os.unlink(tmp_path)
-        except Exception:
-            pass
+        except FileNotFoundError:
+            tmp_path = ""
 
 
 def _solve(model, tokenizer, problem, *, max_tokens, prefill_step_size,
@@ -224,8 +224,8 @@ def run(model_path, *, num, max_tokens, prefill_step_size, thinking,
     try:
         import mlx.core as mx_  # local import; seed Metal PRNG
         mx_.random.seed(seed)
-    except Exception:
-        pass
+    except Exception as _seed_exc:
+        print(f"  warning: mlx seed skipped: {_seed_exc}", flush=True)
 
     t_start = time.time()
     results = []

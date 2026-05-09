@@ -45,6 +45,7 @@ eval_*
 sweep*
 debug_*
 test_*
+!jang-tools/tests/test_jangtq_decode_profiler.py
 # Allow ralph_runner test suite
 !ralph_runner/tests/test_*.py
 # Allow ralph_runner fixtures (deterministic test assets)

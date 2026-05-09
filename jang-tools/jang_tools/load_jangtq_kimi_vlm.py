@@ -117,8 +117,8 @@ def _set_vl_wired_limit() -> None:
             f"(~52% of {total_gb:.0f} GB; headroom for VL prefill spike)",
             flush=True,
         )
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"  [wired_limit:VL] skipped ({type(_e).__name__}: {_e})", flush=True)
 
 
 def _warmup_jit_per_layer(model, verbose: bool = True) -> None:
@@ -235,8 +235,9 @@ def _warmup_jit_per_layer(model, verbose: bool = True) -> None:
             y = lm_head(x)
             _materialize(y)
             _mx.synchronize()
-    except Exception:
-        pass
+    except Exception as _e:
+        if verbose:
+            print(f"  [warmup] final norm/lm_head skipped: {_e!r}", flush=True)
 
     # Second-pass warmup: full-model forward at a prefill-chunk shape so
     # the multi-token attention + MoE kernels are JIT-cached too. The
@@ -328,8 +329,8 @@ def _install_vl_command_buffer_split(model) -> None:
         try:
             _materialize(out.inputs_embeds)
             _mx.synchronize()
-        except Exception:
-            pass
+        except Exception as _e:
+            model._jang_cb_split_last_error = repr(_e)
         return out
 
     model.get_input_embeddings = _patched_get_input_embeddings

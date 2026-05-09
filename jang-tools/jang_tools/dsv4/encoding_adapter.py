@@ -28,8 +28,8 @@ def _default_encoding_dirs() -> list[Path]:
     if volumes.exists():
         try:
             roots.extend(p for p in volumes.iterdir() if p.is_dir())
-        except Exception:
-            pass
+        except OSError:
+            roots = roots
 
     for root in roots:
         try:

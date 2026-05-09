@@ -17,8 +17,8 @@ def register() -> None:
         # Some mlx_lm versions have a factory dict; guard both shapes
         if hasattr(mlx_lm_models, "_MODEL_MAPPING"):
             mlx_lm_models._MODEL_MAPPING["deepseek_v4"] = mlx_model  # type: ignore
-    except Exception:
-        pass
+    except Exception as exc:
+        setattr(mlx_model, "_jang_register_warning", repr(exc))
 
 
 # Register immediately on import so `load_jangtq_model` can find it

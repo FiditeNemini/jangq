@@ -167,8 +167,8 @@ class OmniChat:
                     import torch as _torch
                     if hasattr(_torch, "mps") and _torch.mps.is_available():
                         _torch.mps.empty_cache()
-                except Exception:
-                    pass
+                except Exception as _cache_exc:
+                    print(f"[OmniChat] WARNING: torch MPS cache clear failed: {_cache_exc}", flush=True)
                 print("[OmniChat] Freed pt_model.language_model "
                       "(MLX path owns the LLM)", flush=True)
         except Exception as _e:

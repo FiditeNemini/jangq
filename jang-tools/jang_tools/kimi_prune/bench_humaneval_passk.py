@@ -110,13 +110,13 @@ def run(prior_path: Path, *, k: int, max_tokens: int, prefill_step_size: int,
             try:
                 import numpy as _np
                 _np.random.seed(seed_s)
-            except Exception:
-                pass
+            except Exception as _np_seed_exc:
+                print(f"  warning: numpy seed skipped: {_np_seed_exc}", flush=True)
             try:
                 import mlx.core as mx_
                 mx_.random.seed(seed_s)
-            except Exception:
-                pass
+            except Exception as _mx_seed_exc:
+                print(f"  warning: mlx seed skipped: {_mx_seed_exc}", flush=True)
             raw, elapsed = _solve(
                 model, tokenizer, p,
                 max_tokens=max_tokens,

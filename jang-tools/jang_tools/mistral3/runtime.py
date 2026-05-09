@@ -109,6 +109,17 @@ def load(src: str):
             return f"{name}.scales" in scale_keys
         nn.quantize(model, group_size=group_size, bits=bits, class_predicate=_predicate)
     model.update(tree_unflatten(list(weights.items())))
+    from jang_tools.jangrt.inference_mode import ensure_inference_mode
+    _infer_report = ensure_inference_mode(model, label="Mistral3")
+    if _infer_report["training_modules_remaining"]:
+        print(
+            "[mistral3] WARNING: inference mode left "
+            f"{_infer_report['training_modules_remaining']} training=True modules "
+            f"(examples={_infer_report['remaining_examples']})",
+            flush=True,
+        )
+    elif _infer_report["eval_called"]:
+        print("[mistral3] inference mode enabled", flush=True)
     _force(model.parameters())
     return model, cfg, fmt
 

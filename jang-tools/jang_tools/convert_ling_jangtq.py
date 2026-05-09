@@ -428,8 +428,8 @@ try:
                 "— fix jang_tools/capabilities.py before HF upload.",
                 flush=True,
             )
-    except Exception:
-        pass
+    except Exception as _verify_exc:
+        print(f"  WARNING: capabilities verify skipped: {_verify_exc}", flush=True)
 
     # === Copy tokenizer / chat-template / custom modeling files ===
     for f in [
