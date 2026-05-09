@@ -34,6 +34,31 @@ import sys
 from pathlib import Path
 
 
+def write_text_if_changed(path: Path, text: str) -> None:
+    """Write text only when content changed, preserving mtime otherwise."""
+    if path.exists() and path.read_text() == text:
+        return
+    path.write_text(text)
+
+
+def symlink_if_changed(target: Path, source: Path) -> None:
+    """Create target -> source without refreshing symlink mtime unnecessarily."""
+    source = source.resolve()
+    if target.is_symlink():
+        try:
+            if target.resolve() == source:
+                return
+        except FileNotFoundError:
+            pass
+        target.unlink()
+    elif target.exists():
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    os.symlink(source, target)
+
+
 def patched_tokenizer_config(src: Path) -> dict | None:
     """Return a tokenizer_config.json payload with Kimi template fixes.
 
@@ -147,7 +172,7 @@ def build_shadow(src: Path, dst: Path) -> Path:
     flat["architectures"] = ["KimiK25ForCausalLM"]
     flat.pop("auto_map", None)
 
-    (dst / "config.json").write_text(json.dumps(flat, indent=2))
+    write_text_if_changed(dst / "config.json", json.dumps(flat, indent=2))
     print(f"[shadow] wrote flat config.json to {dst}")
     print(f"  model_type:    {flat.get('model_type')}")
     print(f"  architectures: {flat.get('architectures')}")
@@ -160,13 +185,13 @@ def build_shadow(src: Path, dst: Path) -> Path:
     if (src / "jang_config.json").exists():
         jcfg = json.loads((src / "jang_config.json").read_text())
         jcfg["has_vision"] = False
-        jang_path.write_text(json.dumps(jcfg, indent=2))
+        write_text_if_changed(jang_path, json.dumps(jcfg, indent=2))
         print(f"[shadow] wrote jang_config.json with has_vision=false")
 
     tok_cfg = patched_tokenizer_config(src)
     skip = {"config.json", "jang_config.json"}
     if tok_cfg is not None:
-        (dst / "tokenizer_config.json").write_text(json.dumps(tok_cfg, indent=2))
+        write_text_if_changed(dst / "tokenizer_config.json", json.dumps(tok_cfg, indent=2))
         skip.add("tokenizer_config.json")
         tmpl_len = len(tok_cfg.get("chat_template") or "")
         print(f"[shadow] wrote tokenizer_config.json (chat_template_len={tmpl_len})")
@@ -179,9 +204,7 @@ def build_shadow(src: Path, dst: Path) -> Path:
         )
     if tokenizer_json.parent != src:
         target = dst / "tokenizer.json"
-        if target.exists() or target.is_symlink():
-            target.unlink()
-        os.symlink(tokenizer_json, target)
+        symlink_if_changed(target, tokenizer_json)
         skip.add("tokenizer.json")
         print(f"[shadow] linked tokenizer.json from {tokenizer_json}")
 
@@ -190,9 +213,7 @@ def build_shadow(src: Path, dst: Path) -> Path:
         if entry.name in skip:
             continue
         target = dst / entry.name
-        if target.exists() or target.is_symlink():
-            target.unlink()
-        os.symlink(entry.resolve(), target)
+        symlink_if_changed(target, entry)
         linked += 1
     print(f"[shadow] symlinked {linked} files/dirs from source bundle")
 

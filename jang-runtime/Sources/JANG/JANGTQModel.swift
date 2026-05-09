@@ -77,7 +77,8 @@ public final class JANGTQModel {
             let layer = try JANGTQDecoderLayer(
                 layerIndex: i, config: config, bundle: bundle,
                 context: context, kernels: kernels, affine8: affine8,
-                ops: ops, moePrefix: moePrefix, cache: cache
+                ops: ops, moePrefix: moePrefix, cache: cache,
+                swigluLimit: config.routedSwiGLULimit
             )
             built.append(layer)
         }
@@ -144,7 +145,8 @@ public final class JANGTQDecoderLayer {
         affine8: JANGTQAffine8Matmul,
         ops: JANGTQDecodeOps,
         moePrefix: String,
-        cache: JANGTQKVCache
+        cache: JANGTQKVCache,
+        swigluLimit: Float = 0
     ) throws {
         self.layerIndex = layerIndex
         self.config = config
@@ -164,7 +166,8 @@ public final class JANGTQDecoderLayer {
 
         self.engine = JANGTQDecoderEngine(
             bundle: bundle, context: context, kernels: kernels, affine8: affine8,
-            ops: ops, cache: cache, moePrefix: moePrefix
+            ops: ops, cache: cache, moePrefix: moePrefix,
+            swigluLimit: swigluLimit
         )
     }
 

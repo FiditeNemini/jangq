@@ -51,14 +51,17 @@ choice on a 128 GB Mac. Drop to 50–70 if you have 256 GB+.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `VMLXCTL` | `vmlxctl` (on `$PATH`) | Path to the JangPress-aware vmlxctl. Build from `osaurus-ai/vmlx-swift-lm` if not installed. |
-| `PY` | `python3` | Interpreter with `huggingface_hub`, `httpx`, `pandas`. |
+| `VMLXCTL` | `/Users/eric/vmlx/swift/.build/arm64-apple-macosx/release/vmlxctl` | Path to the JangPress-aware vmlxctl. Build from `osaurus-ai/vmlx-swift-lm` if not installed. |
+| `PY` / `KIMI_PY` | `/Users/eric/jang/.venv/bin/python` | Interpreter with `huggingface_hub`, `httpx`, `pandas`. `KIMI_PY` overrides stale placeholder `PY` values. |
 | `SHADOW_ROOT` | `/tmp/kimi-shadow` | Where shadow dirs live. Internal SSD recommended. |
 | `VMLX_MEMORY_BUDGET_OVERRIDE` | `274877906944` (256 GB) | Bypass the load-gate's "model requires ≈X GB peak" check. |
 | `JANGPRESS_PRESTACK` | `1` | Force prestack regen (default-on; set `0` to disable). |
 | `KIMI_LOW_RAM` | `1` | Adds low-RAM serve flags: disables prefix/memory/disk KV caches and idle, sets `kv-cache-quantization=none`, and defaults thinking off. |
 | `KIMI_JANGPRESS_FORCE_MODE` | `soft` | Sets `--jang-press-force-mode`. Use `force` only when first inference needs more aggressive reclaim; expect slowdown. |
-| `KIMI_ROUTER_ADVICE` | `0` | Adds `--enable-jangpress-router-advice` when `1`. May lower RSS under pressure but costs decode speed. |
+| `KIMI_ROUTER_ADVICE` | `0` | Adds `--enable-jangpress-router-advice` and exports `JANGPRESS_ROUTER_ADVICE=1` when `1`. The wrapper forces `0` by default so old shell env does not leak in. |
+| `KIMI_ROUTE_TELEMETRY` | `0` | Controls `VMLX_JANGPRESS_ROUTE_TELEMETRY`. Keep off for Kimi; route readback has peaked at 130 GB physical footprint before token 1. |
+| `KIMI_LAYER_EVAL` | `0` | Diagnostic only. Enables `VMLX_JANGTQ_LAYER_EVAL=1` to force layer-boundary eval in the Swift Kimi/DSV3 JANGTQ model. Tested on Small; did not reduce the 130 GB footprint. |
+| `KIMI_LAYER_RECLAIM` | `1` | When `KIMI_LAYER_EVAL=1`, advises each completed layer's canonical routed expert ranges as DONTNEED. |
 | `LOG` | `/tmp/kimi_serve_<bundle>.log` | Where serve logs go. |
 | `OUT_DIR` | `$JANG_ROOT/jangpress-mmlu-runs` | Where MMLU runner writes log + JSONL. |
 | `MMLU_API_BASE` | `http://127.0.0.1:<port>/v1` | API base used by `kimi_mmlu.sh` / `benchmark_mmlu_api.py`. |
@@ -71,9 +74,11 @@ choice on a 128 GB Mac. Drop to 50–70 if you have 256 GB+.
   reservation, not resident RAM.
 - `JANGPRESS_PRESTACK=1` regenerates the prestack overlay (~150 GB) on
   first load. Subsequent loads of the same bundle are fast.
-- Decode under JangPress eviction can be slow (10–60 s/token at the
-  167 GB-bundle / 128 GB-RAM ratio). Bump `MMLU_HTTP_TIMEOUT` to 600+ if
-  you see timeouts.
+- Current Kimi status on the 128 GB host: Small and Med can load to
+  `/health`, but neither has produced a single coherent token through
+  `vmlxctl serve`. First prefill reaches ~130 GB process footprint and
+  severe system memory pressure before token 1. Do not start MMLU until a
+  one-token probe returns content.
 
 ## Troubleshooting
 

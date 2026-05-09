@@ -55,6 +55,7 @@ public struct ModelConfig: Sendable {
     public let partialRotaryFactor: Double?
     public let normTopkProb: Bool?
     public let headDimOverride: Int?   // `head_dim` explicit (Qwen3.6=256)
+    public let swigluLimit: Double?
 
     /// Whether the model is a Mixture-of-Experts.
     public var isMoE: Bool { (numLocalExperts ?? 0) > 0 && (numExpertsPerTok ?? 0) > 0 }
@@ -79,6 +80,19 @@ public struct ModelConfig: Sendable {
         // Heuristic: Qwen3-Next/3.5/3.6 carry `norm_topk_prob` (True/False).
         // MiniMax/GLM don't set this field; they use e_score_correction_bias.
         normTopkProb != nil
+    }
+
+    /// Fused routed-expert SwiGLU clamp. DSV4 trains with
+    /// `silu(min(gate, 10)) * clip(up, +/-10)`; other JANGTQ families use
+    /// ordinary SwiGLU unless they explicitly set `swiglu_limit`.
+    public var routedSwiGLULimit: Float {
+        if let limit = swigluLimit, limit > 0 {
+            return Float(limit)
+        }
+        if modelType?.lowercased() == "deepseek_v4" {
+            return 10.0
+        }
+        return 0.0
     }
 
     /// Number of KV heads (defaults to num_attention_heads if not specified = MHA).
@@ -134,6 +148,7 @@ public struct ModelConfig: Sendable {
         case partialRotaryFactor = "partial_rotary_factor"
         case normTopkProb = "norm_topk_prob"
         case headDim = "head_dim"
+        case swigluLimit = "swiglu_limit"
     }
 }
 
@@ -196,6 +211,7 @@ extension ModelConfig: Decodable {
         self.partialRotaryFactor = get(.partialRotaryFactor)
         self.normTopkProb = get(.normTopkProb)
         self.headDimOverride = get(.headDim)
+        self.swigluLimit = get(.swigluLimit)
     }
 }
 

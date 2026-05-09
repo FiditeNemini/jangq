@@ -12,6 +12,7 @@
  *   1. Hadamard rotate x (hidden) using `signs_in` from sidecar
  *   2. fused_gate_up_swiglu — single dispatch, computes SiLU(g) * u
  *      for K experts at once → x_act of shape (K, intermediate)
+ *      DSV4 passes swigluLimit=10 for silu(min(g, 10)) * clip(u, +/-10).
  *   3. Hadamard rotate x_act using `signs_dn`
  *   4. gather_tq_matmul — down projection per (k) → y of shape (K, hidden)
  *   5. (Combine across K with router scores happens at the caller)
@@ -32,6 +33,7 @@ public final class JANGTQMoEBlock {
     public let outFeatures: Int     // moe_intermediate
     public let nExperts: Int
     public let bits: Int
+    public let swigluLimit: Float
 
     private let kernels: JANGTQKernels
 
@@ -82,12 +84,14 @@ public final class JANGTQMoEBlock {
         bundle: JANGTQModelBundle,
         kernels: JANGTQKernels,
         seed: Int? = nil,
-        topK: Int = 8
+        topK: Int = 8,
+        swigluLimit: Float = 0
     ) throws {
         try self.init(
             layerIndex: layerIndex,
             layerPrefix: "model.layers.\(layerIndex).\(moePrefix)",
-            bundle: bundle, kernels: kernels, seed: seed, topK: topK
+            bundle: bundle, kernels: kernels, seed: seed, topK: topK,
+            swigluLimit: swigluLimit
         )
     }
 
@@ -104,10 +108,12 @@ public final class JANGTQMoEBlock {
         bundle: JANGTQModelBundle,
         kernels: JANGTQKernels,
         seed: Int? = nil,
-        topK: Int = 8
+        topK: Int = 8,
+        swigluLimit: Float = 0
     ) throws {
         self.layerIndex = layerIndex
         self.kernels = kernels
+        self.swigluLimit = swigluLimit
 
         let basePrefix = "\(layerPrefix).switch_mlp"
         guard
@@ -205,7 +211,8 @@ public final class JANGTQMoEBlock {
             packedUpBuf: upProj.packed,     normsUpBuf: upProj.norms,
             codebookBuf: codebookGate,
             rhsIndicesBuf: selectedExpertsBuf,
-            K: K, inFeatures: inFeatures, outFeatures: outFeatures, bits: bits
+            K: K, inFeatures: inFeatures, outFeatures: outFeatures, bits: bits,
+            swigluLimit: swigluLimit
         )
         // 3. Hadamard rotate x_act
         let xActHalf = try copyFloatToHalf(xAct, count: K * outFeatures)
@@ -252,7 +259,8 @@ public final class JANGTQMoEBlock {
             packedUpBuf: upProj.packed,     normsUpBuf: upProj.norms,
             codebookBuf: codebookGate, rhsIndicesBuf: selectedExpertsBuf,
             outBuf: xActOut,
-            K: K, inFeatures: inFeatures, outFeatures: outFeatures, bits: bits
+            K: K, inFeatures: inFeatures, outFeatures: outFeatures, bits: bits,
+            swigluLimit: swigluLimit
         )
         // 3a. Cast xActOut (fp32) → xActHalfStaging (fp16) so hadamard can read it
         ops.castF32ToF16.encode(into: enc, src: xActOut, dst: xActHalfStaging,

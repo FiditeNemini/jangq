@@ -332,6 +332,7 @@ public final class JANGTQDecoderEngine {
     /// Per-layer staging buffer for fp32→fp16 cast between fused_gu and hadamard.
     private var stagingBuffers: [Int: MTLBuffer] = [:]
     private let moePrefix: String
+    private let swigluLimit: Float
 
     public init(
         bundle: JANGTQModelBundle,
@@ -340,7 +341,8 @@ public final class JANGTQDecoderEngine {
         affine8: JANGTQAffine8Matmul,
         ops: JANGTQDecodeOps,
         cache: JANGTQKVCache,
-        moePrefix: String = "block_sparse_moe"
+        moePrefix: String = "block_sparse_moe",
+        swigluLimit: Float = 0
     ) {
         self.bundle = bundle
         self.context = context
@@ -349,6 +351,7 @@ public final class JANGTQDecoderEngine {
         self.ops = ops
         self.cache = cache
         self.moePrefix = moePrefix
+        self.swigluLimit = swigluLimit
     }
 
     /// Lazily build the MoE block for a given layer.
@@ -356,7 +359,8 @@ public final class JANGTQDecoderEngine {
         if let b = moeBlocks[layer] { return b }
         let b = try JANGTQMoEBlock(
             layerIndex: layer, moePrefix: moePrefix,
-            bundle: bundle, kernels: kernels
+            bundle: bundle, kernels: kernels,
+            swigluLimit: swigluLimit
         )
         moeBlocks[layer] = b
         return b
@@ -481,7 +485,8 @@ public final class JANGTQDecoderEngine {
                 xHalfBuf: normedX,
                 gate: shG, up: shU, down: shD,
                 gateScalar: block.sharedGateScalar,
-                hidden: hidden
+                hidden: hidden,
+                swigluLimit: block.swigluLimit
             )
             let shPtr = sharedY.contents().bindMemory(to: Float16.self, capacity: hidden)
             for h in 0..<hidden {
@@ -504,7 +509,8 @@ public final class JANGTQDecoderEngine {
         up: JANGTQAffineWeight,
         down: JANGTQAffineWeight,
         gateScalar: JANGTQAffineWeight?,
-        hidden: Int
+        hidden: Int,
+        swigluLimit: Float = 0
     ) throws -> MTLBuffer {
         precondition(gate.bits == 8 && up.bits == 8 && down.bits == 8,
             "shared_expert affine weights must be 8-bit")
@@ -532,9 +538,14 @@ public final class JANGTQDecoderEngine {
         )!
         let aPtr = actBuf.contents().bindMemory(to: Float16.self, capacity: interFeat)
         for i in 0..<interFeat {
-            let gv = gPtr[i]
+            var gv = gPtr[i]
+            var uv = uPtr[i]
+            if swigluLimit > 0 {
+                gv = min(gv, swigluLimit)
+                uv = max(min(uv, swigluLimit), -swigluLimit)
+            }
             let silu = gv / (1.0 + Foundation.exp(-gv))
-            aPtr[i] = Float16(silu * uPtr[i])
+            aPtr[i] = Float16(silu * uv)
         }
 
         // 3. down_proj(act) → (hidden,) fp32

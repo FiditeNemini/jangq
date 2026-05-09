@@ -42,9 +42,8 @@ import Metal
 
 /// Single-dispatch multi-block Hadamard rotation for non-pow2 dimensions.
 ///
-/// Input: x is (batch, dim) half. dim must decompose into a sum of pow2 blocks
-/// where the largest block ≤ 4096 (the threadgroup shmem size cap). Examples:
-/// 1024, 1536 = 1024 + 512, 2048, 3072 = 2048 + 1024, 4096.
+/// Input: x is (batch, dim) half. dim must decompose into pow2 blocks whose
+/// largest block is ≤ 8192, matching the Metal threadgroup memory cap.
 public struct JANGTQHadamard {
     public let context: MetalContext
     public let pipeline: MTLComputePipelineState
@@ -85,7 +84,9 @@ public struct JANGTQHadamard {
         batch: Int,
         dim: Int
     ) throws -> MTLBuffer {
-        precondition(dim > 0 && dim <= 4096, "dim must be in (0, 4096]")
+        let largestBlock = JANGTQHadamard.decomposePow2(dim).max() ?? dim
+        precondition(dim > 0 && largestBlock <= 8192,
+            "dim's largest pow2 block must be <= 8192")
         let outBytes = batch * dim * MemoryLayout<Float>.stride
         guard let outBuf = context.device.makeBuffer(length: outBytes, options: .storageModeShared) else {
             throw JANGCoreMetalError.libraryLoadFailed("hadamard out buffer alloc failed")
@@ -108,7 +109,9 @@ public struct JANGTQHadamard {
         xBuf: MTLBuffer, signsBuf: MTLBuffer, outBuf: MTLBuffer,
         batch: Int, dim: Int
     ) {
-        precondition(dim > 0 && dim <= 4096)
+        let largestBlock = JANGTQHadamard.decomposePow2(dim).max() ?? dim
+        precondition(dim > 0 && largestBlock <= 8192,
+            "dim's largest pow2 block must be <= 8192")
         let meta = JANGTQHadamard.makeMeta(totalDim: dim)
         enc.setComputePipelineState(pipeline)
         enc.setBuffer(xBuf,    offset: 0, index: 0)
@@ -117,7 +120,6 @@ public struct JANGTQHadamard {
             enc.setBytes(ptr.baseAddress!, length: meta.count * MemoryLayout<UInt32>.stride, index: 2)
         }
         enc.setBuffer(outBuf,   offset: 0, index: 3)
-        let largestBlock = JANGTQHadamard.decomposePow2(dim).max() ?? dim
         let tgSize = min(1024, max(32, largestBlock))
         enc.dispatchThreads(MTLSizeMake(tgSize, batch, 1),
                             threadsPerThreadgroup: MTLSizeMake(tgSize, 1, 1))
@@ -149,7 +151,8 @@ public struct JANGTQFusedGateUpSwiGLU {
         packedUpBuf: MTLBuffer,   normsUpBuf: MTLBuffer,
         codebookBuf: MTLBuffer,
         rhsIndicesBuf: MTLBuffer,
-        K: Int, inFeatures: Int, outFeatures: Int, bits: Int = 2
+        K: Int, inFeatures: Int, outFeatures: Int, bits: Int = 2,
+        swigluLimit: Float = 0
     ) throws -> MTLBuffer {
         let outBytes = K * outFeatures * MemoryLayout<Float>.stride
         guard let outBuf = context.device.makeBuffer(length: outBytes, options: .storageModeShared) else {
@@ -163,7 +166,8 @@ public struct JANGTQFusedGateUpSwiGLU {
                xRotBuf: xRotBuf, packedGateBuf: packedGateBuf, normsGateBuf: normsGateBuf,
                packedUpBuf: packedUpBuf, normsUpBuf: normsUpBuf,
                codebookBuf: codebookBuf, rhsIndicesBuf: rhsIndicesBuf, outBuf: outBuf,
-               K: K, inFeatures: inFeatures, outFeatures: outFeatures, bits: bits)
+               K: K, inFeatures: inFeatures, outFeatures: outFeatures,
+               bits: bits, swigluLimit: swigluLimit)
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
@@ -178,14 +182,16 @@ public struct JANGTQFusedGateUpSwiGLU {
         codebookBuf: MTLBuffer,
         rhsIndicesBuf: MTLBuffer,
         outBuf: MTLBuffer,
-        K: Int, inFeatures: Int, outFeatures: Int, bits: Int = 2
+        K: Int, inFeatures: Int, outFeatures: Int, bits: Int = 2,
+        swigluLimit: Float = 0
     ) {
-        precondition(bits == 2)
+        precondition(bits > 0 && bits <= 8 && 32 % bits == 0)
         let valsPerU32 = 32 / bits
         let packedCols = (inFeatures + valsPerU32 - 1) / valsPerU32
+        let limitMilli = UInt32(max(0, Int((swigluLimit * 1000).rounded())))
         var meta: [UInt32] = [
             UInt32(K), UInt32(inFeatures), UInt32(outFeatures),
-            UInt32(packedCols), UInt32(bits),
+            UInt32(packedCols), UInt32(bits), limitMilli,
         ]
         enc.setComputePipelineState(pipeline)
         enc.setBuffer(xRotBuf,       offset: 0, index: 0)
@@ -196,7 +202,7 @@ public struct JANGTQFusedGateUpSwiGLU {
         enc.setBuffer(codebookBuf,   offset: 0, index: 5)
         enc.setBuffer(rhsIndicesBuf, offset: 0, index: 6)
         meta.withUnsafeBufferPointer { ptr in
-            enc.setBytes(ptr.baseAddress!, length: 5 * MemoryLayout<UInt32>.stride, index: 7)
+            enc.setBytes(ptr.baseAddress!, length: meta.count * MemoryLayout<UInt32>.stride, index: 7)
         }
         enc.setBuffer(outBuf,        offset: 0, index: 8)
         let opt = JANGTQFusedGateUpSwiGLU.optOutsPerThread
@@ -261,7 +267,7 @@ public struct JANGTQGatherMatmul {
         outBuf: MTLBuffer,
         K: Int, inFeatures: Int, outFeatures: Int, bits: Int = 2
     ) {
-        precondition(bits == 2)
+        precondition(bits > 0 && bits <= 8 && 32 % bits == 0)
         let valsPerU32 = 32 / bits
         let packedCols = (inFeatures + valsPerU32 - 1) / valsPerU32
         var meta: [UInt32] = [

@@ -17,8 +17,9 @@
 //
 // Conventions (must match Python kernels exactly):
 //
-//   packed[expert, out_idx, pack_idx] : uint32 holding 16 × 2-bit codebook indices
-//                                       LSB-first. pack_idx covers in_features/16.
+//   packed[expert, out_idx, pack_idx] : uint32 holding (32 / bits) codebook
+//                                       indices LSB-first. pack_idx covers
+//                                       in_features / (32 / bits).
 //   norms[expert, out_idx]            : half — per-row L2 norm
 //   codebook[c]                       : float32 — 4 entries (2-bit Lloyd-Max)
 //   signs[i]                          : float32 — ±1 random sign for Hadamard
@@ -50,8 +51,8 @@ using namespace metal;
 // 3072 = 2048 + 1024). All blocks processed in ONE kernel launch with
 // threadgroup barriers between stages.
 //
-// Threadgroup shmem: up to 4096 floats (16 KB). Each thread handles up
-// to 4 elements per block via the `ept` (elements per thread) loop.
+// Threadgroup shmem: up to 8192 floats (32 KB). Each thread handles one
+// block at a time so valid large JANGTQ dims do not write past shmem.
 //
 kernel void jangtq_hadamard_multiblock(
     device const half *x          [[buffer(0)]],
@@ -70,19 +71,20 @@ kernel void jangtq_hadamard_multiblock(
     uint total_d  = meta[0];
     uint n_blocks = meta[1];
 
-    threadgroup float shmem[4096];
+    threadgroup float shmem[8192];
 
-    // Phase 1: load x with signs into shmem
-    for (uint i = tid; i < total_d; i += threads_per_tg) {
-        shmem[i] = static_cast<float>(x[batch_idx * total_d + i]) * signs[i];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Phase 2: process each pow2 block in place
+    // Process each pow2 block in place. Loading one block at a time avoids
+    // an all-dim shmem slab and matches the vMLX DSV4 runtime.
     uint offset = 0;
     for (uint b = 0; b < n_blocks; b++) {
         uint d_b   = meta[2u + b * 2u];
         uint log_b = meta[3u + b * 2u];
+
+        for (uint i = tid; i < d_b; i += threads_per_tg) {
+            shmem[i] = static_cast<float>(x[batch_idx * total_d + offset + i])
+                     * signs[offset + i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
         uint ept_b = (d_b + threads_per_tg - 1u) / threads_per_tg;
         if (ept_b == 0u) ept_b = 1u;
@@ -91,18 +93,18 @@ kernel void jangtq_hadamard_multiblock(
             uint h = 1u << stage;
             uint two_h = 2u * h;
 
-            // Stage new values into per-thread registers (max 4 elems/thread)
-            float newv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            float newv[64];
+            for (uint k = 0; k < 64; k++) newv[k] = 0.0f;
             for (uint k = 0; k < ept_b; k++) {
                 uint i_local = tid * ept_b + k;
                 if (i_local < d_b) {
                     uint bs  = (i_local / two_h) * two_h;
                     uint pos = i_local - bs;
-                    float a  = shmem[offset + bs + pos];
+                    float a  = shmem[bs + pos];
                     if (pos < h) {
-                        newv[k] = a + shmem[offset + bs + pos + h];
+                        newv[k] = a + shmem[bs + pos + h];
                     } else {
-                        newv[k] = shmem[offset + bs + pos - h] - a;
+                        newv[k] = shmem[bs + pos - h] - a;
                     }
                 }
             }
@@ -110,7 +112,7 @@ kernel void jangtq_hadamard_multiblock(
             for (uint k = 0; k < ept_b; k++) {
                 uint i_local = tid * ept_b + k;
                 if (i_local < d_b) {
-                    shmem[offset + i_local] = newv[k];
+                    shmem[i_local] = newv[k];
                 }
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -118,20 +120,12 @@ kernel void jangtq_hadamard_multiblock(
 
         // Normalize block by 1/sqrt(d_b)
         float norm_b = 1.0f / sqrt(static_cast<float>(d_b));
-        for (uint k = 0; k < ept_b; k++) {
-            uint i_local = tid * ept_b + k;
-            if (i_local < d_b) {
-                shmem[offset + i_local] *= norm_b;
-            }
+        for (uint i = tid; i < d_b; i += threads_per_tg) {
+            out[batch_idx * total_d + offset + i] = shmem[i] * norm_b;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         offset += d_b;
-    }
-
-    // Phase 3: write back to global memory
-    for (uint i = tid; i < total_d; i += threads_per_tg) {
-        out[batch_idx * total_d + i] = shmem[i];
     }
 }
 
@@ -153,7 +147,7 @@ kernel void jangtq_hadamard_multiblock(
 //   threadgroup = (min(grid.x, 256), 1, 1)
 //
 // meta[0]=K, meta[1]=in_features, meta[2]=out_features,
-// meta[3]=packed_cols (=in_features/16 for 2-bit), meta[4]=bits (=2)
+// meta[3]=packed_cols, meta[4]=bits, meta[5]=swiglu_limit_milli.
 //
 constant constexpr uint JANGTQ_FUSED_OPT = 10;
 
@@ -181,6 +175,8 @@ kernel void jangtq_fused_gate_up_swiglu(
     uint out_features = meta[2];
     uint packed_cols  = meta[3];
     uint bits         = meta[4];
+    float swiglu_limit = static_cast<float>(meta[5]) * 0.001f;
+    bool apply_swiglu_limit = meta[5] > 0u;
 
     if (out_idx_0 >= out_features) return;
 
@@ -207,8 +203,8 @@ kernel void jangtq_fused_gate_up_swiglu(
         n_outs = out_features - out_idx_0;
     }
 
-    // Vectorized 2-bit unpack (P8): one uint32 per thread per pack_idx,
-    // extract all 16 indices via shift+mask, accumulate against all 10
+    // Vectorized unpack (P8): one uint32 per thread per pack_idx,
+    // extract all (32 / bits) indices via shift+mask, accumulate against all 10
     // weight rows in registers.
     for (uint pack_idx = lane; pack_idx < packed_cols; pack_idx += 32u) {
         uint i_base = pack_idx * vals_per_u32;
@@ -227,8 +223,7 @@ kernel void jangtq_fused_gate_up_swiglu(
             }
         }
 
-        #pragma unroll
-        for (uint k = 0; k < 16; k++) {
+        for (uint k = 0; k < vals_per_u32; k++) {
             uint i = i_base + k;
             if (i >= in_features) break;
             float xv = x_rot[x_off + i];
@@ -259,7 +254,10 @@ kernel void jangtq_fused_gate_up_swiglu(
             float nu = static_cast<float>(norms_up  [expert * out_features + oi]);
             float gv = acc_g[o] * ng;
             float uv = acc_u[o] * nu;
-            // SwiGLU = SiLU(gv) * uv
+            if (apply_swiglu_limit) {
+                gv = metal::min(gv, swiglu_limit);
+                uv = metal::max(metal::min(uv, swiglu_limit), -swiglu_limit);
+            }
             out_act[base_off + oi] = (gv / (1.0f + fast::exp(-gv))) * uv;
         }
     }
@@ -336,8 +334,7 @@ kernel void jangtq_gather_tq_matmul(
                 ? packed[expert_base + (out_idx_0 + o) * packed_cols + pack_idx]
                 : 0u;
         }
-        #pragma unroll
-        for (uint k = 0; k < 16; k++) {
+        for (uint k = 0; k < vals_per_u32; k++) {
             uint i = i_base + k;
             if (i >= in_features) break;
             float xv = x_rot[x_offset + i];

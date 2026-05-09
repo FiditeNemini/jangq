@@ -55,6 +55,37 @@ export VMLX_MEMORY_BUDGET_OVERRIDE="${VMLX_MEMORY_BUDGET_OVERRIDE:-274877906944}
 # Force JANGPress prestack regen (avoids stale cache from a different shape).
 export JANGPRESS_PRESTACK="${JANGPRESS_PRESTACK:-1}"
 
+# Keep large rebuildable overlays visible and grouped with local models
+# instead of hiding 100+ GB files under macOS "System Data".
+export JANGPRESS_PRESTACK_CACHE_DIR="${JANGPRESS_PRESTACK_CACHE_DIR:-$HOME/models/_runtime-cache/jangpress-prestack}"
+mkdir -p "$JANGPRESS_PRESTACK_CACHE_DIR"
+
+# Kimi's first prompt touches a very large MoE graph. The generic
+# JANGPress route telemetry path synchronously reads router top-k indices
+# back to CPU (`MLXArray.asArray`) during every MoE forward; on Kimi this
+# has produced 100+ GB physical footprint before the first token. Keep it
+# off by default for bring-up and benchmarks; set KIMI_ROUTE_TELEMETRY=1
+# for targeted diagnostics.
+export VMLX_JANGPRESS_ROUTE_TELEMETRY="${VMLX_JANGPRESS_ROUTE_TELEMETRY:-${KIMI_ROUTE_TELEMETRY:-0}}"
+
+# Avoid inheriting ad-hoc router-advice env from prior experiments. Use
+# KIMI_ROUTER_ADVICE=1 to turn it on explicitly for this wrapper.
+export JANGPRESS_ROUTER_ADVICE="${KIMI_ROUTER_ADVICE:-0}"
+
+# Experimental diagnostic: force layer-bounded prefill inside the Swift
+# DeepseekV3/Kimi JANGTQ model. It did not solve Kimi Small on the 128 GB
+# host (same 130 GB footprint), so keep it opt-in.
+export VMLX_JANGTQ_LAYER_EVAL="${VMLX_JANGTQ_LAYER_EVAL:-${KIMI_LAYER_EVAL:-0}}"
+export VMLX_JANGTQ_LAYER_RECLAIM="${VMLX_JANGTQ_LAYER_RECLAIM:-${KIMI_LAYER_RECLAIM:-1}}"
+
+# Kimi K2.6 JANGTQ needs the Python-runtime prefill contract: 16-token
+# chunks, materialization/synchronization between chunks, and a cold JIT
+# warmup before the first real request. The Swift model defaults match this;
+# keep wrapper knobs here so benchmark runs record the active runtime mode.
+export VMLX_JANGTQ_PREFILL_STEP="${VMLX_JANGTQ_PREFILL_STEP:-${KIMI_PREFILL_STEP:-16}}"
+export VMLX_JANGTQ_PREFILL_SYNC="${VMLX_JANGTQ_PREFILL_SYNC:-${KIMI_PREFILL_SYNC:-1}}"
+export VMLX_JANGTQ_WARMUP="${VMLX_JANGTQ_WARMUP:-${KIMI_WARMUP:-1}}"
+
 LOG="${LOG:-/tmp/kimi_serve_$(basename "$BUNDLE").log}"
 echo "[kimi-serve] vmlxctl serve  port=$PORT  pct=$PCT  log=$LOG"
 echo "[kimi-serve] model=$SHADOW"
