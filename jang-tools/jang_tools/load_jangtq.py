@@ -1688,3 +1688,23 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                 print(f"  [hydrate] parameter materialization failed: {_e!r}", flush=True)
         mx.synchronize()
     print("  Hydration complete", flush=True)
+
+    # JANGTQ_TOPK_OVERRIDE env var: lower MoE router top_k at inference for
+    # decode speedup at the cost of some quality. Universal across all MoE
+    # families (Hy3, dots1, DSV3/4, qwen3_moe, bailing, laguna, minimax, ...).
+    # Top-1 families (ZAYA) silently no-op. See jang_tools.topk_override.
+    try:
+        from jang_tools.topk_override import (
+            apply_topk_override,
+            topk_override_from_env,
+        )
+        _topk_k = topk_override_from_env()
+        if _topk_k is not None:
+            _n = apply_topk_override(model, _topk_k)
+            print(
+                f"  [topk-override] JANGTQ_TOPK_OVERRIDE={_topk_k}: "
+                f"patched {_n} router/MoE attribute(s)",
+                flush=True,
+            )
+    except Exception as _e:
+        print(f"  [topk-override] skipped: {_e!r}", flush=True)
