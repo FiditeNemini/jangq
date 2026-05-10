@@ -44,8 +44,12 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # GLM 5.x (MLA + DSA)
     "glm_moe_dsa":      ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
     "glm5":             ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
-    # DeepSeek V4 (MLA + CSA/HCA + mHC + hash routing)
-    "deepseek_v4":      ("deepseek_v4", "deepseek_r1", "deepseek", True,  "mla"),
+    # DeepSeek V4 (MLA + CSA/HCA + mHC + hash routing).
+    # DSV4 emits its own DSML tool-call format (`<｜DSML｜invoke ...`),
+    # NOT the plain DeepSeek-R1 format. The dsml_tool_parser registers
+    # both "dsml" and "deepseek_v4" as aliases. Stamping "deepseek" here
+    # routed freshly-converted DSV4 bundles through the wrong parser.
+    "deepseek_v4":      ("deepseek_v4", "deepseek_r1", "dsml",     True,  "mla"),
     # GLM 4 (dense + MoE, no MLA)
     "glm4":             ("glm4",        "deepseek_r1", "glm47",    False, "kv"),
     "glm4_moe":         ("glm4_moe",    "deepseek_r1", "glm47",    False, "kv"),
@@ -250,7 +254,12 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
                        "openai_gptoss", None}
     valid_tool = {"qwen", "qwen3", "hermes", "llama", "mistral", "deepseek",
                   "kimi", "granite", "nemotron", "step3p5", "xlam",
-                  "functionary", "glm47", "minimax", "gemma4", "native"}
+                  "functionary", "glm47", "minimax", "gemma4", "native",
+                  # DSV4 native DSML format + Zaya XML tool format. Both
+                  # have dedicated parsers in vmlx_engine.tool_parsers.
+                  # Without these, verify_directory rejected legitimate
+                  # DSV4 / Zaya bundles after stamp.
+                  "dsml", "zaya_xml"}
     valid_cache = {"kv", "hybrid", "mla", "mamba"}
     valid_modality = {"text", "vision", "embedding", "rerank", "image"}
 
