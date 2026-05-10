@@ -26,11 +26,10 @@ from typing import Any
 
 # (family, reasoning_parser, tool_parser, think_in_template, cache_type)
 FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
-    # ZAYA / Zyphra — CCA attention + top-1 MoE. Templates have Qwen-style
-    # thinking branches, so qwen3 is useful parser metadata for explicit
-    # opt-in extraction. Product behavior remains no-thinking through
-    # supports_thinking=False below, and enable_thinking=False renders a
-    # closed empty think block, not an open reasoning prefix.
+    # ZAYA / Zyphra — CCA attention + top-1 MoE. ZAYA and ZAYA1-VL are
+    # reasoning-capable and use qwen3 parser metadata. think_in_template stays
+    # False because default/no-thinking prompts must start generation in
+    # visible content, not in an auto-opened reasoning prefix.
     "zaya":              ("zaya",        "qwen3",       "zaya_xml", False, "hybrid"),
     "zaya1_vl":          ("zaya1_vl",    "qwen3",       "zaya_xml", False, "hybrid"),
     # Qwen 3.5 / 3.6 family (hybrid SSM + attention)
@@ -81,9 +80,12 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # GQA + qk_norm, sigmoid router with expert_bias (DSV3-style aux-free balancing),
     # 1 shared expert, first_k_dense_replace=1, native MTP layer, 256K context.
     # Reasoning: <think>/</think> qwen3-style + reasoning_effort: no_think|low|high.
+    # think_in_template=False because default no_think emits a closed
+    # <think></think> prefill; runtime must only seed reasoning when it
+    # explicitly passes reasoning_effort=low|high.
     # Tool format: <tool_call><tool_sep><arg_key>/<arg_value> — Tencent-specific
     # ("hunyuan" parser; vLLM names it "hy_v3", SGLang "hunyuan").
-    "hy_v3":            ("hy_v3",       "qwen3",       "hunyuan",  True,  "kv"),
+    "hy_v3":            ("hy_v3",       "qwen3",       "hunyuan",  False, "kv"),
     # Llama 3.x (dense) — base + instruct
     "llama":            ("llama",       None,          "llama",    False, "kv"),
     "llama3":           ("llama",       None,          "llama",    False, "kv"),

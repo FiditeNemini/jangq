@@ -47,11 +47,16 @@ experts hydrate through the TurboQuant kernel path.
 family=hy_v3
 reasoning_parser=qwen3
 tool_parser=hunyuan
-think_in_template=True
+think_in_template=False
 supports_thinking=True
 cache_type=kv
 modality=text
 ```
+
+`think_in_template=False` is the default/no-think product contract: the
+template renders a closed `<think></think>` prefill for `reasoning_effort=
+no_think`, and only opens `<think>` when the runtime explicitly passes
+`reasoning_effort=low|high`.
 
 ## Architecture facts
 
