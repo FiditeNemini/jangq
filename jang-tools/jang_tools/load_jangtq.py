@@ -430,6 +430,13 @@ def _vlm_minimal_sanitize(model, weights):
                 and value.ndim == 3
             ):
                 value = value.swapaxes(-1, -2)
+            if (
+                key.endswith("patch_embed.proj.weight")
+                and value.ndim == 5
+                and value.shape[1] in (1, 3)
+                and value.shape[-1] not in (1, 3)
+            ):
+                value = value.transpose(0, 2, 3, 4, 1)
         elif key.startswith("model.language_model"):
             key = key.replace("model.language_model", "language_model.model")
         elif key.startswith("model.visual"):

@@ -55,6 +55,34 @@ def test_zaya1_vl_jangtq_vlm_sanitize_maps_regular_text_weights():
     assert not any(key.startswith("model.layers.") for key in fixed)
 
 
+def test_zaya1_vl_jangtq_vlm_sanitize_transposes_vision_patch_embed_conv3d():
+    """ZAYA1-VL JANGTQ vision patch weights must use MLX Conv3d layout.
+
+    The Qwen2.5-VL image processor returns flattened patches.  mlx-vlm's
+    PatchEmbed reshapes those to `(N, T, H, W, C)` before calling MLX Conv3d,
+    so the conv weight must be `(out, T, H, W, C)`.  The bundle stores the
+    PyTorch layout `(out, C, T, H, W)`.
+    """
+
+    from jang_tools.load_jangtq import _vlm_minimal_sanitize
+
+    fake_model = SimpleNamespace(
+        model_type="zaya1_vl",
+        config=SimpleNamespace(
+            model_type="zaya1_vl",
+            text_config=SimpleNamespace(tie_word_embeddings=True),
+        ),
+    )
+    raw_patch = mx.zeros((1280, 3, 1, 14, 14))
+
+    fixed = _vlm_minimal_sanitize(
+        fake_model,
+        {"vision_tower.patch_embed.proj.weight": raw_patch},
+    )
+
+    assert fixed["vision_tower.patch_embed.proj.weight"].shape == (1280, 1, 14, 14, 3)
+
+
 def test_jangtq_vlm_affine_quant_mode_normalizes_container_mode():
     from jang_tools.load_jangtq_vlm import (
         _affine_quantize_mode,
