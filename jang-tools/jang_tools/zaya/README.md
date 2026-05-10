@@ -11,8 +11,13 @@ Architecture summary:
 - Top-1 MoE with 16 experts + optional MOD skip route (`zaya_use_mod=True`)
 - 131 K context, residual stream in fp32
 
-For VL (`zaya1_vl`, 40 layers + Qwen2.5-VL ViT) the runtime is not yet
-implemented in any engine.
+For VL (`zaya1_vl`, 40 layers + Qwen2.5-VL ViT), current Python runtime
+support exists through `jang_tools.load_jangtq_vlm.load_jangtq_vlm_model`
+and the vMLX `mlx_vlm.models.zaya1_vl` adapter. This is a bring-up path,
+not a production-cleared contract yet: MXFP4 has passed basic text/image
+OpenAI Chat rows, and JANGTQ2 has passed a direct image OCR smoke after
+the patch-embed layout sanitizer, but the full API/cache/lifecycle matrix
+still needs live gates.
 
 ## Convert
 
@@ -35,6 +40,14 @@ model, tokenizer = load_zaya_model("/path/to/ZAYA1-8B-JANGTQ2")
 JANGTQ/MXTQ ZAYA bundles should go through
 `jang_tools.load_jangtq.load_jangtq_model` instead — it replaces the
 routed expert projections with TurboQuant kernels.
+
+For ZAYA1-VL JANGTQ/MXTQ bundles:
+
+```python
+from jang_tools.load_jangtq_vlm import load_jangtq_vlm_model
+
+model, processor = load_jangtq_vlm_model("/path/to/ZAYA1-VL-8B-JANGTQ2")
+```
 
 ## Capabilities
 
