@@ -77,6 +77,13 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # `content` null — visible as empty UI bubbles on thinking-off prompts.
     "bailing_hybrid":   ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
     "bailing_moe_v2_5": ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
+    # Tencent Hy3-preview (HYV3ForCausalLM) — text-only MoE, 295B/21B active.
+    # GQA + qk_norm, sigmoid router with expert_bias (DSV3-style aux-free balancing),
+    # 1 shared expert, first_k_dense_replace=1, native MTP layer, 256K context.
+    # Reasoning: <think>/</think> qwen3-style + reasoning_effort: no_think|low|high.
+    # Tool format: <tool_call><tool_sep><arg_key>/<arg_value> — Tencent-specific
+    # ("hunyuan" parser; vLLM names it "hy_v3", SGLang "hunyuan").
+    "hy_v3":            ("hy_v3",       "qwen3",       "hunyuan",  True,  "kv"),
     # Llama 3.x (dense) — base + instruct
     "llama":            ("llama",       None,          "llama",    False, "kv"),
     "llama3":           ("llama",       None,          "llama",    False, "kv"),
@@ -265,7 +272,11 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
                   # have dedicated parsers in vmlx_engine.tool_parsers.
                   # Without these, verify_directory rejected legitimate
                   # DSV4 / Zaya bundles after stamp.
-                  "dsml", "zaya_xml"}
+                  "dsml", "zaya_xml",
+                  # Tencent Hy3-preview emits its own XML-like tool tags
+                  # (<tool_call><tool_sep><arg_key>/<arg_value>); vLLM
+                  # registers this parser as "hy_v3", SGLang as "hunyuan".
+                  "hunyuan"}
     valid_cache = {"kv", "hybrid", "mla", "mamba"}
     valid_modality = {"text", "vision", "embedding", "rerank", "image"}
 

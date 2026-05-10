@@ -102,3 +102,27 @@ ralph_runner/*.log
 
 # Worktrees (local isolated workspaces)
 .worktrees/
+
+# Calibration corpora (PRIVATE — JANGReap source mix, never publish)
+kimi*_calib/
+nemotron_*_calib/
+nemotron_omni_v2/
+
+# Codex internal coordination + fixkits (PRIVATE)
+codex_*/
+AGENTS.md
+
+# Staging / scratch dirs
+swift-stage/
+
+# Investigation outputs at repo root (jsonl/json bundle audits)
+/*_2026-*.jsonl
+/*_2026-*.json
+
+# Internal eval/probe scripts at repo root
+humaneval_*.py
+he_*probe.py
+verify_quant_*.py
+
+# Internal issue/audit reports
+jangtq_*_report.md
