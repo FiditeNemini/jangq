@@ -43,19 +43,31 @@ from jang_tools.turboquant.rotation import generate_random_signs
 from jang_tools.turboquant.codebook import compute_codebook
 
 
-def _scan_tq_tensors(model_dir: Path) -> list[tuple[str, list[int]]]:
+def _load_weight_map(model_dir: Path) -> dict[str, str] | None:
+    index_path = model_dir / "model.safetensors.index.json"
+    if not index_path.exists():
+        return None
+    with open(index_path) as fh:
+        index = json.load(fh)
+    return dict(index["weight_map"])
+
+
+def _group_weight_map_by_shard(weight_map: dict[str, str]) -> dict[str, list[str]]:
+    by_shard: dict[str, list[str]] = {}
+    for key, fname in weight_map.items():
+        by_shard.setdefault(fname, []).append(key)
+    return by_shard
+
+
+def _scan_tq_tensors(
+    model_dir: Path,
+    weight_map: dict[str, str] | None = None,
+) -> list[tuple[str, list[int]]]:
     """Return list of (tensor_key, shape) for every .tq_packed weight."""
     out = []
-    index_path = model_dir / "model.safetensors.index.json"
-    if index_path.exists():
-        # M125 (iter 48): context-manage the read so the fd closes promptly.
-        with open(index_path) as fh:
-            index = json.load(fh)
-        weight_map = index["weight_map"]
+    if weight_map is not None:
         # Group by shard for I/O efficiency.
-        by_shard: dict[str, list[str]] = {}
-        for k, fname in weight_map.items():
-            by_shard.setdefault(fname, []).append(k)
+        by_shard = _group_weight_map_by_shard(weight_map)
         for fname, keys in by_shard.items():
             with safe_open(str(model_dir / fname), framework="numpy") as f:
                 for k in keys:
@@ -83,16 +95,20 @@ def _infer_in_features(packed_shape: list[int], bits: int) -> int:
     return (packed_cols * 32) // bits
 
 
-def _read_tq_bits(model_dir: Path, packed_key: str) -> int:
+def _read_tq_bits(
+    model_dir: Path,
+    packed_key: str,
+    weight_map: dict[str, str] | None = None,
+    shard_cache: dict[str, dict[str, int]] | None = None,
+) -> int:
     """Read the companion `.tq_bits` tensor and return its scalar value."""
     bits_key = packed_key[: -len(".tq_packed")] + ".tq_bits"
-    index_path = model_dir / "model.safetensors.index.json"
-    if index_path.exists():
-        with open(index_path) as fh:
-            index = json.load(fh)
-        fname = index["weight_map"].get(bits_key)
+    if weight_map is not None:
+        fname = weight_map.get(bits_key)
         if fname is None:
             return 0
+        if shard_cache is not None and fname in shard_cache:
+            return shard_cache[fname].get(bits_key, 0)
         with safe_open(str(model_dir / fname), framework="numpy") as f:
             arr = f.get_tensor(bits_key)
             return int(arr.flat[0])
@@ -120,7 +136,8 @@ def main() -> None:
     print(f"  seed: {seed}")
 
     print("  Scanning for .tq_packed weights...")
-    packed = _scan_tq_tensors(model_dir)
+    weight_map = _load_weight_map(model_dir)
+    packed = _scan_tq_tensors(model_dir, weight_map)
     if not packed:
         sys.exit("FATAL: no .tq_packed tensors found in artifact")
     print(f"  Found {len(packed)} TQ-packed tensors")
@@ -129,8 +146,20 @@ def main() -> None:
     # pairs that the runtime cache will be queried for.
     unique_in_bits: set[tuple[int, int]] = set()
     unique_in_seed: set[tuple[int, int]] = set()
+    bits_by_shard: dict[str, dict[str, int]] = {}
+    if weight_map is not None:
+        for fname, keys in _group_weight_map_by_shard(weight_map).items():
+            bit_keys = [k for k in keys if k.endswith(".tq_bits")]
+            if not bit_keys:
+                continue
+            with safe_open(str(model_dir / fname), framework="numpy") as f:
+                bits_by_shard[fname] = {
+                    key: int(f.get_tensor(key).flat[0])
+                    for key in bit_keys
+                }
+
     for key, shape in packed:
-        bits = _read_tq_bits(model_dir, key)
+        bits = _read_tq_bits(model_dir, key, weight_map, bits_by_shard)
         if bits == 0:
             print(f"  WARN: missing .tq_bits for {key}, skipping")
             continue

@@ -82,7 +82,9 @@ For `JANGTQ1`, use experimental wording only:
 ```text
 Hy3-preview-JANGTQ1 is an experimental size-floor bundle. It uses 1-bit MXTQ
 for routed experts and is memory-comfortable on 128 GB class devices, but
-quality is not production-claimed until coherence and benchmark checks pass.
+quality is not production-claimed. A 2026-05-10 smoke showed raw arithmetic
+signal but chat-mode `<think></think>` repetition; keep it local unless a new
+calibration policy fixes coherence.
 ```
 
 ## Required Proof Before Upload Claims

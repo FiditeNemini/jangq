@@ -44,14 +44,27 @@ Planning estimator on the local source:
 | `JANGTQ_K` | 113.3 GB | 1.34 GB | 126.6 GB |
 
 The previous rough 44 GB number omitted part of the non-routed 8-bit affine
-core and sidecar overhead. Use the measured finished bundle size once the
-conversion completes.
+core and sidecar overhead. The finished local bundle measured 46 GB on disk
+with 50 model shards and a 22 KB sidecar.
 
 ## Quality Boundary
 
 1-bit MXTQ has a two-entry codebook after Hadamard rotation. Because Hy3 is a
 295B/21B-active MoE and routed experts dominate its behavior, significant
 coherence loss versus `JANGTQ2` is expected.
+
+Fresh smoke on 2026-05-10:
+
+| Bundle | Prompt path | Output | Result |
+|---|---|---|---|
+| `Hy3-preview-JANGTQ1` | chat template, `What is 2 + 2?` | repeated `<think></think>` | Fail |
+| `Hy3-preview-JANGTQ1` | raw completion, `2 + 2 =` | answers `4`, then loops arithmetic fragments | Partial / not publishable |
+| `Hy3-preview-JANGTQ2` | same chat template prompt | `4` | Pass |
+
+Conclusion: the Python Hy3 runtime path is working, but `JANGTQ1` is not a
+release-quality Hy3 profile. Keep it local/experimental unless future work
+adds a stronger calibration or a different 1-bit policy and re-proves
+coherence.
 
 Before publishing any positive quality claim:
 
