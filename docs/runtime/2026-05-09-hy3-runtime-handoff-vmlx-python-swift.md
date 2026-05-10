@@ -12,7 +12,7 @@ Do not edit `../vmlx` or `../vmlx-swift-lm` from this handoff. Copy the relevant
 
 ## Current Conversion State
 
-The active conversion is `Hy3-preview-JANGTQ2`, started by Claude after the earlier duplicate-writer cleanup. Current rule: only one writer may target `/Users/eric/models/JANGQ/Hy3-preview-JANGTQ2`.
+The active conversion is `Hy3-preview-JANGTQ2`, started after the earlier duplicate-writer cleanup. Current rule: only one writer may target `/Users/eric/models/JANGQ/Hy3-preview-JANGTQ2`.
 
 Expected first bundle policy:
 

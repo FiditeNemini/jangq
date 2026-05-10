@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-05-09-zaya-runtime-and-vl-bundles-design.md`
 
-**Coordination:** Codex is the audit/coordination agent for this work. Append `### Claude P1.<n> Status` blocks to `.agents/CURRENT.md` before starting each phase. Pre-action `Locked:` notes for any of: 19.5 GB download, full conversion run, runtime smoke that loads weights, `git commit`, `hf upload`. Codex's runbook lives in `.agents/RUNTIME_BUNDLE_EXAMPLES.md` (Examples A/B/C/D). Never edit `~/vmlx-swift-lm` or `~/vmlx`.
+**Coordination:** Append phase status blocks to `.agents/CURRENT.md` before starting each phase. Pre-action `Locked:` notes for any of: 19.5 GB download, full conversion run, runtime smoke that loads weights, `git commit`, `hf upload`. The runbook lives in `.agents/RUNTIME_BUNDLE_EXAMPLES.md` (Examples A/B/C/D). Never edit `~/vmlx-swift-lm` or `~/vmlx`.
 
 ---
 
@@ -110,13 +110,13 @@ jang-tools/pyproject.toml                 ← add console_scripts entries for ne
 ### Task 1: Lock vmlx-swift-lm to a clean commit and record the pin
 
 **Files:**
-- Modify: `.agents/CURRENT.md` (append `### Claude P1.0b Status`)
+- Modify: `.agents/CURRENT.md` (append `### P1.0b Status`)
 - Create: `jang-runtime/Sources/JANG/Zaya/PROVENANCE.md` (initially empty stub)
 
 - [ ] **Step 1: Write the Locked entry**
 
 ```markdown
-### Claude P1.0b Status (2026-05-09 <HH:MM> local)
+### P1.0b Status (2026-05-09 <HH:MM> local)
 
 Locked: pinning vmlx-swift-lm runtime to commit `<SHA>`.
 ```
@@ -257,7 +257,7 @@ def test_verify_directory_passes_with_non_thinking_stamp(tmp_path):
 cd /Users/eric/jang/jang-tools && uv run pytest tests/test_capabilities_zaya.py -v
 ```
 
-Expected: at least one assertion fail showing `supports_thinking` returned `True` (the bug Codex documented).
+Expected: at least one assertion fail showing `supports_thinking` returned `True` (the previously documented bug).
 
 - [ ] **Step 4: Patch capabilities.py**
 
@@ -290,7 +290,7 @@ cd /Users/eric/jang/jang-tools && uv run pytest tests/test_capabilities_zaya.py 
 
 Expected: all 3 tests pass.
 
-- [ ] **Step 6: Re-run Codex's gate B against the live text bundles**
+- [ ] **Step 6: Re-run gate B against the live text bundles**
 
 ```bash
 cd /Users/eric/jang && uv run --project jang-tools python - <<'PY'
@@ -1099,7 +1099,7 @@ git commit -m "feat(zaya): OsaurusAI-only upload manifest + runtime-status READM
 Append to `.agents/CURRENT.md`:
 
 ```markdown
-### Claude P1.A.upload-gate Status (2026-05-09 <HH:MM> local)
+### P1.A.upload-gate Status (2026-05-09 <HH:MM> local)
 Locked: full text-bundle upload bar (no upload yet, only gates A/B/C/metadata).
 ```
 
@@ -1207,7 +1207,7 @@ git commit -m "release(zaya-text): OsaurusAI/ZAYA1-8B-{MXFP4,JANGTQ2,JANGTQ4} li
 - [ ] **Step 1: Pre-action lock**
 
 ```markdown
-### Claude P1.5 Status (2026-05-09 <HH:MM> local)
+### P1.5 Status (2026-05-09 <HH:MM> local)
 Locked: hf download Zyphra/ZAYA1-VL-8B (~19.5 GB, low workers).
 ```
 
@@ -1350,7 +1350,7 @@ Mirror the structure of `convert_zaya_common.py`. Add the VL-specific bits:
 - `build_jang_config(src_cfg, profile)` — emits the new `jang_config.json` shape with `vision_config` preserved, `supports_thinking=False`, `tool_parser="zaya_xml"`, `weight_format` set per profile.
 - `map_tensor_name(name)` — rewrites HF tensor names (`model.vision_tower.*`, `model.layers.{N}.{...}.lora_A/B.weight`, `model.layers.{N}.experts.{i}.{linear_fc1, linear_fc2}.weight`) to the JANG bundle naming.
 - `build_lora_index(keys)` — splits LoRA keys into attn-rank-8 vs mlp-rank-32 buckets (used during precision-floor validation).
-- `require_supported_profile(profile)` — raises `ValueError` if `profile == "JANGTQ3"` (locked out per Codex guardrail).
+- `require_supported_profile(profile)` — raises `ValueError` if `profile == "JANGTQ3"` (locked out per audit agent guardrail).
 - `bake_processor_files(src_dir, out_dir)` — copies `preprocessor_config.json`, `chat_template.json`, `tokenizer.*`, `special_tokens_map.json`.
 - `pre_stack_routed_experts(weights, num_experts, num_layers)` — produces the pre-stacked tensors.
 - `assert_index_invariants(idx, src_idx)` — ensures vision/lora/router/expert counts are preserved through conversion (390 vision / 2960 lora / 399 router / 3840 local_experts after pre-stack).
@@ -1463,7 +1463,7 @@ git commit -m "feat(jang-tools): convert_zaya1_vl_jangtq (JANGTQ2/4; pre-stacked
 - [ ] **Step 1: Pre-action lock**
 
 ```markdown
-### Claude P1.7 Status
+### P1.7 Status
 Locked: full conversion run, ZAYA1-VL-8B, all three profiles.
 ```
 
@@ -2215,7 +2215,7 @@ git commit -m "proof(zaya1_vl): coherence diff vs Zyphra fork bf16 baseline"
 - [ ] **Step 1: Pre-action lock**
 
 ```markdown
-### Claude P1.11 Status
+### P1.11 Status
 Locked: hf upload OsaurusAI/ZAYA1-VL-8B-{MXFP4,JANGTQ2,JANGTQ4}
 ```
 

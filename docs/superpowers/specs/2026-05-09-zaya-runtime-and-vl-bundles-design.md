@@ -2,7 +2,7 @@
 
 Status: DRAFT. Awaiting Eric review.
 Created: 2026-05-09.
-Author: Claude (in coordination with Codex via `.agents/CURRENT.md`).
+
 
 ---
 
@@ -55,9 +55,9 @@ Non-goals:
 | `~/vmlx-swift-lm` | Swift LLM/VLM runtime. **State: "implemented with evidence in source"** — `Libraries/MLXLLM/Models/Zaya.swift`, `MLXLMCommon/Cache/ZayaCCACache.swift`, `BatchEngine/BatchZayaCCACache.swift`, 5 tests, prod-readiness benchmarks 2026-05-09, plus Qwen2.5-VL ViT (`Libraries/MLXVLM/Models/Qwen25VL.swift`) all present. Inspected checkout is dirty; treat as evidence pending **pinned-commit re-verification** before any public release claim. No `Zaya1VL` module. | Read-only. Copy patterns into `jang-runtime`; record original commit + path of each copy in `PROVENANCE.md`. Never edit. |
 | `~/vmlx/engine/vmlx_engine` | Python engine: `attention.py`, `cache/`, `disk_cache.py`, `memory_cache.py`, `mllm_cache.py`, `mllm_batch_generator.py`, `loaders/`, `metal/`. | Read-only. Pattern source for `jang-tools` Python ZAYA runtime. |
 
-### 2.5 Coordination with Codex
+### 2.5 Coordination
 
-Codex is in audit/coordination mode, owns `.agents/CURRENT.md`, `.agents/ZAYA1_VL_SYSTEMATIC_PLAN.md`, `.agents/RUNTIME_DOC_HANDOFF.md`. Both agents append `### <Agent> Status` sections; never overwrite the other's section. Before any large download or `git commit`, the acting agent writes a one-line `Locked: <action>` entry under its Status block, removed on completion. Codex's existing guardrails are inherited:
+Both agents append `### <Agent> Status` sections; never overwrite the other's section. Before any large download or `git commit`, the acting agent writes a one-line `Locked: <action>` entry under its Status block, removed on completion. audit agent's existing guardrails are inherited:
 
 - ZAYA family is non-thinking in production. Bundles stamping `supports_thinking=false` are correct; `jang_tools.capabilities` recomputing `true` is the bug.
 - JANGTQ3 excluded for ZAYA.
@@ -103,7 +103,7 @@ jang/
 │   │   ├── lora_gate.py                 ← vision-token-only LoRA gating
 │   │   ├── processor.py                 ← image processor
 │   │   └── cache.py                     ← Zaya1VLCache (CCA + media salt)
-│   ├── convert_zaya_common.py           ← UNCHANGED (Codex audit surface)
+│   ├── convert_zaya_common.py           ← UNCHANGED (audit surface)
 │   ├── convert_zaya_jangtq.py           ← UNCHANGED
 │   ├── convert_zaya_mxfp4.py            ← UNCHANGED
 │   ├── convert_zaya1_vl_common.py       ← NEW; mirrors text path; adds vision_config, image tokens, vision-LoRA preservation, processor sidecar
@@ -304,7 +304,7 @@ Pre-action lock entries in `.agents/CURRENT.md` for any of:
 | Zaya1VL Swift port underestimates effort | P1.8 has a hard checkpoint after image+text smoke; if smoke not green by day-7 the port re-scopes (e.g., land Python-only first, Swift later) |
 | Vision-LoRA gating numerically unstable when fused with JANGTQ-quantized base linears | Keep LoRA bf16, apply additively at full precision; numerical sanity test compares `(quant_base + lora_bf16)` vs `(bf16_base + lora_bf16)` per layer |
 | Quant kernels not present in Zyphra fork → no quant-side reference path in their runtime | Coherence diff stays bf16-source-vs-MLX-bundle; bundle-vs-bundle drift bounded by JANGTQ2/4 tolerance budget; this is documented |
-| Codex and Claude edit overlap | `.agents/CURRENT.md` Status section + `Locked: <action>` pre-action notes; explicit "do not touch" lists per agent |
+| Concurrent edit overlap | `.agents/CURRENT.md` Status section + `Locked: <action>` pre-action notes; explicit "do not touch" lists per agent |
 | Pre-commit / CI on `jang` blocks the converter PR | Run `pre-commit run --all-files` and `pytest jang-tools/tests` before any commit; explicit Eric review before push |
 | `~/models/Zyphra/ZAYA1-VL-8B/` partial download corrupts on retry | Use `hf download --max-workers 2` and verify pinned commit SHA matches before any conversion |
 | Existing untracked `convert_zaya_*.py` (text) and the new `convert_zaya1_vl_*.py` diverge in conventions | Common helpers extracted into `jang_tools/zaya_common/`; both converters import from it |
@@ -317,7 +317,7 @@ These remain "policy" choices that can flip the spec; defaults assumed if no red
 
 1. Coherence proof tolerance per profile. Default: per-token logit cosine ≥ 0.98 for MXFP4 / JANGTQ4, ≥ 0.92 for JANGTQ2.
 2. Whether `OsaurusAI/ZAYA1-VL-8B-MXFP4` README should explicitly mark the bundle "preview" until a Swift `Zaya1VL` runtime tag ships, or hold the upload until P1.8 lands. Default: hold upload until P1.8 (matches "make sure it works with all caching first").
-3. Whether to delete the existing untracked `convert_zaya_*.py` text-only files and replace with the new `convert_zaya_common.py` shared helpers. Default: keep them (Codex audit surface) until P1.4 ships; refactor later in P4.
+3. Whether to delete the existing untracked `convert_zaya_*.py` text-only files and replace with the new `convert_zaya_common.py` shared helpers. Default: keep them (audit surface) until P1.4 ships; refactor later in P4.
 4. Branch policy: P1 lands on `jangtq-na-phase-a` or a fresh `feature/zaya-runtime-vl` branch. Default: fresh branch off current `origin/main` to avoid the `jangtq-na-phase-a` 4-ahead/17-behind divergence.
 
 ---

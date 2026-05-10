@@ -108,7 +108,8 @@ kimi*_calib/
 nemotron_*_calib/
 nemotron_omni_v2/
 
-# Codex internal coordination + fixkits (PRIVATE)
+# Internal coordination + fixkits (PRIVATE)
+.agents/
 codex_*/
 AGENTS.md
 

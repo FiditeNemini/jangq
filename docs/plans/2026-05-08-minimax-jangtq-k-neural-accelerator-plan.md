@@ -1,6 +1,6 @@
 # MiniMax JANGTQ_K M5 Neural Accelerator Plan
 
-> **For Claude / Codex workers:** this is a research-to-implementation handoff.
+> **For implementation workers:** this is a research-to-implementation handoff.
 > Do not start by rewriting MiniMax or re-quantizing the model. Build a fail-closed
 > prefill-only TensorOps path first, with the existing JANGTQ path as fallback.
 
@@ -22,7 +22,7 @@ prefill GEMMs with Metal 4 TensorOps. Decode stays on the current P15/P17 path.
 - `/Users/eric/jang/jang-runtime/Sources/JANGCoreMetal/JANGTQMatmul.metal`
 - `/Users/eric/jang/swift-stage/DSV4/JANGTQKernels.swift`
 - likely implementation target for production Swift path:
-  `/Users/eric/vmlx/swift` after Claude confirms current branch state
+  `/Users/eric/vmlx/swift` after the current branch state is confirmed
 
 ---
 
@@ -173,7 +173,7 @@ Ship gate:
 - no canonical prompt regression;
 - strict fallback works on non-M5 or missing sidecar.
 
-## Notes for Claude
+## Implementation Notes
 
 The proposed Approach A is the correct first build. Make these refinements:
 

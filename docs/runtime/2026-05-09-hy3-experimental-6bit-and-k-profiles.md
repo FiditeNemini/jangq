@@ -104,7 +104,7 @@ If a duplicate starts, stop the newer writer and keep only one locked conversion
 Cleanup performed 2026-05-09:
 
 ```text
-stopped remaining Codex-started converter
+stopped remaining earlier-started converter
 deleted /Users/eric/models/JANGQ/Hy3-preview-JANGTQ2
 verified no convert_hy3_jangtq writer remained
 ```
