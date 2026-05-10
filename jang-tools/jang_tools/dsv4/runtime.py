@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -191,8 +194,8 @@ def generate(
             parsed = parse_completion(raw, thinking_mode=thinking_mode)
             content = parsed.get("content") or raw
             reasoning = parsed.get("reasoning_content") or ""
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — best-effort-parse fallback
+            logger.warning("DSV4 parse_completion failed, falling back to raw: %s", exc)
 
         return GenerateResult(
             raw=raw,

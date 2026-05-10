@@ -69,12 +69,14 @@ def _count_except_exception_sites() -> int:
 
 
 def test_except_exception_site_count_within_threshold():
-    """Coarse count invariant. Today's count is 152; threshold is 160 (8
+    """Coarse count invariant. Today's count is 162; threshold is 170 (8
     headroom for routine additions). Bulk additions trigger review per
-    the taxonomy in the module docstring above."""
+    the taxonomy in the module docstring above. ZAYA runtime port +
+    Hy3/ZAYA1-VL converters added best-effort-parse and optional-import
+    sites that fit the taxonomy."""
     total = _count_except_exception_sites()
-    assert total <= 160, (
-        f"except Exception site count ({total}) exceeds threshold of 160 — "
+    assert total <= 170, (
+        f"except Exception site count ({total}) exceeds threshold of 170 — "
         f"audit new additions per the 5-category taxonomy in this module's "
         f"docstring (M113 iter 105). If all additions fit one of: optional-"
         f"import / tensor-conversion-retry / best-effort-parse / error-"
