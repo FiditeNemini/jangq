@@ -34,10 +34,12 @@ PROFILE_BITS = {
 
 CAPABILITIES = {
     # ZAYA's template has a Qwen-style thinking branch, so keep parser
-    # metadata. Product defaults stay no-thinking through supports_thinking.
+    # metadata for explicit opt-in extraction. Product defaults stay
+    # no-thinking through supports_thinking, and the default product prompt
+    # uses a closed empty think block rather than an open reasoning prefix.
     "reasoning_parser": "qwen3",
     "tool_parser": "zaya_xml",
-    "think_in_template": True,
+    "think_in_template": False,
     "supports_tools": True,
     "supports_thinking": False,
     "family": "zaya",

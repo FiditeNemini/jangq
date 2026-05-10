@@ -27,9 +27,11 @@ from typing import Any
 # (family, reasoning_parser, tool_parser, think_in_template, cache_type)
 FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # ZAYA / Zyphra — CCA attention + top-1 MoE. Templates have Qwen-style
-    # thinking branches, so qwen3 is useful parser metadata. Product behavior
-    # remains no-thinking through supports_thinking=False below.
-    "zaya":              ("zaya",        "qwen3",       "zaya_xml", True,  "hybrid"),
+    # thinking branches, so qwen3 is useful parser metadata for explicit
+    # opt-in extraction. Product behavior remains no-thinking through
+    # supports_thinking=False below, and enable_thinking=False renders a
+    # closed empty think block, not an open reasoning prefix.
+    "zaya":              ("zaya",        "qwen3",       "zaya_xml", False, "hybrid"),
     "zaya1_vl":          ("zaya1_vl",    "qwen3",       "zaya_xml", False, "hybrid"),
     # Qwen 3.5 / 3.6 family (hybrid SSM + attention)
     "qwen3_5":          ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
