@@ -38,6 +38,42 @@ JANG_FORMAT_VALUES = ["jang", "jjqf", "mxq"]
 _SHARD_FLUSH_BYTES = 2_000_000_000  # Made by Jinho Jang — jangq.ai
 
 
+def _jang_quant_block_size(jang_cfg: dict, default: int = 64) -> int:
+    """Resolve runtime quant group size from old and new sidecar keys."""
+    quant = jang_cfg.get("quantization") or {}
+    return int(quant.get("block_size") or quant.get("group_size") or default)
+
+
+def _jang_default_bits(jang_cfg: dict, fallback: list[int] | None = None) -> int:
+    """Resolve the default affine bit width for JANG runtime modules."""
+    quant = jang_cfg.get("quantization") or {}
+    if quant.get("bits") is not None:
+        return int(quant["bits"])
+    bit_widths = quant.get("bit_widths_used", fallback or [4])
+    return int(min(bit_widths))
+
+
+def _module_can_quantize_with_group_size(module, group_size: int) -> bool:
+    """Whether an affine module's input dimension can use this group size."""
+    input_dims = getattr(module, "input_dims", None)
+    if input_dims is None:
+        weight = getattr(module, "weight", None)
+        shape = getattr(weight, "shape", None)
+        if shape is not None and len(shape) >= 2:
+            input_dims = shape[-1]
+    if input_dims is None:
+        return True
+    try:
+        return int(input_dims) % int(group_size) == 0
+    except Exception:
+        return True
+
+
+def _module_path_is_raw_adapter(path: str) -> bool:
+    """Adapters such as vision-LoRA are stored as raw float weights."""
+    return any(part.startswith("lora") for part in str(path).split("."))
+
+
 def _sanitize_grouped_conv1d_layout(weights: dict) -> dict:
     """Force leftover grouped Conv1d weights into MLX layout.
 
@@ -156,9 +192,9 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
     # config.json already has quantization key (written by v2 converter)
     # but ensure it exists for older v2 models
     if "quantization" not in config:
-        block_size = jang_cfg.get("quantization", {}).get("block_size", 64)
-        bit_widths = jang_cfg.get("quantization", {}).get("bit_widths_used", [4])
-        config["quantization"] = {"group_size": block_size, "bits": min(bit_widths)}
+        block_size = _jang_quant_block_size(jang_cfg)
+        default_bits = _jang_default_bits(jang_cfg, [4])
+        config["quantization"] = {"group_size": block_size, "bits": default_bits}
 
     model, config = _load_model_skeleton(
         path, lazy=True, strict=False, model_config=config
@@ -471,9 +507,8 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
 
     start = time.perf_counter()
 
-    block_size = jang_cfg.get("quantization", {}).get("block_size", 64)
-    bit_widths = jang_cfg.get("quantization", {}).get("bit_widths_used", [4])
-    default_bits = min(bit_widths)
+    block_size = _jang_quant_block_size(jang_cfg)
+    default_bits = _jang_default_bits(jang_cfg, [4])
 
     config = vlm_load_config(path)
     model_class, _ = get_model_and_args(config=config)
@@ -495,7 +530,11 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
     def get_class_predicate(p, m):
         if skip_multimodal_module(p):
             return False
+        if _module_path_is_raw_adapter(p):
+            return False
         if not hasattr(m, "to_quantized"):
+            return False
+        if not _module_can_quantize_with_group_size(m, block_size):
             return False
         # Model-specific quantization (e.g., Mistral 4: gate at 8-bit)
         if _quant_pred is not None:
@@ -911,7 +950,7 @@ def _load_jang_v1(path: Path, jang_cfg: dict, config_path: Path):
 
     start = time.perf_counter()
 
-    block_size = jang_cfg.get("quantization", {}).get("block_size", 64)
+    block_size = _jang_quant_block_size(jang_cfg)
     target_bits = jang_cfg.get("quantization", {}).get("target_bits", 4)
     actual_bits = jang_cfg.get("quantization", {}).get("actual_bits", target_bits)
     source_model = jang_cfg.get("source_model", {}).get("name", "unknown")
@@ -922,8 +961,7 @@ def _load_jang_v1(path: Path, jang_cfg: dict, config_path: Path):
     )
 
     config = load_config(path)
-    bit_widths = jang_cfg.get("quantization", {}).get("bit_widths_used", [2, 4, 6, 8])
-    default_bits = min(bit_widths)
+    default_bits = _jang_default_bits(jang_cfg, [2, 4, 6, 8])
     config.pop("quantization", None)
     config.pop("quantization_config", None)
     config["quantization"] = {"group_size": block_size, "bits": default_bits}
@@ -990,9 +1028,8 @@ def _load_jang_v1_vlm(path: Path, jang_cfg: dict, config_path: Path):
 
     start = time.perf_counter()
 
-    block_size = jang_cfg.get("quantization", {}).get("block_size", 64)
-    bit_widths = jang_cfg.get("quantization", {}).get("bit_widths_used", [2, 4, 6, 8])
-    default_bits = min(bit_widths)
+    block_size = _jang_quant_block_size(jang_cfg)
+    default_bits = _jang_default_bits(jang_cfg, [2, 4, 6, 8])
     source_model = jang_cfg.get("source_model", {}).get("name", "unknown")
 
     logger.info(f"Loading JANG v1 VLM: {source_model}")
@@ -1017,7 +1054,12 @@ def _load_jang_v1_vlm(path: Path, jang_cfg: dict, config_path: Path):
         def get_class_predicate(p, m):
             if skip_multimodal_module(p):
                 return False
-            return hasattr(m, "to_quantized")
+            if _module_path_is_raw_adapter(p):
+                return False
+            return (
+                hasattr(m, "to_quantized")
+                and _module_can_quantize_with_group_size(m, block_size)
+            )
 
         nn.quantize(model, group_size=block_size, bits=default_bits,
                     class_predicate=get_class_predicate)
@@ -1876,7 +1918,7 @@ def upgrade_v1_to_v2(model_path: str | Path) -> None:
         return
 
     jang_cfg = json.loads(config_path.read_text())
-    block_size = jang_cfg.get("quantization", {}).get("block_size", 64)
+    block_size = _jang_quant_block_size(jang_cfg)
 
     # Load model config
     model_config = json.loads((path / "config.json").read_text())
@@ -1972,10 +2014,9 @@ def upgrade_v1_to_v2(model_path: str | Path) -> None:
         )
 
         # Update config.json with quantization key
-        bit_widths = jang_cfg.get("quantization", {}).get("bit_widths_used", [4])
         model_config["quantization"] = {
             "group_size": block_size,
-            "bits": min(bit_widths),
+            "bits": _jang_default_bits(jang_cfg, [4]),
         }
         (path / "config.json").write_text(
             json.dumps(model_config, indent=2, ensure_ascii=False) + "\n"
