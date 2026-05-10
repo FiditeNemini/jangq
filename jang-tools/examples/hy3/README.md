@@ -77,6 +77,10 @@ Active JANGTQ profile priority:
 - `JANGTQ2`: first 128 GB release candidate. Routed expert gate/up/down
   projections use 2-bit MXTQ, and the non-routed core stays 8-bit affine or
   passthrough.
+- `JANGTQ1`: experimental size-floor candidate. Routed expert gate/up/down
+  projections use 1-bit MXTQ. It is expected to be memory-comfortable on
+  128 GB class devices, but quality is unproven and likely worse than
+  `JANGTQ2`.
 - `JANGTQ_K`: quality-first candidate. Routed expert gate/up projections use
   2-bit MXTQ, down projections use 4-bit MXTQ. This is not a proven
   comfortable 128 GB target.
@@ -103,6 +107,8 @@ No Osaurus upload until all of these are true:
 - converter maps dense layer, sparse MoE layers, shared expert, router bias,
   q/k norms, and MTP tensors explicitly
 - generated `JANGTQ2` bundle passes `verify_directory`
+- generated `JANGTQ1` bundle, if built, is labeled experimental and passes the
+  same sidecar/index/capability gates before any coherence smoke
 - JANGTQ bundles include `jangtq_runtime.safetensors`
 - Swift/Python runtime has a real generation proof, cache behavior proof, and
   MTP compatibility note

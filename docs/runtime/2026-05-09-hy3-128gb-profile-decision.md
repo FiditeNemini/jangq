@@ -11,6 +11,7 @@ Current recommendation:
 | Target | Profile | Intended device class | Reason |
 |---|---|---|---|
 | First release candidate | `JANGTQ2` | 128 GB | Smaller routed expert footprint; higher quality risk on a 295B top-8 MoE, but this is the only current profile with reasonable 128 GB headroom. |
+| Experimental size floor | `JANGTQ1` | 128 GB if coherence survives | Routed expert footprint is half of `JANGTQ2`, but 1-bit MXTQ is expected to lose quality. Do not publish as production unless real generation and benchmark smoke beat the quality bar. |
 | Quality candidate | `JANGTQ_K` | 192 GB+ preferred; 128 GB only if measured runtime headroom is acceptable at short context | Better quality margin: routed `gate_proj/up_proj` at 2-bit, routed `down_proj` at 4-bit, non-routed core at 8-bit. |
 | Reference fallback | `JANGTQ4` | Not a 128 GB target | Useful for quality comparison if disk/time allow. |
 
@@ -29,6 +30,7 @@ Estimated routed expert storage:
 
 | Profile | Routed bits | Routed expert storage |
 |---|---:|---:|
+| `JANGTQ1` | 1.0 avg | ~36 GB before sidecar/metadata overhead |
 | `JANGTQ2` | 2.0 avg | ~72 GB before sidecar/metadata overhead |
 | `JANGTQ_K` | 2.67 avg | ~95 GB before sidecar/metadata overhead |
 | `JANGTQ4` | 4.0 avg | ~143 GB before sidecar/metadata overhead |
@@ -41,8 +43,14 @@ Low-RAM estimator run on the partial local source config:
 
 | Profile | Estimated bundle | 4K KV cache | Runtime total with 12 GB headroom | 128 GB verdict |
 |---|---:|---:|---:|---|
+| `JANGTQ1` | 51.3 GB | 1.34 GB | 64.6 GB | comfortable memory, quality unproven |
 | `JANGTQ_K` | 113.3 GB | 1.34 GB | 126.6 GB | not comfortable |
 | `JANGTQ2` | 88.5 GB | 1.34 GB | 101.8 GB | tight |
+
+The `JANGTQ1` estimate corrects an earlier rough claim that the finished
+bundle would be about 44 GB. The routed expert body is about 36 GB at 1-bit,
+but the non-routed 8-bit affine core and sidecar overhead still count, putting
+the planning estimate closer to 51 GB before measuring the finished artifact.
 
 Hy3 KV cache is also non-trivial:
 
@@ -67,6 +75,14 @@ For this 128 GB-focused release, build and test `JANGTQ2` explicitly:
 
 ```text
 Hy3-preview-JANGTQ2 is the 128 GB comfort candidate. It trades quality margin for memory headroom.
+```
+
+For `JANGTQ1`, use experimental wording only:
+
+```text
+Hy3-preview-JANGTQ1 is an experimental size-floor bundle. It uses 1-bit MXTQ
+for routed experts and is memory-comfortable on 128 GB class devices, but
+quality is not production-claimed until coherence and benchmark checks pass.
 ```
 
 ## Required Proof Before Upload Claims

@@ -14,6 +14,7 @@ Hy3-preview ("hy_v3", HYV3ForCausalLM, 295B/21B active MoE):
 
 Mixed-precision TurboQuant for Hy3:
   routed expert MLP weights → MXTQ at the requested profile
+    - JANGTQ1: all routed expert projections 1-bit (experimental size floor)
     - JANGTQ2: all routed expert projections 2-bit (128 GB first target)
     - JANGTQ_K: gate/up 2-bit, down 4-bit (quality-first, 192 GB+ preferred)
     - JANGTQ4: all routed expert projections 4-bit (quality reference)
@@ -57,7 +58,7 @@ if len(sys.argv) < 3:
         "usage: python -m jang_tools.convert_hy3_jangtq <src_bf16_dir> <out_dir> [profile]\n"
         "  <src_bf16_dir>  path to a Tencent/Hy3-preview BF16 source directory\n"
         "  <out_dir>       output directory for the JANGTQ bundle\n"
-        "  [profile]       JANGTQ2 (default), JANGTQ_K, or JANGTQ4",
+        "  [profile]       JANGTQ1 (experimental), JANGTQ2 (default), JANGTQ_K, or JANGTQ4",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -68,6 +69,7 @@ PROFILE = sys.argv[3] if len(sys.argv) > 3 else "JANGTQ2"
 SEED = 42
 
 _PROFILE_BITS = {
+    "JANGTQ1": 1,
     "JANGTQ2": 2,
     "JANGTQ4": 4,
     "JANGTQ_K": "mixed",
@@ -89,6 +91,13 @@ if EXPERT_BITS == "mixed":
 else:
     PROFILE = f"JANGTQ{EXPERT_BITS}"
     _MIXED_PROJ_BITS = None
+
+# JANGTQ1 (1-bit MXTQ on routed experts) is experimental: TurboQuantLinear and
+# tq_quantize_weight both support bits=1 (verified via smoke test on Hy3
+# routed-expert shapes 4096 % 32 == 0, 1536 % 32 == 0), but quality has not
+# been measured against reference outputs. The codebook collapses to 2 entries
+# (effectively ±v after Hadamard rotation), and routed experts dominate model
+# behavior. Expect a meaningful coherence drop vs JANGTQ2.
 
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -130,6 +139,31 @@ intermediate_size = int(config["intermediate_size"])              # dense-FFN wi
 moe_intermediate_size = int(config.get("moe_intermediate_size", config.get("expert_hidden_dim", 1536)))
 n_mtp_layers = int(config.get("num_nextn_predict_layers", 0))
 first_k_dense_replace = int(config.get("first_k_dense_replace", 0))
+
+
+def _validate_tq_packing_shape(bits: int, in_features: int, role: str) -> None:
+    """Fail before a long conversion if vectorized MXTQ packing cannot align.
+
+    `tq_quantize_weight` vectorizes rows by flattening before `pack_bits`, which
+    is bit-identical only when each row has an integral number of packed words.
+    Hy3 routed expert dims satisfy this for 1/2/4-bit profiles.
+    """
+    vals_per_u32 = 32 // bits
+    if 32 % bits != 0 or in_features % vals_per_u32 != 0:
+        raise SystemExit(
+            f"{PROFILE} cannot vector-pack {role}: in_features={in_features}, "
+            f"bits={bits}, vals_per_u32={vals_per_u32}. Refusing to start a "
+            "long conversion that would fail or mis-pack routed experts."
+        )
+
+
+if _MIXED_PROJ_BITS is None:
+    _validate_tq_packing_shape(int(EXPERT_BITS), hidden_size, "gate/up routed experts")
+    _validate_tq_packing_shape(int(EXPERT_BITS), moe_intermediate_size, "down routed experts")
+else:
+    _validate_tq_packing_shape(int(_MIXED_PROJ_BITS["gate_proj"]), hidden_size, "gate routed experts")
+    _validate_tq_packing_shape(int(_MIXED_PROJ_BITS["up_proj"]), hidden_size, "up routed experts")
+    _validate_tq_packing_shape(int(_MIXED_PROJ_BITS["down_proj"]), moe_intermediate_size, "down routed experts")
 
 
 def get_bits_and_method(name: str) -> tuple[int, str]:

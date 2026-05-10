@@ -22,6 +22,8 @@ def load_config(model_dir: Path) -> dict:
 
 def profile_bits(profile: str) -> float:
     p = profile.upper()
+    if p == "JANGTQ1":
+        return 1.0
     if p == "JANGTQ2":
         return 2.0
     if p in {"JANGTQ_K", "JANGTQK"}:
@@ -29,7 +31,7 @@ def profile_bits(profile: str) -> float:
     if p == "JANGTQ4":
         return 4.0
     raise SystemExit(
-        f"unknown profile {profile!r}; expected JANGTQ2, JANGTQ_K, or JANGTQ4"
+        f"unknown profile {profile!r}; expected JANGTQ1, JANGTQ2, JANGTQ_K, or JANGTQ4"
     )
 
 

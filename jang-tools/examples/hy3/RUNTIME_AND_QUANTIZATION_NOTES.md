@@ -85,19 +85,23 @@ and scanned.
 
 Active quantization policy:
 
-| Tensor family | `JANGTQ2` first 128 GB target |
-|---|---|
-| attention q/k/v/o | affine 8-bit |
-| q_norm/k_norm/RMSNorm | passthrough |
-| routed expert gate/up/down | MXTQ 2-bit |
-| shared expert | affine 8-bit |
-| dense layer-0 MLP | affine 8-bit |
-| router gate/bias | passthrough |
-| lm_head | 8-bit or passthrough first |
-| MTP | affine 8-bit where present, with runtime status documented |
+| Tensor family | `JANGTQ2` first 128 GB target | `JANGTQ1` experimental size floor |
+|---|---|---|
+| attention q/k/v/o | affine 8-bit | affine 8-bit |
+| q_norm/k_norm/RMSNorm | passthrough | passthrough |
+| routed expert gate/up/down | MXTQ 2-bit | MXTQ 1-bit |
+| shared expert | affine 8-bit | affine 8-bit |
+| dense layer-0 MLP | affine 8-bit | affine 8-bit |
+| router gate/bias | passthrough | passthrough |
+| lm_head | 8-bit or passthrough first | 8-bit or passthrough first |
+| MTP | affine 8-bit where present, with runtime status documented | affine 8-bit where present, with runtime status documented |
 
 `JANGTQ2` is the first 128 GB release candidate. It should not be called the
 best quality profile until it has coherence proof against `JANGTQ_K`.
+
+`JANGTQ1` is not a replacement for `JANGTQ2`. It exists to test the memory
+floor for 128 GB devices: routed experts use a 2-entry codebook, so output
+quality may fail even if the bundle verifies structurally.
 
 ## Swift Work Items
 
