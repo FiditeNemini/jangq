@@ -20,6 +20,227 @@ import mlx.nn as nn
 # is re-used by calling a helper carved out of load_jangtq_model.
 
 
+def _affine_quantize_mode(quantization: dict | None) -> str:
+    """Return the MLX affine quantization mode for non-TQ VLM modules.
+
+    JANGTQ VLM bundles use ``mode="affine+mxtq"`` at the container level:
+    affine modules such as embeddings, attention projections, and lm_head are
+    still ordinary MLX affine quantized weights, while routed experts are later
+    replaced by TurboQuant modules.  Passing the container mode directly to
+    ``nn.quantize`` raises ``KeyError`` in MLX and can also mask bundle/runtime
+    drift.  Normalize only the container marker; leave real affine modes alone.
+    """
+
+    if not isinstance(quantization, dict):
+        return "affine"
+    mode = str(quantization.get("mode", "affine")).lower()
+    if mode == "affine+mxtq":
+        return "affine"
+    return mode
+
+
+def _vlm_quant_weight_key_candidates(module_path: str, model_type: str = "") -> set[str]:
+    """Return possible on-disk ``.scales`` keys for a VLM module path."""
+
+    candidates = {f"{module_path}.scales"}
+    if str(model_type or "").lower() == "zaya1_vl":
+        if module_path.startswith("language_model.model."):
+            raw = module_path.replace("language_model.model.", "model.", 1)
+            candidates.add(f"{raw}.scales")
+            if ".mlp.zaya_block." in raw:
+                candidates.add(f"{raw.replace('.mlp.zaya_block.', '.zaya_block.', 1)}.scales")
+        if module_path.startswith("vision_tower."):
+            candidates.add(f"model.visual{module_path[len('vision_tower'):]}.scales")
+            candidates.add(f"model.vision_tower{module_path[len('vision_tower'):]}.scales")
+    return candidates
+
+
+class _Zaya1VLImageProcessorProxy:
+    """Delegate image preprocessing while bypassing mlx-vlm's BaseImageProcessor shortcut."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def __call__(self, *args, **kwargs):
+        return self._inner(*args, **kwargs)
+
+    def preprocess(self, *args, **kwargs):
+        return self._inner.preprocess(*args, **kwargs)
+
+
+class _Zaya1VLProcessor:
+    def __init__(self, tokenizer, image_processor, chat_template: str | None):
+        self.tokenizer = tokenizer
+        self._image_processor = image_processor
+        self.image_processor = _Zaya1VLImageProcessorProxy(image_processor)
+        self.chat_template = chat_template
+        self.image_token = "<image>"
+        self.video_token = "<video>"
+
+    def __getattr__(self, name):
+        return getattr(self.tokenizer, name)
+
+    def _normalize_content(self, content):
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}]
+        if not isinstance(content, list):
+            if content is None:
+                return []
+            return [{"type": "text", "text": str(content)}]
+
+        normalized = []
+        for item in content:
+            if isinstance(item, str):
+                normalized.append({"type": "text", "text": item})
+                continue
+            if not isinstance(item, dict):
+                normalized.append({"type": "text", "text": str(item)})
+                continue
+            item_type = str(item.get("type", ""))
+            if item_type in ("image", "image_url", "input_image"):
+                normalized.append({"type": "image"})
+            elif item_type in ("text", "input_text"):
+                text = item.get("text", "") or item.get("content", "")
+                normalized.append({"type": "text", "text": str(text)})
+            else:
+                text = item.get("text", "") or item.get("content", "")
+                if text:
+                    normalized.append({"type": "text", "text": str(text)})
+        return normalized
+
+    def _normalize_messages(self, messages):
+        return [
+            {**message, "content": self._normalize_content(message.get("content"))}
+            if isinstance(message, dict)
+            else message
+            for message in messages
+        ]
+
+    def apply_chat_template(self, messages, *args, **kwargs):
+        messages = self._normalize_messages(messages)
+        if self.chat_template is not None:
+            kwargs.setdefault("chat_template", self.chat_template)
+        return self.tokenizer.apply_chat_template(messages, *args, **kwargs)
+
+    def __call__(
+        self,
+        text=None,
+        images=None,
+        padding=True,
+        padding_side="left",
+        add_special_tokens=True,
+        return_tensors="np",
+        **kwargs,
+    ):
+        kwargs.pop("audio", None)
+        kwargs.pop("audios", None)
+        if images is None:
+            return self.tokenizer(
+                text,
+                add_special_tokens=add_special_tokens,
+                padding=padding,
+                padding_side=padding_side,
+                return_tensors=return_tensors,
+                **kwargs,
+            )
+
+        import numpy as np
+
+        if not isinstance(images, list):
+            images = [images]
+        prompts = text if isinstance(text, list) else [text]
+        vision = self._image_processor(images=images, return_tensors="np")
+        grids = np.asarray(vision["image_grid_thw"], dtype=np.int64)
+        merge = int(getattr(self._image_processor, "merge_size", 2) or 2)
+        image_repeats = [
+            int(t * h * w // (merge * merge)) for t, h, w in grids
+        ]
+        image_token_id = self.tokenizer.convert_tokens_to_ids(self.image_token)
+
+        expanded_ids = []
+        image_cursor = 0
+        for prompt in prompts:
+            ids = self.tokenizer.encode(
+                prompt or "",
+                add_special_tokens=add_special_tokens,
+            )
+            out_ids = []
+            for token_id in ids:
+                if token_id == image_token_id:
+                    if image_cursor >= len(image_repeats):
+                        raise ValueError(
+                            "ZAYA1-VL prompt has more <image> tokens than images"
+                        )
+                    out_ids.extend([image_token_id] * image_repeats[image_cursor])
+                    image_cursor += 1
+                else:
+                    out_ids.append(token_id)
+            expanded_ids.append(out_ids)
+        if image_cursor != len(image_repeats):
+            raise ValueError("ZAYA1-VL image count does not match <image> tokens in prompt")
+
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id
+        max_len = max(len(ids) for ids in expanded_ids)
+        input_ids = []
+        attention = []
+        for ids in expanded_ids:
+            pad = [pad_id] * (max_len - len(ids))
+            if padding and padding_side == "left":
+                row = pad + ids
+                mask = [0] * len(pad) + [1] * len(ids)
+            elif padding:
+                row = ids + pad
+                mask = [1] * len(ids) + [0] * len(pad)
+            else:
+                row = ids
+                mask = [1] * len(ids)
+            input_ids.append(row)
+            attention.append(mask)
+
+        return {
+            "input_ids": np.asarray(input_ids, dtype=np.int64),
+            "attention_mask": np.asarray(attention, dtype=np.int64),
+            "pixel_values": vision["pixel_values"],
+            "image_grid_thw": grids,
+        }
+
+
+def _load_zaya1_vl_chat_template(model_path: Path) -> str | None:
+    chat_template_path = model_path / "chat_template.json"
+    if chat_template_path.exists():
+        data = json.loads(chat_template_path.read_text())
+        if isinstance(data, dict) and data.get("chat_template"):
+            return data["chat_template"]
+    tok_config_path = model_path / "tokenizer_config.json"
+    if tok_config_path.exists():
+        data = json.loads(tok_config_path.read_text())
+        if isinstance(data, dict):
+            return data.get("chat_template")
+    return None
+
+
+def _build_zaya1_vl_processor(model_path: Path):
+    from transformers import AutoImageProcessor, AutoTokenizer
+    from mlx_vlm.tokenizer_utils import load_tokenizer as vlm_load_tokenizer
+    from mlx_vlm.utils import StoppingCriteria
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    chat_template = _load_zaya1_vl_chat_template(model_path)
+    if chat_template is not None:
+        tokenizer.chat_template = chat_template
+    image_processor = AutoImageProcessor.from_pretrained(model_path)
+    processor = _Zaya1VLProcessor(tokenizer, image_processor, chat_template)
+    detokenizer_class = vlm_load_tokenizer(model_path, return_tokenizer=False)
+    processor.detokenizer = detokenizer_class(tokenizer)
+    tokenizer.stopping_criteria = StoppingCriteria(tokenizer.eos_token_id, tokenizer)
+    return processor
+
+
 def _mlx_vlm_skeleton(model_path: Path):
     """Build the mlx_vlm model + processor without loading weights.
 
@@ -76,13 +297,19 @@ def _mlx_vlm_skeleton(model_path: Path):
                 return False
             if hasattr(m, "weight") and m.weight.size % 64 != 0:
                 return False
-            return f"{p}.scales" in weight_keys
+            return bool(
+                _vlm_quant_weight_key_candidates(
+                    p,
+                    str(config.get("model_type", "")),
+                )
+                & weight_keys
+            )
 
         nn.quantize(
             model,
             group_size=quantization.get("group_size", 64),
             bits=quantization.get("bits", 2),
-            mode=quantization.get("mode", "affine"),
+            mode=_affine_quantize_mode(quantization),
             class_predicate=get_class_predicate,
         )
 
@@ -90,9 +317,12 @@ def _mlx_vlm_skeleton(model_path: Path):
     # (`kimi_k25_processor.py` etc.) that AutoProcessor refuses to load
     # without trust_remote_code. Bundles in this loader are opt-in — we're
     # already executing their safetensors — so forward trust_remote_code=True.
-    processor = load_processor(
-        model_path, add_generation_prompt=True, trust_remote_code=True,
-    )
+    if str(config.get("model_type", "")).lower() == "zaya1_vl":
+        processor = _build_zaya1_vl_processor(model_path)
+    else:
+        processor = load_processor(
+            model_path, add_generation_prompt=True, trust_remote_code=True,
+        )
     _install_video_fallback(processor)
     return model, processor, config, model_config
 

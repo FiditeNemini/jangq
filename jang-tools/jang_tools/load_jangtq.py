@@ -53,6 +53,34 @@ def _sanitize_grouped_conv1d_layout(weights: dict) -> dict:
     return sanitize_grouped_conv1d_layout(weights, lambda v: v.moveaxis(2, 1))
 
 
+def _infer_tq_input_features(existing):
+    """Return the logical input width for a module replaced by TurboQuant.
+
+    MLX affine-quantized SwitchLinear placeholders store packed uint32 columns
+    in ``weight.shape[-1]``.  The logical input width lives in ``input_dims`` on
+    those modules.  Reading the packed storage width directly builds a
+    TurboQuant module with the wrong Hadamard/codebook cache key and corrupts
+    routed-expert decode.
+    """
+    for attr in ("in_features", "input_dims", "input_features"):
+        value = getattr(existing, attr, None)
+        if value is not None:
+            return int(value)
+
+    weight = getattr(existing, "weight", None)
+    if weight is None:
+        return None
+
+    packed_cols = int(weight.shape[-1])
+    bits = getattr(existing, "bits", None)
+    if bits is not None:
+        try:
+            return packed_cols * (32 // int(bits))
+        except Exception:
+            pass
+    return packed_cols
+
+
 def _apply_wired_limit_safe_default():
     """Set mx.wired_limit to ~70% of total RAM if the caller hasn't already.
 
@@ -352,6 +380,13 @@ def _vlm_minimal_sanitize(model, weights):
     if tc is not None:
         text_tied = bool(getattr(tc, "tie_word_embeddings", False))
 
+    model_type = (
+        getattr(model, "model_type", None)
+        or getattr(getattr(model, "config", None), "model_type", None)
+        or getattr(tc, "model_type", None)
+    )
+    is_zaya1_vl = str(model_type or "").lower() == "zaya1_vl"
+
     norm_suffixes = (
         ".input_layernorm.weight",
         ".post_attention_layernorm.weight",
@@ -366,7 +401,36 @@ def _vlm_minimal_sanitize(model, weights):
             continue
         if text_tied and key == "lm_head.weight":
             continue
-        if key.startswith("model.language_model"):
+        if is_zaya1_vl:
+            # ZAYA1-VL bundles keep language weights in raw HF text layout
+            # (`model.layers.*`) while the local mlx-vlm adapter exposes them
+            # under `language_model.model.layers.*`.  `model.load_weights` is
+            # strict=False below, so leaving these raw keys in place silently
+            # drops attention/router/LoRA weights and produces incoherent text
+            # even before any image path is involved.
+            if key.startswith("model.visual"):
+                key = key.replace("model.visual", "vision_tower", 1)
+            elif key.startswith("model.vision_tower"):
+                key = key.replace("model.vision_tower", "vision_tower", 1)
+            elif key.startswith("model."):
+                key = key.replace("model.", "language_model.model.", 1)
+            elif key.startswith("lm_head"):
+                key = key.replace("lm_head", "language_model.lm_head", 1)
+
+            if (
+                ".layers." in key
+                and ".zaya_block." in key
+                and ".mlp.zaya_block." not in key
+            ):
+                key = key.replace(".zaya_block.", ".mlp.zaya_block.", 1)
+
+            if (
+                ".self_attn.qkv.conv_qk." in key
+                and key.endswith(".weight")
+                and value.ndim == 3
+            ):
+                value = value.swapaxes(-1, -2)
+        elif key.startswith("model.language_model"):
             key = key.replace("model.language_model", "language_model.model")
         elif key.startswith("model.visual"):
             key = key.replace("model.visual", "vision_tower")
@@ -1041,23 +1105,19 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             _missed_required.append(base)
             continue
 
-        # Read the canonical in_features off the pre-replacement module rather
+        # Read the logical input width off the pre-replacement module rather
         # than recovering it from `packed_cols * vals_per_u32`. The recovery
         # math is only exact when in_features divides vals_per_u32 cleanly
         # (true for bits ∈ {1,2,4,8,16} where vals_per_u32 ∈ {32,16,8,4,2}),
         # but JANGTQ3 ships bits=3 → vals_per_u32=10 which over-rounds for any
         # in_features not a multiple of 10 (4096 → 4100, 7168 → 7170, 3072 →
-        # 3080). A wrong in_features mis-keys the per-(in_features, seed)
-        # signs cache and the per-(in_features, bits) codebook cache so the
-        # Hadamard rotation applied to x silently mismatches what the weights
-        # were quantized against → garbage decode. Falling back to the math
-        # only when the existing module truly has no in_features attribute
-        # (defensive — every nn.Linear / SwitchLinear we replace exposes it).
-        existing_in = getattr(existing, "in_features", None)
-        if existing_in is None:
-            ew = getattr(existing, "weight", None)
-            if ew is not None:
-                existing_in = int(ew.shape[-1])
+        # 3080). MLX affine-quantized SwitchLinear placeholders also expose
+        # packed storage in `weight.shape[-1]`; their logical width lives in
+        # `input_dims`. A wrong in_features mis-keys the per-(in_features,
+        # seed) signs cache and the per-(in_features, bits) codebook cache so
+        # the Hadamard rotation applied to x silently mismatches what the
+        # weights were quantized against → garbage decode.
+        existing_in = _infer_tq_input_features(existing)
 
         if packed.ndim == 3:
             n_exp, out_feat, packed_cols = packed.shape
