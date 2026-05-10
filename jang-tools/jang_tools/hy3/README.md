@@ -26,12 +26,14 @@ Bit policy (JANGTQ2):
 ## Load (Python)
 
 ```python
-from jang_tools.hy3 import register_mlx_lm_hy3
 from jang_tools.load_jangtq import load_jangtq_model
 
-register_mlx_lm_hy3()
 model, tokenizer = load_jangtq_model("/path/to/Hy3-preview-JANGTQ2")
 ```
+
+`load_jangtq_model` auto-registers `model_type=hy_v3` before it builds the
+MLX skeleton. Direct `register_mlx_lm_hy3()` calls are still fine in custom
+scripts, but they are no longer required for normal JANGTQ loading.
 
 For BF16 / affine-only Hy3 bundles use `jang_tools.hy3.load_hy3_model`
 instead. JANGTQ bundles MUST go through `load_jangtq_model` so routed
@@ -135,6 +137,9 @@ JANG / vmlx / vmlx-swift-lm yet.
   - "The capital of France is" → top1 ` Paris` (logit 19.13)
   - "def fibonacci(n):" → top1 `\n`, top3 includes ` return`
   - "Once upon a time" → top1 `,`, top2 ` there`
+
+Validation boundary: these are local smoke results for short prompts, not
+benchmark claims. MTP speculative decode remains disabled.
 
 ## vmlx integration
 

@@ -164,6 +164,11 @@ def load_jangtq_model(model_path, skip_params_eval=False):
             import jang_tools.dsv4  # noqa: F401  (registers on import)
         except Exception as _e:
             warnings.warn(f"jang_tools.dsv4 register failed: {_e}")
+    elif _model_type == "hy_v3":
+        try:
+            import jang_tools.hy3  # noqa: F401  (registers on import)
+        except Exception as _e:
+            warnings.warn(f"jang_tools.hy3 register failed: {_e}")
 
     if "quantization" not in model_config:
         model_config["quantization"] = {"group_size": 64, "bits": 2}
@@ -691,8 +696,8 @@ def _hydrate_dsv4_jangtq_streaming(
         _decode_compiled = {}
 
         def _get_compiled_decode(in_f, out_f, bits, k, swiglu_limit=0.0, dp_bits=None):
-            # Codex 2026-05-06 + external report (jang-tools 2.5.23 MiniMax-
-            # M2.7-JANGTQ_K end-to-end test): JANGTQ_K is a mixed-bit profile
+            # Mixed-bit regression report (jang-tools 2.5.23 MiniMax-M2.7-
+            # JANGTQ_K end-to-end test): JANGTQ_K is a mixed-bit profile
             # (gate=2 / up=2 / down=4). Without ``dp_bits`` the gather_dn
             # kernel below builds with gate_proj's bit width, then unpacks
             # down_proj.packed at the wrong stride — invisible on uniform-bit
@@ -1064,7 +1069,7 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         else:
             setattr(cur, last, new_mod)
 
-    # Hydrate-skip allowlist (Codex 2026-05-05 #3): the legacy "Skip (not in
+    # Hydrate-skip allowlist: the legacy "Skip (not in
     # model)" branch silently dropped TQ tensors whose target module didn't
     # exist on the loaded mlx_lm class. That's correct ONLY for documented
     # non-inference paths (multi-token-prediction heads, training-only
@@ -1149,7 +1154,7 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
 
     print(f"  Replaced {n_replaced} modules", flush=True)
 
-    # Hydrate-skip enforcement (Codex 2026-05-05 #3). Any TQ keys whose
+    # Hydrate-skip enforcement. Any TQ keys whose
     # target module is missing AND not on the documented allowlist
     # (mtp/eh_proj/shared_head/embed_tokens) are real silent-misses.
     # Hard-fail at load time so they don't manifest as fp16-fallback
@@ -1691,9 +1696,9 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     print("  Hydration complete", flush=True)
 
     # JANGTQ_TOPK_OVERRIDE env var: lower MoE router top_k at inference for
-    # decode speedup at the cost of some quality. Universal across all MoE
-    # families (Hy3, dots1, DSV3/4, qwen3_moe, bailing, laguna, minimax, ...).
-    # Top-1 families (ZAYA) silently no-op. See jang_tools.topk_override.
+    # decode speedup at the cost of some quality. This is an explicit opt-in
+    # runtime flag; invalid values must fail loudly instead of silently
+    # falling back to the trained K. Top-1 families (ZAYA) no-op.
     try:
         from jang_tools.topk_override import (
             apply_topk_override,
@@ -1707,5 +1712,7 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                 f"patched {_n} router/MoE attribute(s)",
                 flush=True,
             )
+    except ValueError:
+        raise
     except Exception as _e:
         print(f"  [topk-override] skipped: {_e!r}", flush=True)

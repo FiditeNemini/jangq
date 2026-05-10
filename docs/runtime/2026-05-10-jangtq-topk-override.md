@@ -4,17 +4,20 @@ Created 2026-05-10.
 
 ## What it is
 
-A universal MoE inference-time speedup that lowers the per-token expert
+A MoE inference-time fast-mode flag that lowers the per-token expert
 count below the value the model was trained with. Mechanism: walk the
 loaded model after JANGTQ hydration and override every router's
 `top_k` attribute (and any sibling `num_experts_per_tok` attribute on
 outer MoE containers) to a smaller K.
 
-Mechanism is universal: the converter ships every routed expert weight
-regardless of K, the router still scores all 192/256/etc. experts every
-step, and only the `argpartition` step that picks K winners is changed.
-No re-conversion, no quality-impacting changes to weights, no per-layer
-surgery — one integer counter per router.
+The mechanism is simple where the runtime exposes K as a mutable integer:
+the converter ships every routed expert weight regardless of K, the router
+still scores all experts every step, and only the `argpartition` / top-k
+winner count changes. No re-conversion, no weight surgery, and no tensor
+shape changes.
+
+This is not a new bundle profile and it is not a replacement for quality
+benchmarks. It is an explicit runtime flag.
 
 ## How to use
 
@@ -34,6 +37,14 @@ n_patched = apply_topk_override(model, 4)  # cut top-K from 8 to 4
 patched. Pass `None` (default) for no-op. Top-1 MoE families (ZAYA)
 have no `top_k` and silently skip.
 
+Guardrails:
+
+- K must be a positive integer.
+- K may lower the observed trained/original K.
+- K may restore the original K after a lower-K call.
+- K may not increase above the original K. That is treated as a config
+  error and raises `ValueError`.
+
 ### Env var
 
 ```sh
@@ -41,7 +52,8 @@ JANGTQ_TOPK_OVERRIDE=4 python -m jang_tools.examples.hy3.smoke_decode
 ```
 
 `load_jangtq_model` reads `JANGTQ_TOPK_OVERRIDE` after hydration and
-applies it automatically. Empty / unset / `0` is a no-op.
+applies it automatically. Empty / unset / `0` is a no-op. Invalid values
+raise instead of silently falling back to the trained K.
 
 ### Reverting
 
@@ -49,23 +61,24 @@ Call again with the original K, or unset the env var and reload.
 The override is non-destructive — model weights and module shapes are
 untouched.
 
-## Universal across MoE families
+## Runtime Coverage
 
-Tested attribute paths exist in all of:
+The patcher is intentionally generic (`named_modules()` + integer attrs),
+but support should be described by observed runtime coverage:
 
-| Family | Router class | top_k path |
-|---|---|---|
-| Hy3-preview (this) | `Dots1TopkRouter` | `mlp.gate.top_k` |
-| dots1 | `Dots1TopkRouter` | `mlp.gate.top_k` |
-| DeepSeek-V3 / V4 | `DeepseekV3MoE.gate` | `mlp.gate.top_k` |
-| Qwen3-MoE | `MoeBlock` | `mlp.top_k` |
-| Bailing v2.5 / Ling | `BailingTopkRouter` | `mlp.gate.top_k` |
-| Laguna-XS.2 | `LagunaRouter` | `mlp.router.top_k` |
-| MiniMax M2.7 | `MiniMaxRouter` | `mlp.gate.top_k` |
-| ZAYA | (top-1 only) | n/a — silent skip |
+| Family | Status | Patched runtime field(s) | Notes |
+|---|---|---|---|
+| Hy3-preview | Smoke-tested on local `Hy3-preview-JANGTQ2` | `mlp.gate.top_k`, `mlp.num_experts_per_tok` | 79 sparse layers -> 158 attrs. |
+| MiniMax M2.7 Small JANGTQ | Smoke-tested locally on 2026-05-10 | `num_experts_per_tok` | 62 sparse blocks patched; short-prompt K=4 smoke looked coherent. |
+| dots1 | Mechanically same router class as Hy3 | `mlp.gate.top_k` | Needs bundle-specific smoke before public claims. |
+| DeepSeek-V3 / V4 | Candidate | family-specific | Needs forward-pass test; DSV4 cache/MLA behavior is not Hy3-like. |
+| Qwen3-MoE | Candidate | family-specific | Needs forward-pass test. |
+| Bailing v2.5 / Ling | Candidate | family-specific | Needs forward-pass test; has separate MTP/cache concerns. |
+| Laguna-XS.2 | Candidate | family-specific | Needs forward-pass test. |
+| ZAYA | No-op expected | none | Top-1 router; override should patch 0 attrs. |
 
-`apply_topk_override` does not hardcode any of these — it walks
-`named_modules` and patches any module whose `top_k` is an int.
+Do not describe the feature as benchmark-validated on a family until that
+family has an actual load + generation test at the requested K.
 
 ## Hy3-preview measured A/B (M5 Max 128 GB, 2026-05-10)
 
@@ -101,6 +114,19 @@ chat-template and plain text. Same prompts each K.
 - Long-form quality (reasoning chains, code with rare patterns) was
   **not** measured. Always A/B on a real benchmark before shipping
   K<trained as a default.
+
+## MiniMax-M2.7-Small Smoke (2026-05-10)
+
+Four short prompts were run on `MiniMax-M2.7-Small-JANGTQ` at K=8 and
+K=4. K=4 patched the runtime `num_experts_per_tok` field across the
+sparse blocks and measured roughly `30.4 -> 34.1 tok/s` (+12.2%).
+
+The surprising short-prompt result was that K=4 looked at least as coherent
+as K=8 on those prompts, including one case where K=8 emitted invalid
+byte-like junk while K=4 produced coherent text. Treat this as a smoke
+finding only. It is not a proof that K=4 is generally higher quality than
+the trained K, and it does not cover HumanEval, MMLU, long-context,
+multi-turn, or batch behavior.
 
 ## Quality risk profile
 
@@ -147,12 +173,12 @@ The model was trained with the original K. Reducing K means:
 ```python
 def apply_topk_override(model, k: int | None) -> int:
     if k is None: return 0
-    n = 0
+    # First pass records the original/trained K and refuses K > original.
     for path, mod in model.named_modules():
         if hasattr(mod, "top_k") and isinstance(mod.top_k, int):
-            mod.top_k = k; n += 1
+            ...
         if hasattr(mod, "num_experts_per_tok") and isinstance(mod.num_experts_per_tok, int):
-            mod.num_experts_per_tok = k; n += 1
+            ...
     return n
 ```
 
