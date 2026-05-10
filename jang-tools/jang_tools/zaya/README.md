@@ -22,7 +22,8 @@ still needs live gates.
 ## Convert
 
 ```
-# JANGTQ2 / JANGTQ4 (recommended)
+# JANGTQ4 is the current quality-safe target. JANGTQ2 is experimental and
+# should be separately gated for strict-instruction quality before publishing.
 python -m jang_tools.convert_zaya_jangtq <bf16_src> <out> [JANGTQ2|JANGTQ4]
 
 # MXFP4
