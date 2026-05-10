@@ -256,6 +256,8 @@ def _mlx_vlm_skeleton(model_path: Path):
         load_processor,
     )
     config = load_config(model_path)
+    if str(config.get("model_type", "")).lower() == "zaya1_vl":
+        import jang_tools.zaya1_vl  # noqa: F401  (registers on import)
 
     model_class, _ = get_model_and_args(config=config)
 

@@ -111,14 +111,27 @@ def test_jangtq_vlm_affine_quant_mode_normalizes_container_mode():
 def test_jangtq_vlm_builds_zaya1_vl_inference_processor():
     from pathlib import Path
 
+    import pytest
+
+    # `pytest.importorskip("mlx_vlm")` is insufficient here because
+    # `tests/test_inference.py` injects a stub `mlx_vlm` ModuleType into
+    # sys.modules for its own purposes. The real check we need is that the
+    # mlx_vlm SUBMODULES used by `_build_zaya1_vl_processor` are importable;
+    # the function imports `mlx_vlm.tokenizer_utils.load_tokenizer`.
+    try:
+        import mlx_vlm.tokenizer_utils  # noqa: F401  type: ignore
+    except ImportError:
+        pytest.skip(
+            "ZAYA1-VL processor build requires real mlx_vlm "
+            "(optional VL dep — install via `pip install mlx_vlm`)"
+        )
+
     from transformers.image_processing_utils import BaseImageProcessor
 
     from jang_tools.load_jangtq_vlm import _build_zaya1_vl_processor
 
     model_dir = Path("/Users/eric/models/JANGQ/ZAYA1-VL-8B-JANGTQ2")
     if not (model_dir / "chat_template.json").exists():
-        import pytest
-
         pytest.skip("local ZAYA1-VL JANGTQ2 bundle is not present")
 
     processor = _build_zaya1_vl_processor(model_dir)

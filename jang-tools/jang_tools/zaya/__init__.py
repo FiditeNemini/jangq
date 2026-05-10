@@ -9,6 +9,9 @@ this module under `vmlx_engine.loaders.load_zaya`.
 from .model import Model, ModelArgs, register_mlx_lm_zaya
 from .runtime import load_zaya_model
 
+# JANGTQ loading imports this package before mlx_lm resolves `model_type=zaya`.
+register_mlx_lm_zaya()
+
 __all__ = [
     "Model",
     "ModelArgs",

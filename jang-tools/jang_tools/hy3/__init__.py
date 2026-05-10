@@ -30,6 +30,10 @@ are replaced with TurboQuant kernels.
 from .model import Model, ModelArgs, build_args_from_hy3_config, register_mlx_lm_hy3
 from .runtime import load_hy3_model
 
+# `load_jangtq_model` imports this package before mlx_lm resolves
+# `model_type=hy_v3`; registration must therefore be import-time behavior.
+register_mlx_lm_hy3()
+
 __all__ = [
     "Model",
     "ModelArgs",

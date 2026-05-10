@@ -169,6 +169,11 @@ def load_jangtq_model(model_path, skip_params_eval=False):
             import jang_tools.hy3  # noqa: F401  (registers on import)
         except Exception as _e:
             warnings.warn(f"jang_tools.hy3 register failed: {_e}")
+    elif _model_type == "zaya":
+        try:
+            import jang_tools.zaya  # noqa: F401  (registers on import)
+        except Exception as _e:
+            warnings.warn(f"jang_tools.zaya register failed: {_e}")
 
     if "quantization" not in model_config:
         model_config["quantization"] = {"group_size": 64, "bits": 2}

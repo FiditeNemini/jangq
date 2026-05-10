@@ -65,6 +65,14 @@ def test_zaya_converter_console_scripts_are_registered():
 
     assert 'jang-convert-zaya-jangtq = "jang_tools.convert_zaya_jangtq:main"' in text
     assert 'jang-convert-zaya-mxfp4 = "jang_tools.convert_zaya_mxfp4:main"' in text
+    assert (
+        'jang-convert-zaya1-vl-jangtq = "jang_tools.convert_zaya1_vl_jangtq:main"'
+        in text
+    )
+    assert (
+        'jang-convert-zaya1-vl-mxfp4 = "jang_tools.convert_zaya1_vl_mxfp4:main"'
+        in text
+    )
 
 
 # Regression pins (2026-05-09): two unrelated bugs in capabilities.py.
