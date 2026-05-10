@@ -33,6 +33,7 @@ class TurboQuantKVCache:
     the compressed region ONCE into a persistent read-only buffer.
     """
 
+    _vmlx_batch_api = "turboquant_kv_v1"
     step = 256
 
     def __init__(
@@ -75,6 +76,13 @@ class TurboQuantKVCache:
         self._joined_k: Optional[mx.array] = None
         self._joined_v: Optional[mx.array] = None
 
+        # BatchGenerator compatibility. In single-sequence mode `offset` is an
+        # int. After extend()/prepare() it becomes a per-row mx.array and
+        # `_idx` is the shared right edge, matching mlx-lm BatchKVCache.
+        self.left_padding = None
+        self._right_padding = None
+        self._idx = None
+
     def _ensure_encoders(self):
         if self._key_encoder is None:
             self._key_encoder = TurboQuantEncoder(
@@ -100,6 +108,9 @@ class TurboQuantKVCache:
         self, keys: mx.array, values: mx.array
     ) -> tuple[mx.array, mx.array]:
         """Append new K/V. Returns full cache for attention at baseline speed."""
+        if self._is_batched:
+            return self._update_and_fetch_batched(keys, values)
+
         prev = self.offset
         num_new = keys.shape[2]
 
@@ -169,6 +180,236 @@ class TurboQuantKVCache:
                 self.values[..., :self.offset, :],
             )
 
+    @property
+    def _is_batched(self) -> bool:
+        return self._idx is not None
+
+    def _materialize_float_buffers(self):
+        """Ensure keys/values hold the readable full float state.
+
+        Batch operations slice and pad along the batch and sequence axes. The
+        packed TurboQuant representation is per-cache, so filtering or merging
+        first materializes the decoded float view and clears packed metadata.
+        """
+        full_k, full_v = self._get_full_cache()
+        if full_k is None or full_v is None:
+            return None, None
+        self.keys = full_k
+        self.values = full_v
+        self._compressed_keys = None
+        self._compressed_values = None
+        self._compressed_tokens = 0
+        self._decoded_k_buffer = None
+        self._decoded_v_buffer = None
+        self._joined_k = None
+        self._joined_v = None
+        return self.keys, self.values
+
+    def _current_idx(self) -> int:
+        if self._idx is not None:
+            return int(self._idx)
+        return int(self.offset)
+
+    def _batch_state(self):
+        keys, values = self._materialize_float_buffers()
+        if keys is None or values is None:
+            return None, None, 0, mx.array([], dtype=mx.int32), mx.array([], dtype=mx.int32)
+        batch = int(keys.shape[0])
+        idx = self._current_idx()
+        if self._is_batched:
+            offsets = self.offset
+            left_padding = self.left_padding
+        else:
+            offsets = mx.array([int(self.offset)] * batch, dtype=mx.int32)
+            left_padding = mx.array([0] * batch, dtype=mx.int32)
+        return keys, values, idx, offsets, left_padding
+
+    def _update_and_fetch_batched(self, keys: mx.array, values: mx.array):
+        prev = int(self._idx)
+        num_new = int(keys.shape[2])
+        if self.keys is None or (prev + num_new) > self.keys.shape[2]:
+            B, n_kv_heads, _, k_head_dim = keys.shape
+            v_head_dim = values.shape[3]
+            n_steps = (self.step + num_new - 1) // self.step
+            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
+            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+            if self.keys is not None:
+                if prev % self.step != 0:
+                    self.keys = self.keys[..., :prev, :]
+                    self.values = self.values[..., :prev, :]
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                self.keys, self.values = new_k, new_v
+
+        self.offset = self.offset + num_new
+        self._idx += num_new
+        self.keys[..., prev:self._idx, :] = keys
+        self.values[..., prev:self._idx, :] = values
+        return self.keys[..., :self._idx, :], self.values[..., :self._idx, :]
+
+    def prepare(self, *, left_padding=None, lengths=None, right_padding=None):
+        """BatchGenerator prepare() compatibility.
+
+        `lengths` is accepted for API parity with ArraysCache and ignored for
+        KV-style attention caches.
+        """
+        if left_padding is not None:
+            if self.keys is not None or self._joined_k is not None:
+                raise ValueError(
+                    "Left padding can only be added to an empty TurboQuantKVCache"
+                )
+            lp = mx.array(left_padding)
+            self.left_padding = lp
+            self.offset = mx.array([0] * len(left_padding), dtype=mx.int32) - lp
+            self._idx = 0
+        if right_padding is not None and max(right_padding) > 0:
+            self._right_padding = mx.array(right_padding)
+
+    def finalize(self):
+        if self._right_padding is None:
+            return
+        keys, values = self._materialize_float_buffers()
+        if keys is None or values is None:
+            self._right_padding = None
+            return
+        from mlx_lm.models.cache import dynamic_roll
+
+        padding = self._right_padding
+        self.keys = dynamic_roll(keys, padding[:, None], axis=2)
+        self.values = dynamic_roll(values, padding[:, None], axis=2)
+        if not self._is_batched:
+            self.offset = mx.array([int(self.offset)] * int(self.keys.shape[0]))
+            self.left_padding = mx.array([0] * int(self.keys.shape[0]))
+            self._idx = int(self.keys.shape[2])
+        self.offset = self.offset - padding
+        self.left_padding = self.left_padding + padding
+        self._right_padding = None
+
+    def filter(self, batch_indices):
+        if isinstance(batch_indices, (list, tuple)):
+            keep = list(batch_indices)
+            keep_len = len(keep)
+        else:
+            keep = batch_indices
+            try:
+                keep_len = int(batch_indices.shape[0])
+            except Exception:
+                keep_len = len(batch_indices)
+
+        if keep_len == 0:
+            self.keys = None
+            self.values = None
+            self._compressed_keys = None
+            self._compressed_values = None
+            self._compressed_tokens = 0
+            self._decoded_k_buffer = None
+            self._decoded_v_buffer = None
+            self._joined_k = None
+            self._joined_v = None
+            self.offset = 0
+            self.left_padding = None
+            self._idx = None
+            return
+
+        keys, values, idx, offsets, left_padding = self._batch_state()
+        if keys is None or values is None:
+            self.offset = mx.array([0] * len(keep), dtype=mx.int32)
+            self.left_padding = mx.array([0] * len(keep), dtype=mx.int32)
+            self._idx = 0
+            return
+
+        self.keys = keys[keep]
+        self.values = values[keep]
+        self.offset = offsets[keep]
+        self.left_padding = left_padding[keep]
+        self._idx = idx
+
+        min_left_pad = int(self.left_padding.min().item())
+        if min_left_pad > 0:
+            self.keys = self.keys[..., min_left_pad:, :]
+            self.values = self.values[..., min_left_pad:, :]
+            self._idx -= min_left_pad
+            self.left_padding = self.left_padding - min_left_pad
+
+        if keep_len == 1 and int(self.left_padding[0].item()) == 0:
+            self.offset = int(self.offset[0].item())
+            self.left_padding = None
+            self._idx = None
+
+    def extract(self, idx: int):
+        keys, values, right_edge, offsets, left_padding = self._batch_state()
+        extracted = TurboQuantKVCache(
+            key_dim=self.key_dim,
+            value_dim=self.value_dim,
+            key_bits=self.key_bits,
+            value_bits=self.value_bits,
+            seed=self._seed,
+            compress_after=self.compress_after,
+            sink_tokens=self.sink_tokens,
+        )
+        if keys is None or values is None:
+            return extracted
+        padding = int(left_padding[idx].item())
+        extracted.keys = mx.contiguous(keys[idx:idx + 1, :, padding:right_edge, :])
+        extracted.values = mx.contiguous(values[idx:idx + 1, :, padding:right_edge, :])
+        extracted.offset = int(extracted.keys.shape[2])
+        return extracted
+
+    def extend(self, other):
+        """In-place merge with another TurboQuant cache batch.
+
+        Mirrors mlx-lm BatchKVCache.extend(): rows are right-justified to a
+        common `_idx`, and per-row `offset`/`left_padding` carry the true
+        sequence lengths for masks and later extract/filter operations.
+        """
+        self_k, self_v, self_idx, self_offsets, self_left = self._batch_state()
+        other_k, other_v, other_idx, other_offsets, other_left = other._batch_state()
+
+        if self_k is None and other_k is None:
+            self.offset = mx.concatenate([self_offsets, other_offsets])
+            self.left_padding = mx.concatenate([self_left, other_left])
+            self._idx = max(self_idx, other_idx)
+            return
+        if self_k is None:
+            self_k = mx.array([]).reshape(0, other_k.shape[1], 0, other_k.shape[3])
+            self_v = mx.array([]).reshape(0, other_v.shape[1], 0, other_v.shape[3])
+        if other_k is None:
+            other_k = mx.array([]).reshape(0, self_k.shape[1], 0, self_k.shape[3])
+            other_v = mx.array([]).reshape(0, self_v.shape[1], 0, self_v.shape[3])
+
+        max_idx = max(int(self_idx), int(other_idx))
+        max_size = max(int(self_k.shape[2]), int(other_k.shape[2]))
+
+        def pad(keys, values, idx, offsets, left_padding):
+            if keys.shape[0] == 0:
+                return keys, values, offsets, left_padding
+            left = max_idx - int(idx)
+            right = max_size - int(keys.shape[2]) - left
+            if right < 0:
+                keys = keys[..., :right, :]
+                values = values[..., :right, :]
+                right = 0
+            if left != 0 or right != 0:
+                pad_width = [(0, 0), (0, 0), (left, right), (0, 0)]
+                keys = mx.pad(keys, pad_width)
+                values = mx.pad(values, pad_width)
+            return keys, values, offsets, left_padding + left
+
+        self_k, self_v, self_offsets, self_left = pad(
+            self_k, self_v, self_idx, self_offsets, self_left
+        )
+        other_k, other_v, other_offsets, other_left = pad(
+            other_k, other_v, other_idx, other_offsets, other_left
+        )
+        self.keys = mx.concatenate([self_k, other_k], axis=0)
+        self.values = mx.concatenate([self_v, other_v], axis=0)
+        self.offset = mx.concatenate([self_offsets, other_offsets])
+        self.left_padding = mx.concatenate([self_left, other_left])
+        self._idx = max_idx
+
     def compress(self, n_tokens: Optional[int] = None):
         """Compress oldest tokens. Decode ONCE into persistent read-only buffer.
 
@@ -233,30 +474,53 @@ class TurboQuantKVCache:
 
     def _get_full_cache(self) -> tuple[mx.array, mx.array]:
         """Return full K/V. Uses joined buffer if compressed, else float buffer."""
+        end = self._current_idx()
         if self._joined_k is not None:
-            return self._joined_k[..., :self.offset, :], self._joined_v[..., :self.offset, :]
+            return self._joined_k[..., :end, :], self._joined_v[..., :end, :]
         elif self.keys is not None:
-            return self.keys[..., :self.offset, :], self.values[..., :self.offset, :]
+            return self.keys[..., :end, :], self.values[..., :end, :]
         return None, None
 
-    def make_mask(self, N: int, return_array: bool = True, window_size: Optional[int] = None):
+    def make_mask(
+        self,
+        N: int,
+        return_array: bool = True,
+        window_size: Optional[int] = None,
+        **kwargs,
+    ):
+        if self._is_batched:
+            from mlx_lm.models.cache import create_causal_mask
+
+            return create_causal_mask(
+                N,
+                offset=self._current_idx(),
+                left_padding=self.left_padding,
+                window_size=window_size,
+                **kwargs,
+            )
         from mlx_lm.models.cache import create_attention_mask
         return create_attention_mask(N, self.offset, return_array, window_size)
 
     def empty(self) -> bool:
+        if self._is_batched:
+            return bool(mx.all(self.offset == 0).item())
         return self.offset == 0
 
     def is_trimmable(self) -> bool:
         return True
 
     def trim(self, n: int) -> int:
-        n = min(self.offset, n)
-        self.offset -= n
+        n = min(self._current_idx(), n)
+        if self._is_batched:
+            self.offset = mx.maximum(self.offset - n, 0)
+            self._idx = max(int(self._idx) - n, 0)
+        else:
+            self.offset -= n
         return n
 
     @property
     def state(self):
-        if self.offset == 0:
+        if self.empty():
             return [], []
         return self._get_full_cache()
 
@@ -266,6 +530,16 @@ class TurboQuantKVCache:
             self.keys, self.values = v
             if self.keys is not None:
                 self.offset = self.keys.shape[-2]
+                self.left_padding = None
+                self._right_padding = None
+                self._idx = None
+                self._compressed_keys = None
+                self._compressed_values = None
+                self._compressed_tokens = 0
+                self._decoded_k_buffer = None
+                self._decoded_v_buffer = None
+                self._joined_k = None
+                self._joined_v = None
 
     @property
     def meta_state(self):
@@ -278,7 +552,7 @@ class TurboQuantKVCache:
         self.value_bits = int(v[2])
 
     def size(self):
-        return self.offset
+        return self._current_idx()
 
     @property
     def nbytes(self):

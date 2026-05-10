@@ -160,6 +160,95 @@ class TestPostCompressGeneration:
         assert k_out.shape == (1, 4, 60, 128)
 
 
+class TestBatchApi:
+    """BatchGenerator compatibility: real filter/extract/extend semantics."""
+
+    def _cache_with_tokens(self, batch: int, tokens: int, offset: float):
+        cache = TurboQuantKVCache(key_dim=16, value_dim=16, key_bits=4, value_bits=4)
+        base = mx.arange(batch * 2 * tokens * 16, dtype=mx.float32).reshape(
+            batch, 2, tokens, 16
+        )
+        cache.update_and_fetch(base + offset, base + offset + 1000.0)
+        return cache
+
+    def test_extract_returns_single_sequence_turboquant_cache(self):
+        cache = self._cache_with_tokens(batch=2, tokens=5, offset=0.0)
+
+        extracted = cache.extract(1)
+
+        assert isinstance(extracted, TurboQuantKVCache)
+        assert extracted.offset == 5
+        k, v = extracted.state
+        assert k.shape == (1, 2, 5, 16)
+        assert v.shape == (1, 2, 5, 16)
+        original_k, original_v = cache.state
+        np.testing.assert_allclose(np.array(k), np.array(original_k[1:2]), atol=1e-6)
+        np.testing.assert_allclose(np.array(v), np.array(original_v[1:2]), atol=1e-6)
+
+    def test_filter_keeps_requested_batch_rows_and_allows_decode(self):
+        cache = self._cache_with_tokens(batch=2, tokens=5, offset=0.0)
+
+        cache.filter([1])
+        k_out, v_out = cache.update_and_fetch(
+            mx.ones((1, 2, 1, 16)), mx.ones((1, 2, 1, 16)) * 2
+        )
+
+        assert cache.offset == 6
+        assert k_out.shape == (1, 2, 6, 16)
+        assert v_out.shape == (1, 2, 6, 16)
+
+    def test_filter_accepts_mlx_array_indices_like_batch_kv_cache(self):
+        cache = self._cache_with_tokens(batch=3, tokens=5, offset=0.0)
+
+        cache.filter(mx.array([0, 2], dtype=mx.int32))
+
+        assert tuple(int(x) for x in np.array(cache.offset).tolist()) == (5, 5)
+        k, v = cache.state
+        assert k.shape == (2, 2, 5, 16)
+        assert v.shape == (2, 2, 5, 16)
+
+    def test_extend_merges_two_single_sequence_caches(self):
+        left = self._cache_with_tokens(batch=1, tokens=5, offset=0.0)
+        right = self._cache_with_tokens(batch=1, tokens=3, offset=10_000.0)
+
+        left.extend(right)
+        k_out, v_out = left.update_and_fetch(
+            mx.ones((2, 2, 1, 16)), mx.ones((2, 2, 1, 16)) * 2
+        )
+
+        assert tuple(int(x) for x in np.array(left.offset).tolist()) == (6, 4)
+        assert k_out.shape == (2, 2, 6, 16)
+        assert v_out.shape == (2, 2, 6, 16)
+        extracted = left.extract(1)
+        assert extracted.offset == 4
+
+    def test_cache_declares_vmlx_batch_api_contract(self):
+        assert TurboQuantKVCache._vmlx_batch_api == "turboquant_kv_v1"
+
+    def test_compressed_cache_filter_extract_roundtrip(self):
+        cache = self._cache_with_tokens(batch=2, tokens=10, offset=0.0)
+        cache.compress(8)
+        assert cache.is_compressed
+
+        extracted = cache.extract(0)
+        cache.filter([1])
+
+        assert extracted.offset == 10
+        assert cache.offset == 10
+        assert extracted.state[0].shape == (1, 2, 10, 16)
+        assert cache.state[0].shape == (1, 2, 10, 16)
+
+    def test_batched_cache_make_mask_uses_shared_right_edge_and_left_padding(self):
+        left = self._cache_with_tokens(batch=1, tokens=5, offset=0.0)
+        right = self._cache_with_tokens(batch=1, tokens=3, offset=10_000.0)
+        left.extend(right)
+
+        mask = left.make_mask(2)
+
+        assert mask is not None
+        assert mask.shape == (2, 1, 2, 7)
+
+
 class TestSinkTokens:
     """Test sink token preservation during compression."""
 
