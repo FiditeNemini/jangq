@@ -3,12 +3,17 @@ from jang_tools.convert_zaya_common import CAPABILITIES
 from pathlib import Path
 
 
-def test_zaya_converter_stamps_tools_only_thinking_disabled():
+def test_zaya_converter_stamps_thinking_supported_template_closed_default():
+    """ZAYA reasons by default (measured live: enable_thinking=False still
+    produces chain-of-thought). Mark supports_thinking=True. Keep
+    think_in_template=False because the template's default render emits a
+    closed </think>, not an open one — callers must explicitly pass
+    enable_thinking=True to apply_chat_template for open-reasoning render."""
     assert CAPABILITIES["family"] == "zaya"
     assert CAPABILITIES["tool_parser"] == "zaya_xml"
     assert CAPABILITIES["reasoning_parser"] == "qwen3"
     assert CAPABILITIES["think_in_template"] is False
-    assert CAPABILITIES["supports_thinking"] is False
+    assert CAPABILITIES["supports_thinking"] is True
     assert CAPABILITIES["cache_type"] == "hybrid"
 
 
@@ -27,11 +32,14 @@ def test_zaya_capability_builder_matches_converter_contract():
     assert caps["tool_parser"] == "zaya_xml"
     assert caps["reasoning_parser"] == "qwen3"
     assert caps["think_in_template"] is False
-    assert caps["supports_thinking"] is False
+    assert caps["supports_thinking"] is True
     assert caps["cache_type"] == "hybrid"
 
 
-def test_zaya1_vl_capability_builder_keeps_parser_metadata_but_disables_thinking():
+def test_zaya1_vl_capability_builder_keeps_parser_metadata_thinking_supported():
+    """Same supports_thinking=True for zaya1_vl — VL bundle wraps the same
+    LM trunk + Qwen2.5-VL ViT; reasoning behavior is the LM-trunk's, which
+    is the same chain-of-thought-by-default behavior measured for zaya."""
     caps = build_capabilities(
         {
             "source_model": {
@@ -47,7 +55,7 @@ def test_zaya1_vl_capability_builder_keeps_parser_metadata_but_disables_thinking
     assert caps["tool_parser"] == "zaya_xml"
     assert caps["reasoning_parser"] == "qwen3"
     assert caps["think_in_template"] is False
-    assert caps["supports_thinking"] is False
+    assert caps["supports_thinking"] is True
     assert caps["cache_type"] == "hybrid"
 
 

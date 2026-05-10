@@ -76,7 +76,8 @@ def _infer_tq_input_features(existing):
     if bits is not None:
         try:
             return packed_cols * (32 // int(bits))
-        except Exception:
+        except (TypeError, ValueError, ZeroDivisionError):
+            # Non-int bits or zero — fall through to the unpacked column count.
             pass
     return packed_cols
 

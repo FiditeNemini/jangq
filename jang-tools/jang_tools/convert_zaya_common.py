@@ -33,15 +33,18 @@ PROFILE_BITS = {
 }
 
 CAPABILITIES = {
-    # ZAYA's template has a Qwen-style thinking branch, so keep parser
-    # metadata for explicit opt-in extraction. Product defaults stay
-    # no-thinking through supports_thinking, and the default product prompt
-    # uses a closed empty think block rather than an open reasoning prefix.
+    # ZAYA reasons by default — measured live: enable_thinking=False (the
+    # template's default closed </think> block) still produces chain-of-thought
+    # output ("Okay, I need to calculate... step by step..."). Mark
+    # supports_thinking=True; keep think_in_template=False because the
+    # template's default render is a closed </think>, not an open one.
+    # Callers can opt into open-reasoning rendering via enable_thinking=True
+    # in apply_chat_template, but model behavior reasons either way.
     "reasoning_parser": "qwen3",
     "tool_parser": "zaya_xml",
     "think_in_template": False,
     "supports_tools": True,
-    "supports_thinking": False,
+    "supports_thinking": True,
     "family": "zaya",
     "modality": "text",
     "cache_type": "hybrid",

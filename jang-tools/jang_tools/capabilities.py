@@ -183,9 +183,15 @@ def build_capabilities(
         return None
     family, reasoning, tool, think_in_template, cache_type = FAMILY_MAP[matched]
     modality = _resolve_modality(jang, config, model_path)
+    # supports_thinking advertises whether the model architecturally produces
+    # chain-of-thought reasoning. ZAYA / ZAYA1-VL DO reason — measured live:
+    # `enable_thinking=False` (default template) still produces chain-of-thought
+    # output ("Okay, I need to calculate... step by step..."). The earlier
+    # exclusion of zaya/zaya1_vl conflated parser-routing concerns
+    # (think_in_template=False is correct because the default template emits
+    # a closed </think> block) with model-capability claims. Keep
+    # think_in_template=False, but mark supports_thinking=True.
     supports_thinking = reasoning is not None
-    if family in {"zaya", "zaya1_vl"}:
-        supports_thinking = False
     return {
         "reasoning_parser": reasoning,
         "tool_parser": tool,
