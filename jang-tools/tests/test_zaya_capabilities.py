@@ -6,8 +6,8 @@ from pathlib import Path
 def test_zaya_converter_stamps_tools_only_thinking_disabled():
     assert CAPABILITIES["family"] == "zaya"
     assert CAPABILITIES["tool_parser"] == "zaya_xml"
-    assert CAPABILITIES["reasoning_parser"] is None
-    assert CAPABILITIES["think_in_template"] is False
+    assert CAPABILITIES["reasoning_parser"] == "qwen3"
+    assert CAPABILITIES["think_in_template"] is True
     assert CAPABILITIES["supports_thinking"] is False
     assert CAPABILITIES["cache_type"] == "hybrid"
 
@@ -25,7 +25,27 @@ def test_zaya_capability_builder_matches_converter_contract():
     assert caps is not None
     assert caps["family"] == "zaya"
     assert caps["tool_parser"] == "zaya_xml"
-    assert caps["reasoning_parser"] is None
+    assert caps["reasoning_parser"] == "qwen3"
+    assert caps["think_in_template"] is True
+    assert caps["supports_thinking"] is False
+    assert caps["cache_type"] == "hybrid"
+
+
+def test_zaya1_vl_capability_builder_keeps_parser_metadata_but_disables_thinking():
+    caps = build_capabilities(
+        {
+            "source_model": {
+                "architecture": "zaya1_vl",
+            },
+        },
+        {"model_type": "zaya1_vl", "vision_config": {}},
+    )
+
+    assert caps is not None
+    assert caps["family"] == "zaya1_vl"
+    assert caps["modality"] == "vision"
+    assert caps["tool_parser"] == "zaya_xml"
+    assert caps["reasoning_parser"] == "qwen3"
     assert caps["think_in_template"] is False
     assert caps["supports_thinking"] is False
     assert caps["cache_type"] == "hybrid"

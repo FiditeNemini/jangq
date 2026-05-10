@@ -26,10 +26,11 @@ from typing import Any
 
 # (family, reasoning_parser, tool_parser, think_in_template, cache_type)
 FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
-    # ZAYA / Zyphra — CCA attention + top-1 MoE. Keep reasoning disabled in
-    # converter metadata until ZAYA thinking passes live API gates; native XML
-    # tools remain supported.
-    "zaya":              ("zaya",        None,          "zaya_xml", False, "hybrid"),
+    # ZAYA / Zyphra — CCA attention + top-1 MoE. Templates have Qwen-style
+    # thinking branches, so qwen3 is useful parser metadata. Product behavior
+    # remains no-thinking through supports_thinking=False below.
+    "zaya":              ("zaya",        "qwen3",       "zaya_xml", True,  "hybrid"),
+    "zaya1_vl":          ("zaya1_vl",    "qwen3",       "zaya_xml", False, "hybrid"),
     # Qwen 3.5 / 3.6 family (hybrid SSM + attention)
     "qwen3_5":          ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
     "qwen3_5_text":     ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
@@ -173,12 +174,15 @@ def build_capabilities(
         return None
     family, reasoning, tool, think_in_template, cache_type = FAMILY_MAP[matched]
     modality = _resolve_modality(jang, config, model_path)
+    supports_thinking = reasoning is not None
+    if family in {"zaya", "zaya1_vl"}:
+        supports_thinking = False
     return {
         "reasoning_parser": reasoning,
         "tool_parser": tool,
         "think_in_template": think_in_template,
         "supports_tools": True,
-        "supports_thinking": reasoning is not None,
+        "supports_thinking": supports_thinking,
         "family": family,
         "modality": modality,
         "cache_type": cache_type,

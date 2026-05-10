@@ -33,12 +33,11 @@ PROFILE_BITS = {
 }
 
 CAPABILITIES = {
-    # ZAYA's template has a Qwen-style thinking branch, but vMLX/ZAYA gates are
-    # production-ready only with thinking off. Stamping this as unsupported
-    # keeps Auto visible-answer-first while preserving native XML tool calls.
-    "reasoning_parser": None,
+    # ZAYA's template has a Qwen-style thinking branch, so keep parser
+    # metadata. Product defaults stay no-thinking through supports_thinking.
+    "reasoning_parser": "qwen3",
     "tool_parser": "zaya_xml",
-    "think_in_template": False,
+    "think_in_template": True,
     "supports_tools": True,
     "supports_thinking": False,
     "family": "zaya",
