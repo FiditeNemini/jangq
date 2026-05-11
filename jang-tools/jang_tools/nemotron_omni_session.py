@@ -77,7 +77,9 @@ class OmniSession(OmniChat):
         if n_image_tokens > 0:
             media += "<img>" + ("<image>" * n_image_tokens) + "</img>\n"
         if n_video_tokens > 0:
-            media += "<video>" + ("<video>" * n_video_tokens) + "</video>\n"
+            # Source processing.py reuses <img>/<image> placeholders for
+            # video: <video> is plain text for this tokenizer, not an embed slot.
+            media += "<img>" + ("<image>" * n_video_tokens) + "</img>\n"
         if n_audio_tokens > 0:
             media += "<sound>" + ("<so_embedding>" * n_audio_tokens) + "</sound>\n"
         msg_content = media + user_text

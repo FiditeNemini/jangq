@@ -132,8 +132,11 @@ class NemotronHOmni:
             from jang_tools.load_jangtq import load_jangtq_model
             self.llm, _ = load_jangtq_model(str(self.bundle_path))
         else:
-            from mlx_lm import load
-            self.llm, _ = load(str(self.bundle_path))
+            from jang_tools.nemotron_omni_chat import (
+                _load_mlx_lm_ignoring_omni_extras,
+            )
+
+            self.llm, _ = _load_mlx_lm_ignoring_omni_extras(self.bundle_path)
 
     def _load_vision(self):
         # RADIO

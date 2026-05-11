@@ -73,6 +73,78 @@ def _resolve_path(p: Union[str, Path]) -> Path:
     raise FileNotFoundError(p)
 
 
+def _load_mlx_lm_ignoring_omni_extras(model_path: Union[str, Path]):
+    """Load only the flat Nemotron-H LLM from an omni bundle.
+
+    Omni bundles intentionally co-locate RADIO vision, Parakeet audio, and
+    projector weights next to the flat Nemotron-H LLM weights.  Stock
+    ``mlx_lm.load()`` uses strict model loading and rejects those extra
+    multimodal tensors.  The LLM path must mirror other JANG loaders and let
+    MLX ignore keys that are not part of the text model.
+    """
+    from mlx_lm.utils import load_model, load_tokenizer
+
+    path = Path(model_path)
+    model, config = load_model(path, lazy=False, strict=False)
+    tokenizer = load_tokenizer(
+        path,
+        eos_token_ids=config.get("eos_token_id", None),
+    )
+    return model, tokenizer
+
+
+_PYTORCH_LANGUAGE_MODEL_STUB = '''\
+"""Lightweight Nemotron-H language_model stub for vMLX Omni encoder loading.
+
+The real text model is loaded through MLX/JANG.  This stub prevents
+transformers AutoModel.from_pretrained() from allocating the duplicate PyTorch
+LLM when vMLX only needs RADIO, Parakeet, and projector modules.
+"""
+import torch
+from torch import nn
+
+
+class NemotronHForCausalLM(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        dtype = getattr(config, "torch_dtype", None)
+        if isinstance(dtype, str):
+            resolved = getattr(torch, dtype, None)
+            if resolved is not None:
+                self.config.torch_dtype = resolved
+
+    def get_input_embeddings(self):
+        raise RuntimeError(
+            "PyTorch NemotronHForCausalLM is stubbed in vMLX Omni; use the MLX "
+            "LLM path for text embeddings."
+        )
+
+    def generate(self, *args, **kwargs):
+        raise RuntimeError(
+            "PyTorch NemotronHForCausalLM is stubbed in vMLX Omni; use the MLX "
+            "LLM path for decoding."
+        )
+'''
+
+
+def _populate_omni_encoder_view(bundle_path: Path, view_dir: Path) -> None:
+    """Create the temporary HF view used to load only Omni encoder modules."""
+    import os
+
+    for f in os.listdir(bundle_path):
+        src = bundle_path / f
+        dst = view_dir / f
+        if f == "config.json":
+            continue  # skip the flat LLM config
+        if f == "config_omni.json":
+            os.symlink(src, view_dir / "config.json")
+        elif f == "modeling_nemotron_h.py":
+            dst.write_text(_PYTORCH_LANGUAGE_MODEL_STUB)
+        else:
+            os.symlink(src, dst)
+
+
 class OmniChat:
     """Multimodal chat runtime for Nemotron-3-Nano-Omni-30B-A3B."""
 
@@ -118,17 +190,10 @@ class OmniChat:
         print("[OmniChat] Loading PyTorch multimodal wrapper...", flush=True)
         # Build a temp view dir where config.json is the OMNI wrapper (so
         # transformers loads the wrapper, not the flat nemotron_h LLM).
-        import tempfile, os
+        import tempfile
         self._tmp_view = tempfile.TemporaryDirectory()
         view_dir = Path(self._tmp_view.name)
-        for f in os.listdir(self.bundle_path):
-            src = self.bundle_path / f
-            if f == "config.json":
-                continue  # skip the flat one
-            if f == "config_omni.json":
-                os.symlink(src, view_dir / "config.json")
-            else:
-                os.symlink(src, view_dir / f)
+        _populate_omni_encoder_view(self.bundle_path, view_dir)
         self.pt_model = AutoModel.from_pretrained(
             str(view_dir),
             trust_remote_code=True,
@@ -212,8 +277,7 @@ class OmniChat:
             from jang_tools.load_jangtq import load_jangtq_model
             self.mlx_model, _ = load_jangtq_model(str(self.llm_path))
         else:
-            from mlx_lm import load
-            self.mlx_model, _ = load(str(self.llm_path))
+            self.mlx_model, _ = _load_mlx_lm_ignoring_omni_extras(self.llm_path)
 
     def _extract_image_embeddings(self, pil_images) -> np.ndarray:
         torch, _ = _import_torch()
@@ -229,7 +293,18 @@ class OmniChat:
         torch, _ = _import_torch()
         if self.processor is None:
             raise NotImplementedError("Video preprocessing requires AutoProcessor")
-        proc = self.processor.video_processor([video_path], return_tensors="pt")
+        from PIL import Image
+        from transformers.video_utils import load_video
+
+        frames, _metadata = load_video(video_path, num_frames=4, backend="opencv")
+        pil_frames = [Image.fromarray(frame) for frame in frames]
+        image_processor = self.processor.image_processor
+        image_processor._is_video_mode = True
+        try:
+            proc = image_processor(images=pil_frames, return_tensors="pt")
+        finally:
+            image_processor._is_video_mode = False
+        proc["pixel_values_videos"] = proc["pixel_values"]
         pixel_values_videos = proc["pixel_values_videos"].to(
             self.device, dtype=self.torch_dtype,
         )
@@ -282,7 +357,9 @@ class OmniChat:
         if n_image_tokens > 0:
             media += "<img>" + ("<image>" * n_image_tokens) + "</img>\n"
         if n_video_tokens > 0:
-            media += "<video>" + ("<video>" * n_video_tokens) + "</video>\n"
+            # Source processing.py reuses <img>/<image> placeholders for
+            # video: <video> is plain text for this tokenizer, not an embed slot.
+            media += "<img>" + ("<image>" * n_video_tokens) + "</img>\n"
         if n_audio_tokens > 0:
             media += "<sound>" + ("<so_embedding>" * n_audio_tokens) + "</sound>\n"
 
@@ -315,21 +392,27 @@ class OmniChat:
         embeds_np = np.array(text_embeds, dtype=np.float32)
         ids = input_ids[0]
 
+        used_positions: dict[int, int] = {}
         for embeds_in, token_id, label in [
             (image_embeds_np, self.img_context_token_id, "image"),
-            (video_embeds_np, self.video_context_token_id, "video"),
+            # The tokenizer has no real printable <video> token: the bundle
+            # processor uses <image> placeholders for video frame embeddings.
+            (video_embeds_np, self.img_context_token_id, "video"),
             (audio_embeds_np, self.sound_context_token_id, "audio"),
         ]:
             if embeds_in is None:
                 continue
             positions = np.where(ids == token_id)[0]
             flat = embeds_in.reshape(-1, embeds_in.shape[-1]).astype(np.float32)
-            if len(positions) != flat.shape[0]:
+            start = used_positions.get(int(token_id), 0)
+            selected = positions[start:start + flat.shape[0]]
+            if len(selected) != flat.shape[0]:
                 raise ValueError(
-                    f"{label}-token mismatch: {len(positions)} positions vs "
-                    f"{flat.shape[0]} embeds"
+                    f"{label}-token mismatch: {len(selected)} available "
+                    f"positions vs {flat.shape[0]} embeds"
                 )
-            embeds_np[0, positions, :] = flat
+            embeds_np[0, selected, :] = flat
+            used_positions[int(token_id)] = start + flat.shape[0]
         return mx.array(embeds_np, dtype=original_dtype)
 
     def chat(
