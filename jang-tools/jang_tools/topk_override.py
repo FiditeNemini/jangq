@@ -5,12 +5,12 @@ Most modern MoE families we ship expose a per-token expert count through
 K (the route_norm distribution was calibrated for it), but at inference the
 K can be lowered to trade quality for decode speed.
 
-This module walks a loaded model and overrides every router's `top_k`
-attribute (and any sibling `num_experts_per_tok` attribute on outer MoE
-containers). The override is intentionally one-way-safe: it can lower K or
-restore K up to the original value observed on first patch, but it refuses
-to increase above the trained/original K. Top-1 MoE families like ZAYA have
-no `top_k` attribute and are silently skipped.
+This module walks a loaded model and overrides every known active-expert K
+attribute (`top_k`, `num_experts_per_tok`, `top_k_experts`,
+`moe_router_topk`, and config-backed variants). The override is intentionally
+one-way-safe: it can lower K or restore K up to the original value observed on
+first patch, but it refuses to increase above the trained/original K. Top-1 MoE
+families like ZAYA are recognized as K=1 and therefore reject K>1.
 
 Usage::
 
@@ -52,13 +52,15 @@ logger = logging.getLogger(__name__)
 def apply_topk_override(model, k: Optional[int]) -> int:
     """Override every MoE router's `top_k` to ``k``.
 
-    Walks `model.named_modules()` and sets:
-      - any module with attribute `top_k` (router classes)
-      - any module with attribute `num_experts_per_tok` (outer MoE)
+    Walks `model.named_modules()` and sets any recognized active-K attribute:
+      - `top_k` (router classes)
+      - `num_experts_per_tok` (outer MoE)
+      - `top_k_experts` (Gemma-style config)
+      - `moe_router_topk` (ZAYA-style top-1 routers)
+      - config-backed variants, e.g. `module.config.top_k_experts`
 
     Returns the number of attributes patched. Returns 0 for non-MoE
-    models (no router classes found). Top-1 MoE families (ZAYA) have
-    no `top_k` and are silently no-op.
+    models (no router classes found).
 
     If ``k`` is None, no override is applied (returns 0).
     Raises ``ValueError`` if ``k`` is not a positive integer or would
@@ -70,17 +72,40 @@ def apply_topk_override(model, k: Optional[int]) -> int:
         raise ValueError(f"top_k override must be positive int, got {k!r}")
 
     targets: list[tuple[str, object, str, int, int]] = []
+    seen: set[tuple[int, str]] = set()
+
+    def add_target(path: str, owner: object, attr: str) -> None:
+        if not hasattr(owner, attr):
+            return
+        old = getattr(owner, attr)
+        if not isinstance(old, int):
+            return
+        key = (id(owner), attr)
+        if key in seen:
+            return
+        seen.add(key)
+        original = _original_k(owner, attr, old)
+        targets.append((path, owner, attr, old, original))
+
     for path, mod in model.named_modules():
-        if hasattr(mod, "top_k") and isinstance(getattr(mod, "top_k"), int):
-            old = mod.top_k
-            original = _original_k(mod, "top_k", old)
-            targets.append((path, mod, "top_k", old, original))
-        if hasattr(mod, "num_experts_per_tok") and isinstance(
-            getattr(mod, "num_experts_per_tok"), int
+        for attr in (
+            "top_k",
+            "num_experts_per_tok",
+            "top_k_experts",
+            "moe_router_topk",
+            "num_activated_experts",
         ):
-            old = mod.num_experts_per_tok
-            original = _original_k(mod, "num_experts_per_tok", old)
-            targets.append((path, mod, "num_experts_per_tok", old, original))
+            add_target(path, mod, attr)
+        config = getattr(mod, "config", None)
+        if config is not None:
+            for attr in (
+                "top_k",
+                "num_experts_per_tok",
+                "top_k_experts",
+                "moe_router_topk",
+                "num_activated_experts",
+            ):
+                add_target(f"{path}.config", config, attr)
 
     for path, _mod, attr, _old, original in targets:
         if k > original:

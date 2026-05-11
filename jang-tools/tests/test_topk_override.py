@@ -41,6 +41,22 @@ class _FakeModel:
             yield (f"layers.{i}.mlp.gate", layer.mlp.gate)
 
 
+class _ConfigBackedRouter:
+    """Mimics routers like Gemma 4 that read active K from config.top_k_experts."""
+
+    def __init__(self, k: int):
+        self.config = type("Config", (), {"top_k_experts": k})()
+
+
+class _ConfigBackedModel:
+    def __init__(self, k: int):
+        self.router = _ConfigBackedRouter(k)
+
+    def named_modules(self):
+        yield ("", self)
+        yield ("router", self.router)
+
+
 def test_override_patches_router_and_outer():
     model = _FakeModel(num_layers=3, k=8)
     n = apply_topk_override(model, 4)
@@ -74,6 +90,45 @@ def test_override_can_restore_original_k_but_not_increase_above_it():
     for layer in model.layers:
         assert layer.mlp.gate.top_k == 8
         assert layer.mlp.num_experts_per_tok == 8
+
+
+def test_override_recognizes_config_backed_top_k_experts():
+    model = _ConfigBackedModel(k=8)
+
+    assert apply_topk_override(model, 4) == 1
+    assert model.router.config.top_k_experts == 4
+    assert apply_topk_override(model, 8) == 1
+    assert model.router.config.top_k_experts == 8
+
+    with pytest.raises(ValueError, match="refuses to increase"):
+        apply_topk_override(model, 9)
+    assert model.router.config.top_k_experts == 8
+
+
+def test_override_recognizes_top1_moe_router_topk_and_refuses_increase():
+    """ZAYA-style top-1 routers should be recognized as trained K=1.
+
+    A K=4 override must fail loudly instead of silently no-oping, otherwise an
+    app setting can look active while preserving a different trained runtime.
+    """
+
+    class _ZayaRouter:
+        moe_router_topk = 1
+
+    class _ZayaModel:
+        def __init__(self):
+            self.router = _ZayaRouter()
+
+        def named_modules(self):
+            yield ("", self)
+            yield ("router", self.router)
+
+    model = _ZayaModel()
+
+    assert apply_topk_override(model, 1) == 0
+    with pytest.raises(ValueError, match="refuses to increase"):
+        apply_topk_override(model, 4)
+    assert model.router.moe_router_topk == 1
 
 
 def test_override_none_is_no_op():

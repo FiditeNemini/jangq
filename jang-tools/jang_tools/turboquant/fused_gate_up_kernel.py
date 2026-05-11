@@ -7,6 +7,8 @@ the same x, signs, codebook, and indices. Only the packed weights and norms
 differ. This kernel reads x_rot once and produces both outputs.
 """
 
+import os
+
 import mlx.core as mx
 import weakref
 from .hadamard_kernel import hadamard_rotate_metal
@@ -71,12 +73,22 @@ _FUSED_SOURCE = '''
     }
 '''
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+        if value <= 0 or value > 64:
+            return default
+        return value
+    except Exception:
+        return default
+
+
 # === P17: 10 outputs per thread ===
 # Swept OPT ∈ {2..16}: 4 → 59 μs, 6 → 54, 8 → 51, 10 → 50, 12 → 50, 16 → 65
 # OPT=10 is a stable sweet spot (OPT=12 same speed, OPT=16 register spill cliff).
 # P12 picked OPT=4 on M4; re-measuring on M3 Ultra shows the sweet spot is much
 # higher. Likely register-file sizing and scheduling differ by generation.
-_FUSED_SWIGLU_OPT = 10
+_FUSED_SWIGLU_OPT = _env_int("JANGTQ_FUSED_SWIGLU_OPT", 10)
 _FUSED_SWIGLU_SOURCE = f'''
     uint global_x = thread_position_in_grid.x;
     uint dispatch_idx = thread_position_in_grid.y;
@@ -128,18 +140,80 @@ _FUSED_SWIGLU_SOURCE = f'''
             }}
         }}
 
-        #pragma unroll
-        for (uint k = 0; k < vals_per_u32; k++) {{
-            uint i = i_base + k;
-            if (i >= in_features) break;
-            float xv = static_cast<float>(x_rot[x_off + i]);
-            uint shift = k * bits;
+        if (bits == 2u) {{
             #pragma unroll
-            for (uint o = 0; o < {_FUSED_SWIGLU_OPT}; o++) {{
-                float w_g = codebook[(pvg[o] >> shift) & mask];
-                float w_u = codebook[(pvu[o] >> shift) & mask];
-                acc_g[o] += xv * w_g;
-                acc_u[o] += xv * w_u;
+            for (uint k = 0; k < 16u; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_off + i]);
+                uint shift = k * 2u;
+                #pragma unroll
+                for (uint o = 0; o < {_FUSED_SWIGLU_OPT}; o++) {{
+                    float w_g = codebook[(pvg[o] >> shift) & mask];
+                    float w_u = codebook[(pvu[o] >> shift) & mask];
+                    acc_g[o] += xv * w_g;
+                    acc_u[o] += xv * w_u;
+                }}
+            }}
+        }} else if (bits == 3u) {{
+            #pragma unroll
+            for (uint k = 0; k < 10u; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_off + i]);
+                uint shift = k * 3u;
+                #pragma unroll
+                for (uint o = 0; o < {_FUSED_SWIGLU_OPT}; o++) {{
+                    float w_g = codebook[(pvg[o] >> shift) & mask];
+                    float w_u = codebook[(pvu[o] >> shift) & mask];
+                    acc_g[o] += xv * w_g;
+                    acc_u[o] += xv * w_u;
+                }}
+            }}
+        }} else if (bits == 4u) {{
+            #pragma unroll
+            for (uint k = 0; k < 8u; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_off + i]);
+                uint shift = k * 4u;
+                #pragma unroll
+                for (uint o = 0; o < {_FUSED_SWIGLU_OPT}; o++) {{
+                    float w_g = codebook[(pvg[o] >> shift) & mask];
+                    float w_u = codebook[(pvu[o] >> shift) & mask];
+                    acc_g[o] += xv * w_g;
+                    acc_u[o] += xv * w_u;
+                }}
+            }}
+        }} else if (bits == 8u) {{
+            #pragma unroll
+            for (uint k = 0; k < 4u; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_off + i]);
+                uint shift = k * 8u;
+                #pragma unroll
+                for (uint o = 0; o < {_FUSED_SWIGLU_OPT}; o++) {{
+                    float w_g = codebook[(pvg[o] >> shift) & mask];
+                    float w_u = codebook[(pvu[o] >> shift) & mask];
+                    acc_g[o] += xv * w_g;
+                    acc_u[o] += xv * w_u;
+                }}
+            }}
+        }} else {{
+            #pragma unroll
+            for (uint k = 0; k < vals_per_u32; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_off + i]);
+                uint shift = k * bits;
+                #pragma unroll
+                for (uint o = 0; o < {_FUSED_SWIGLU_OPT}; o++) {{
+                    float w_g = codebook[(pvg[o] >> shift) & mask];
+                    float w_u = codebook[(pvu[o] >> shift) & mask];
+                    acc_g[o] += xv * w_g;
+                    acc_u[o] += xv * w_u;
+                }}
             }}
         }}
     }}

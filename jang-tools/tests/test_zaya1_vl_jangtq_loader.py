@@ -1,7 +1,50 @@
 import json
+import sys
+import types
 from types import SimpleNamespace
 
 import mlx.core as mx
+
+
+def test_zaya1_vl_runtime_loader_sets_eval_mode(tmp_path, monkeypatch):
+    """Direct ZAYA1-VL fallback loader must not return training-mode modules."""
+
+    from jang_tools.zaya1_vl.runtime import load_zaya1_vl_model
+
+    class FakeModel:
+        def __init__(self):
+            self.training = True
+            self.eval_called = False
+            self.layers = []
+            self.vision_tower = object()
+
+        def eval(self):
+            self.eval_called = True
+            self.training = False
+
+        def parameters(self):
+            return []
+
+    fake_model = FakeModel()
+    fake_processor = object()
+
+    def fake_load(path, processor_config=None, lazy=False):
+        return fake_model, fake_processor
+
+    mlx_vlm = types.ModuleType("mlx_vlm")
+    mlx_vlm_utils = types.ModuleType("mlx_vlm.utils")
+    mlx_vlm_utils.load = fake_load
+    monkeypatch.setitem(sys.modules, "mlx_vlm", mlx_vlm)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.utils", mlx_vlm_utils)
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "zaya1_vl"}))
+
+    model, processor = load_zaya1_vl_model(tmp_path, lazy=True)
+
+    assert model is fake_model
+    assert processor is fake_processor
+    assert model.eval_called is True
+    assert model.training is False
 
 
 def test_zaya1_vl_jangtq_vlm_sanitize_maps_regular_text_weights():

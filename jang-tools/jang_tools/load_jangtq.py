@@ -1390,9 +1390,12 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     # no closures over self, shapeless so prefill/decode share one graph).
     # Safer than patching __call__ which thrashes the compile cache.
     try:
+        from jang_tools.turboquant.router_kernel import make_sigmoid_bias_topk_router
+
         # Cache compiled variants keyed on (k, bits).
         _ROUTER_CACHE = {}
         _MLP_CACHE = {}
+        _CUSTOM_ROUTER_CACHE = {}
 
         # Variant A: sigmoid + e_score_correction_bias topk (MiniMax, GLM, DeepSeek V3).
         def _get_compiled_router_sigmoid_bias(k):
@@ -1445,6 +1448,34 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         #   - `e_score_correction_bias` present → sigmoid-bias router (MiniMax/GLM/DSV3)
         #   - `e_score_correction_bias` absent  → softmax router (Qwen3-Next/3.5/3.6)
         #   - `shared_expert` + `shared_expert_gate` present → add gated shared output
+        _compile_full_moe_block = os.environ.get(
+            "JANGTQ_COMPILE_FULL_MOE_BLOCK", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if _compile_full_moe_block:
+            print(
+                "  [experimental] JANGTQ_COMPILE_FULL_MOE_BLOCK=1: "
+                "decode MoE block will be mx.compile'd per module",
+                flush=True,
+            )
+        _custom_sigmoid_router = os.environ.get(
+            "JANGTQ_CUSTOM_ROUTER_TOPK", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if _custom_sigmoid_router:
+            print(
+                "  [experimental] JANGTQ_CUSTOM_ROUTER_TOPK=1: "
+                "using Metal sigmoid+bias top-k router for single-token decode",
+                flush=True,
+            )
+
+        def _decode_batch_size(x, in_features):
+            x_sq = x
+            while x_sq.ndim > 2 and x_sq.shape[-2] == 1:
+                x_sq = x_sq.squeeze(-2)
+            try:
+                return x_sq.reshape(-1, in_features).shape[0]
+            except Exception:
+                return -1
+
         _n_patched = 0
         _patched_classes = set()
         for _, _mod in model.named_modules():
@@ -1463,9 +1494,6 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                 continue
 
             def _patched_moe(self, x):
-                gates = self.gate(x.astype(mx.float32))
-                # MiniMax stores K as `num_experts_per_tok`, Qwen3-Next as `top_k`,
-                # some GLM variants as `num_routed_experts`. Probe in order.
                 k = getattr(self, "num_experts_per_tok",
                             getattr(self, "top_k",
                                     getattr(self, "num_routed_experts", None)))
@@ -1474,10 +1502,73 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                         f"{type(self).__name__} missing one of "
                         "num_experts_per_tok / top_k / num_routed_experts"
                     )
-                if hasattr(self, "e_score_correction_bias"):
-                    inds, scores = _get_compiled_router_sigmoid_bias(k)(
-                        gates, self.e_score_correction_bias
+
+                if _compile_full_moe_block:
+                    gate_in_features = int(
+                        getattr(getattr(self, "switch_mlp", None), "gate_proj", None).in_features
                     )
+                    # Only compile the decode shape. Prefill/large-batch paths keep
+                    # the long-tested current implementation because SwitchGLU's
+                    # compiled fast path is specifically batch=1, small top-k.
+                    if _decode_batch_size(x, gate_in_features) == 1:
+                        compiled = getattr(self, "_jangtq_compiled_full_moe_block", None)
+                        if compiled is None:
+                            has_bias = hasattr(self, "e_score_correction_bias")
+                            renorm = bool(getattr(self, "norm_topk_prob", True))
+
+                            def _full_moe_decode(x_in):
+                                gates = self.gate(x_in.astype(mx.float32))
+                                if has_bias:
+                                    scores = mx.sigmoid(gates)
+                                    orig = scores
+                                    biased = scores + self.e_score_correction_bias
+                                    inds = mx.argpartition(-biased, kth=k - 1, axis=-1)[..., :k]
+                                    sel = mx.take_along_axis(orig, inds, axis=-1)
+                                    sel = sel / (mx.sum(sel, axis=-1, keepdims=True) + 1e-20)
+                                else:
+                                    scores = mx.softmax(gates, axis=-1)
+                                    inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+                                    sel = mx.take_along_axis(scores, inds, axis=-1)
+                                    if renorm:
+                                        sel = sel / (mx.sum(sel, axis=-1, keepdims=True) + 1e-20)
+                                y = self.switch_mlp(x_in, inds)
+                                return (y * sel.astype(x_in.dtype)[..., None]).sum(axis=-2)
+
+                            compiled = mx.compile(_full_moe_decode)
+                            setattr(self, "_jangtq_compiled_full_moe_block", compiled)
+                        return compiled(x)
+
+                gates = self.gate(x.astype(mx.float32))
+                # MiniMax stores K as `num_experts_per_tok`, Qwen3-Next as `top_k`,
+                # some GLM variants as `num_routed_experts`. Probe in order.
+                if hasattr(self, "e_score_correction_bias"):
+                    gate_in_features = int(
+                        getattr(getattr(self, "switch_mlp", None), "gate_proj", None).in_features
+                    )
+                    if (
+                        _custom_sigmoid_router
+                        and _decode_batch_size(x, gate_in_features) == 1
+                    ):
+                        experts = int(self.e_score_correction_bias.shape[-1])
+                        key = ("custom_sigbias", experts, int(k))
+                        router = _CUSTOM_ROUTER_CACHE.get(key)
+                        if router is None:
+                            router = make_sigmoid_bias_topk_router(
+                                experts=experts,
+                                top_k=int(k),
+                            )
+                            _CUSTOM_ROUTER_CACHE[key] = router
+                        inds, scores = router(
+                            gates.reshape(-1),
+                            self.e_score_correction_bias.reshape(-1),
+                        )
+                        out_shape = tuple(gates.shape[:-1]) + (int(k),)
+                        inds = inds.reshape(out_shape)
+                        scores = scores.reshape(out_shape)
+                    else:
+                        inds, scores = _get_compiled_router_sigmoid_bias(k)(
+                            gates, self.e_score_correction_bias
+                        )
                 else:
                     renorm = getattr(self, "norm_topk_prob", True)
                     inds, scores = _get_compiled_router_softmax(k, renorm)(gates)

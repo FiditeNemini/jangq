@@ -11,6 +11,8 @@ Input is pre-rotated (Hadamard) once per token before the kernel.
 The kernel handles batched expert dispatch internally.
 """
 
+import os
+
 import mlx.core as mx
 import numpy as np
 from typing import Optional
@@ -20,11 +22,21 @@ from .rotation import generate_random_signs
 from .hadamard_kernel import hadamard_rotate_metal
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+        if value <= 0 or value > 64:
+            return default
+        return value
+    except Exception:
+        return default
+
+
 # === P17: 20 outputs per thread ===
 # Swept OPT ∈ {3..48}: 4 → 43 μs, 8 → 34, 16 → 30, 20 → 29, 24 → 29, 32 → 32, 48 → 48
 # OPT=20 is the sweet spot (24 ties, 32 starts to spill).
 # Previous P12 picked OPT=4 on M4; M3 Ultra has a very different register profile.
-_GATHER_OPT = 20
+_GATHER_OPT = _env_int("JANGTQ_GATHER_OPT", 20)
 _GATHER_TQ_SOURCE = f'''
     uint global_x = thread_position_in_grid.x;
     uint dispatch_idx = thread_position_in_grid.y;
@@ -65,16 +77,70 @@ _GATHER_TQ_SOURCE = f'''
         for (uint o = 0; o < {_GATHER_OPT}; o++) {{
             pv[o] = (o < n_outs) ? packed[expert_base + (out_idx_0 + o) * packed_cols + pack_idx] : 0u;
         }}
-        #pragma unroll
-        for (uint k = 0; k < vals_per_u32; k++) {{
-            uint i = i_base + k;
-            if (i >= in_features) break;
-            float xv = static_cast<float>(x_rot[x_offset + i]);
-            uint shift = k * bits;
+        if (bits == 2u) {{
             #pragma unroll
-            for (uint o = 0; o < {_GATHER_OPT}; o++) {{
-                float w = codebook[(pv[o] >> shift) & mask];
-                acc[o] += xv * w;
+            for (uint k = 0; k < 16u; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_offset + i]);
+                uint shift = k * 2u;
+                #pragma unroll
+                for (uint o = 0; o < {_GATHER_OPT}; o++) {{
+                    float w = codebook[(pv[o] >> shift) & mask];
+                    acc[o] += xv * w;
+                }}
+            }}
+        }} else if (bits == 3u) {{
+            #pragma unroll
+            for (uint k = 0; k < 10u; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_offset + i]);
+                uint shift = k * 3u;
+                #pragma unroll
+                for (uint o = 0; o < {_GATHER_OPT}; o++) {{
+                    float w = codebook[(pv[o] >> shift) & mask];
+                    acc[o] += xv * w;
+                }}
+            }}
+        }} else if (bits == 4u) {{
+            #pragma unroll
+            for (uint k = 0; k < 8u; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_offset + i]);
+                uint shift = k * 4u;
+                #pragma unroll
+                for (uint o = 0; o < {_GATHER_OPT}; o++) {{
+                    float w = codebook[(pv[o] >> shift) & mask];
+                    acc[o] += xv * w;
+                }}
+            }}
+        }} else if (bits == 8u) {{
+            #pragma unroll
+            for (uint k = 0; k < 4u; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_offset + i]);
+                uint shift = k * 8u;
+                #pragma unroll
+                for (uint o = 0; o < {_GATHER_OPT}; o++) {{
+                    float w = codebook[(pv[o] >> shift) & mask];
+                    acc[o] += xv * w;
+                }}
+            }}
+        }} else {{
+            #pragma unroll
+            for (uint k = 0; k < vals_per_u32; k++) {{
+                uint i = i_base + k;
+                if (i >= in_features) break;
+                float xv = static_cast<float>(x_rot[x_offset + i]);
+                uint shift = k * bits;
+                #pragma unroll
+                for (uint o = 0; o < {_GATHER_OPT}; o++) {{
+                    float w = codebook[(pv[o] >> shift) & mask];
+                    acc[o] += xv * w;
+                }}
             }}
         }}
     }}

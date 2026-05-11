@@ -150,6 +150,61 @@ _HADAMARD_MULTIBLOCK_SOURCE = '''
 '''
 
 
+# MiniMax decode hot path: the intermediate activation rotation is 1536 =
+# 1024+512 and runs over K active experts. For <=1024 power-of-two blocks, the
+# first five butterfly stages stay inside one SIMD group; using lane shuffles
+# avoids the threadgroup-memory round trip and barriers for those stages.
+_HADAMARD_SHUFFLE_LE1024_SOURCE = '''
+    uint batch_idx = thread_position_in_grid.y;
+    uint tid = thread_position_in_threadgroup.x;
+
+    uint total_d = meta[0];
+    uint n_blocks = meta[1];
+
+    threadgroup float shmem[1024];
+
+    uint offset = 0u;
+    for (uint b = 0u; b < n_blocks; b++) {
+        uint d_b = meta[2u + b * 2u];
+        uint log_b = meta[3u + b * 2u];
+
+        float v = 0.0f;
+        if (tid < d_b) {
+            v = static_cast<float>(x[batch_idx * total_d + offset + tid]) * signs[offset + tid];
+        }
+
+        uint lane = tid & 31u;
+        uint simd_stages = log_b < 5u ? log_b : 5u;
+        for (uint stage = 0u; stage < simd_stages; stage++) {
+            uint h = 1u << stage;
+            float other = simd_shuffle_xor(v, h);
+            if ((lane & h) == 0u) { v = v + other; }
+            else { v = other - v; }
+        }
+
+        for (uint stage = simd_stages; stage < log_b; stage++) {
+            uint h = 1u << stage;
+            if (tid < d_b) { shmem[tid] = v; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (tid < d_b) {
+                float other = shmem[tid ^ h];
+                if ((tid & h) == 0u) { v = v + other; }
+                else { v = other - v; }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        float norm = 1.0f / sqrt(static_cast<float>(d_b));
+        if (tid < d_b) {
+            out[batch_idx * total_d + offset + tid] = v * norm;
+        }
+
+        offset += d_b;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+'''
+
+
 _kernel_cache = {}
 
 
@@ -173,6 +228,17 @@ def _get_multiblock_kernel():
             source=_HADAMARD_MULTIBLOCK_SOURCE,
         )
     return _kernel_cache["multiblock"]
+
+
+def _get_shuffle_le1024_kernel():
+    if "shuffle_le1024" not in _kernel_cache:
+        _kernel_cache["shuffle_le1024"] = mx.fast.metal_kernel(
+            name="hadamard_shuffle_le1024",
+            input_names=["x", "signs", "meta"],
+            output_names=["out"],
+            source=_HADAMARD_SHUFFLE_LE1024_SOURCE,
+        )
+    return _kernel_cache["shuffle_le1024"]
 
 
 def _next_pow2_log(n):
@@ -213,6 +279,36 @@ def _dispatch_block(kernel, block_x, block_signs, d, batch):
     return out[0]
 
 
+def _hadamard_rotate_shuffle_le1024(x: mx.array, signs: mx.array) -> mx.array:
+    """Hadamard rotate for decompositions whose blocks are all <=1024.
+
+    This is mathematically the same block-wise randomized Hadamard transform as
+    the regular multi-block Metal kernel. It replaces the first five stages of
+    each block with SIMD-lane shuffles, which is the MiniMax intermediate
+    rotation hot path (`1536 = 1024 + 512`, batch = active experts).
+    """
+    if x.ndim != 2:
+        raise ValueError(f"expected rank-2 input, got shape={x.shape}")
+    dim = x.shape[-1]
+    blocks = _decompose_pow2(dim)
+    if not blocks or any(d > 1024 for d in blocks):
+        raise ValueError(f"shuffle path only supports <=1024 blocks, got dim={dim}, blocks={blocks}")
+
+    meta_list = [dim, len(blocks)]
+    for d in blocks:
+        meta_list.append(d)
+        meta_list.append(_next_pow2_log(d))
+    meta = mx.array(meta_list, dtype=mx.uint32)
+    tg_size = max(blocks)
+    return _get_shuffle_le1024_kernel()(
+        inputs=[x.astype(mx.float32), signs, meta],
+        output_shapes=[x.shape],
+        output_dtypes=[mx.float32],
+        grid=(tg_size, x.shape[0], 1),
+        threadgroup=(tg_size, 1, 1),
+    )[0]
+
+
 def hadamard_rotate_metal(x: mx.array, signs: mx.array) -> mx.array:
     """Fast Hadamard rotate using a single Metal dispatch per power-of-2 block.
 
@@ -230,7 +326,9 @@ def hadamard_rotate_metal(x: mx.array, signs: mx.array) -> mx.array:
     kernel = _get_butterfly_kernel()
     batch = x.shape[0]
 
-    if len(blocks) == 1 and blocks[0] <= MAX_DIM:
+    if all(d <= 1024 for d in blocks):
+        result = _hadamard_rotate_shuffle_le1024(x, signs)
+    elif len(blocks) == 1 and blocks[0] <= MAX_DIM:
         result = _dispatch_block(kernel, x, signs, blocks[0], batch)
     elif all(d <= MAX_DIM for d in blocks):
         # Single-dispatch multi-block path (saves ~8us per non-pow2 rotation

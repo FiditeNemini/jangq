@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 import mlx.core
+from jang_tools.jangrt.inference_mode import ensure_inference_mode
 from jang_tools.quant_shape_inference import infer_quant_overrides_for_bundle
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,9 @@ def load_zaya1_vl_model(model_path: str | Path, *, lazy: bool = False):
         model.config = cfg
     if not lazy:
         getattr(mlx.core, "eval")(model.parameters())
+    _infer_report = ensure_inference_mode(model, label="ZAYA1-VL")
+    if _infer_report.get("training_modules_remaining"):
+        logger.warning("ZAYA1-VL eval-mode incomplete: %s", _infer_report)
     logger.info(
         "ZAYA1-VL runtime loaded: layers=%s, vision=%s",
         len(getattr(model, "layers", [])),
