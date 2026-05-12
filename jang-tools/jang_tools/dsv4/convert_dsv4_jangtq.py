@@ -144,7 +144,18 @@ def build_routed_expert_bit_plan(profile_bits: int) -> dict:
                 "smooth_layer_bits": profile_bits,
             }
         )
-        plan.update(_v3_plan_metadata())
+        explicit_meta = _v3_plan_metadata()
+        plan.update(explicit_meta)
+        routed_layer_bits = explicit_meta.get("routed_layer_bits") or {}
+        explicit_hash_bits = {
+            str(idx): int(routed_layer_bits[str(idx)])
+            for idx in (0, 1, 2)
+            if str(idx) in routed_layer_bits
+        }
+        if any(bits != 4 for bits in explicit_hash_bits.values()):
+            plan.pop("hash_layer_bits", None)
+            plan["hash_layer_default_bits"] = 4
+            plan["hash_layer_bits_source"] = "DSV4_V3_PLAN_PATH"
     return plan
 
 
@@ -810,7 +821,7 @@ def main() -> int:
                     help="std=legacy with MTP shipped; K=MAX-QUALITY 70-80GB "
                          "profile (drops MTP head, all non-routed stay 8-bit); "
                          "V3=K + hash layers 0-2 routed lifted to 4-bit MXTQ "
-                         "(target ~80% MMLU, ~80GB).")
+                         "(target ~80%% MMLU, ~80GB).")
     ap.add_argument("--no-prestack", action="store_true",
                     help="Debug only: leave per-expert TQ tensors instead of "
                          "finalizing to JANGTQ-PRESTACK layout.")
