@@ -341,6 +341,46 @@ _kernel_cache = {}
 _X_ROT_CACHE = {"key": None, "x_ref": None, "signs_ref": None, "rot": None}
 
 
+def _mpp_nax_mode() -> str:
+    return os.environ.get("JANGTQ_MPP_NAX", "").strip().lower()
+
+
+def _auto_mpp_nax_wins(dispatches: int, in_features: int, out_features: int) -> bool:
+    if dispatches >= 512:
+        return True
+    return dispatches >= 256 and (int(in_features) * int(out_features)) >= (2048 * 2048)
+
+
+def _as_uint32_indices(indices: mx.array) -> mx.array:
+    if indices.dtype == mx.uint32:
+        return indices
+    return indices.astype(mx.uint32)
+
+
+def _gather_tq_mpp_nax_grouped_from_rot(
+    x_rot,
+    packed,
+    norms,
+    codebook,
+    idx_flat,
+    in_features,
+    out_features,
+    bits,
+):
+    from .mpp_nax_kernel import gather_tq_matmul_mpp_nax_grouped_from_rot
+
+    return gather_tq_matmul_mpp_nax_grouped_from_rot(
+        x_rot,
+        packed,
+        norms,
+        codebook,
+        idx_flat,
+        in_features,
+        out_features,
+        bits,
+    )
+
+
 def _rotate_cached_by_id(x_orig, x_flat, signs):
     """Cache keyed on weak refs to (x_orig, signs). Single-slot cache."""
     cached_x = _X_ROT_CACHE["x_ref"]() if _X_ROT_CACHE["x_ref"] else None
@@ -484,7 +524,7 @@ def gather_tq_matmul(
         x_flat = x.reshape(-1, in_features)
         batch = x_flat.shape[0]
         K = 1
-        idx_flat = rhs_indices.astype(mx.uint32)
+        idx_flat = _as_uint32_indices(rhs_indices)
         assert idx_flat.shape[0] == batch, \
             f"sorted: x batch={batch}, indices={idx_flat.shape[0]}"
         n_dispatches = batch
@@ -517,6 +557,36 @@ def gather_tq_matmul(
     # Key by id(x) (the original argument) NOT id(x_flat) — reshape returns
     # a new object each call, so using x_flat would miss the cache.
     x_rot = _rotate_cached_by_id(x, x_flat, signs)
+
+    if (
+        sorted_indices
+        and rhs_indices.ndim == 1
+        and (
+            _mpp_nax_mode() in {"1", "true", "yes"}
+            or (
+                _mpp_nax_mode() == "auto"
+                and _auto_mpp_nax_wins(int(idx_flat.shape[0]), in_features, out_features)
+            )
+        )
+    ):
+        try:
+            out_raw = _gather_tq_mpp_nax_grouped_from_rot(
+                x_rot,
+                packed,
+                norms,
+                codebook,
+                idx_flat,
+                in_features,
+                out_features,
+                bits,
+            )
+            out = out_raw.reshape(batch, 1, out_features)
+            if out.dtype != x.dtype:
+                out = out.astype(x.dtype)
+            return out
+        except Exception:
+            if os.environ.get("JANGTQ_MPP_NAX_STRICT", "").strip() == "1":
+                raise
 
     # Run kernel
     kernel = _get_kernel()

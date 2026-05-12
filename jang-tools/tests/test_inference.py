@@ -201,7 +201,7 @@ def _capture_vl_generate(monkeypatch):
     mod = _sys.modules.get("mlx_vlm")
     if mod is None:
         mod = types.ModuleType("mlx_vlm")
-        _sys.modules["mlx_vlm"] = mod
+        monkeypatch.setitem(_sys.modules, "mlx_vlm", mod)
     monkeypatch.setattr(mod, "generate", fake_generate, raising=False)
     return captured
 

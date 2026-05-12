@@ -14,6 +14,22 @@ import weakref
 from .hadamard_kernel import hadamard_rotate_metal
 
 
+def _mpp_nax_mode() -> str:
+    return os.environ.get("JANGTQ_MPP_NAX", "").strip().lower()
+
+
+def _auto_mpp_nax_wins(dispatches: int, in_features: int, out_features: int) -> bool:
+    if dispatches >= 512:
+        return True
+    return dispatches >= 256 and (int(in_features) * int(out_features)) >= (2048 * 2048)
+
+
+def _as_uint32_indices(indices: mx.array) -> mx.array:
+    if indices.dtype == mx.uint32:
+        return indices
+    return indices.astype(mx.uint32)
+
+
 _FUSED_SOURCE = '''
     // Grid: (out_features * 32, batch * K, 1)
     // Each thread computes ONE output for BOTH gate and up.
@@ -326,6 +342,60 @@ def _get_kernel_swiglu():
     return _kernel_swiglu
 
 
+def _fused_gate_up_swiglu_mpp_nax_from_rot(
+    x_rot,
+    packed,
+    norms,
+    codebook,
+    idx_flat,
+    in_features,
+    out_features,
+    bits,
+):
+    from .mpp_nax_kernel import gather_tq_matmul_mpp_nax_from_rot
+
+    return gather_tq_matmul_mpp_nax_from_rot(
+        x_rot,
+        packed,
+        norms,
+        codebook,
+        idx_flat,
+        in_features,
+        out_features,
+        bits,
+    )
+
+
+def _fused_gate_up_swiglu_mpp_nax_grouped_from_rot(
+    x_rot,
+    packed_gate,
+    norms_gate,
+    packed_up,
+    norms_up,
+    codebook,
+    idx_flat,
+    in_features,
+    out_features,
+    bits,
+    swiglu_limit=0.0,
+):
+    from .mpp_nax_kernel import fused_gate_up_swiglu_mpp_nax_grouped_from_rot
+
+    return fused_gate_up_swiglu_mpp_nax_grouped_from_rot(
+        x_rot,
+        packed_gate,
+        norms_gate,
+        packed_up,
+        norms_up,
+        codebook,
+        idx_flat,
+        in_features,
+        out_features,
+        bits,
+        swiglu_limit=swiglu_limit,
+    )
+
+
 def fused_gate_up_swiglu_matmul(
     x: mx.array,
     packed_gate: mx.array, norms_gate: mx.array,
@@ -349,7 +419,7 @@ def fused_gate_up_swiglu_matmul(
         x_flat = x.reshape(-1, in_features)
         batch = x_flat.shape[0]
         K = 1
-        idx_flat = rhs_indices.astype(mx.uint32)
+        idx_flat = _as_uint32_indices(rhs_indices)
         out_shape_kind = "sorted"
     else:
         K = rhs_indices.shape[-1]
@@ -379,6 +449,69 @@ def fused_gate_up_swiglu_matmul(
         dtype=mx.uint32,
     )
     n_dispatches = batch if out_shape_kind != "broadcast" else batch * K
+
+    _nax_mode = _mpp_nax_mode()
+    _nax_allowed = _nax_mode in {"1", "true", "yes"} or (
+        _nax_mode == "auto"
+        and out_shape_kind == "sorted"
+        and _auto_mpp_nax_wins(int(idx_flat.shape[0]), in_features, out_features)
+    )
+    if _nax_allowed:
+        try:
+            if out_shape_kind == "sorted":
+                out_raw = _fused_gate_up_swiglu_mpp_nax_grouped_from_rot(
+                    x_rot,
+                    packed_gate,
+                    norms_gate,
+                    packed_up,
+                    norms_up,
+                    codebook,
+                    idx_flat,
+                    in_features,
+                    out_features,
+                    bits,
+                    swiglu_limit=swiglu_limit,
+                )
+            else:
+                gate = _fused_gate_up_swiglu_mpp_nax_from_rot(
+                    x_rot,
+                    packed_gate,
+                    norms_gate,
+                    codebook,
+                    idx_flat,
+                    in_features,
+                    out_features,
+                    bits,
+                )
+                up = _fused_gate_up_swiglu_mpp_nax_from_rot(
+                    x_rot,
+                    packed_up,
+                    norms_up,
+                    codebook,
+                    idx_flat,
+                    in_features,
+                    out_features,
+                    bits,
+                )
+                if swiglu_limit and swiglu_limit > 0.0:
+                    limit = mx.array(float(swiglu_limit), dtype=mx.float32)
+                    gate = mx.minimum(gate, limit)
+                    up = mx.minimum(mx.maximum(up, -limit), limit)
+                out_raw = (gate / (1.0 + mx.exp(-gate))) * up
+
+            if out_shape_kind == "sorted":
+                out = out_raw.reshape(batch, 1, out_features)
+            elif out_shape_kind == "per_row":
+                out = out_raw.reshape(*rhs_indices.shape, 1, out_features)
+            else:
+                out = out_raw.reshape(*rhs_indices.shape[:-1], K, 1, out_features)
+
+            if out.dtype != x.dtype:
+                out = out.astype(x.dtype)
+            return out
+        except Exception:
+            if os.environ.get("JANGTQ_MPP_NAX_STRICT", "").strip() == "1":
+                raise
 
     kernel = _get_kernel_swiglu()
     # P17: 10 outputs per thread (sweet spot on M3 Ultra)
@@ -429,7 +562,7 @@ def fused_gate_up_matmul(
         x_flat = x.reshape(-1, in_features)
         batch = x_flat.shape[0]
         K = 1
-        idx_flat = rhs_indices.astype(mx.uint32)
+        idx_flat = _as_uint32_indices(rhs_indices)
         out_shape_kind = "sorted"
     else:
         K = rhs_indices.shape[-1]

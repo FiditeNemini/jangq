@@ -30,6 +30,7 @@ This "rotate-x-once" approach (from QuIP#) moves the Hadamard off the weight
   - For GLM-5.1 (744B): affine=234 GB vs TQ=191 GB in GPU memory
 """
 
+import os
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
@@ -118,6 +119,42 @@ def _create_tq_matmul_kernel():
 _kernel = None
 
 
+def _mpp_nax_mode() -> str:
+    return os.environ.get("JANGTQ_MPP_NAX", "").strip().lower()
+
+
+def _tq_matmul_mpp_dense(
+    x: mx.array,
+    packed: mx.array,
+    norms: mx.array,
+    codebook: mx.array,
+    signs: mx.array,
+    in_features: int,
+    bits: int,
+) -> mx.array:
+    from .mpp_dense_kernel import tq_matmul_mpp_dense
+
+    return tq_matmul_mpp_dense(
+        x, packed, norms, codebook, signs, in_features, bits
+    )
+
+
+def _tq_matmul_mpp_nax(
+    x: mx.array,
+    packed: mx.array,
+    norms: mx.array,
+    codebook: mx.array,
+    signs: mx.array,
+    in_features: int,
+    bits: int,
+) -> mx.array:
+    from .mpp_nax_kernel import tq_matmul_mpp_nax
+
+    return tq_matmul_mpp_nax(
+        x, packed, norms, codebook, signs, in_features, bits
+    )
+
+
 def tq_matmul(x: mx.array, packed: mx.array, norms: mx.array,
               codebook: mx.array, signs: mx.array,
               in_features: int, bits: int) -> mx.array:
@@ -138,6 +175,24 @@ def tq_matmul(x: mx.array, packed: mx.array, norms: mx.array,
     Returns:
         (batch, out_features) float32
     """
+    if _mpp_nax_mode() in {"1", "true", "yes", "auto"}:
+        try:
+            return _tq_matmul_mpp_nax(
+                x, packed, norms, codebook, signs, in_features, bits
+            )
+        except Exception:
+            if os.environ.get("JANGTQ_MPP_NAX_STRICT", "").strip() == "1":
+                raise
+
+    if os.environ.get("JANGTQ_MPP_DENSE", "").strip().lower() in {"1", "true", "yes"}:
+        try:
+            return _tq_matmul_mpp_dense(
+                x, packed, norms, codebook, signs, in_features, bits
+            )
+        except Exception:
+            if os.environ.get("JANGTQ_MPP_DENSE_STRICT", "").strip() == "1":
+                raise
+
     global _kernel
     if _kernel is None:
         _kernel = _create_tq_matmul_kernel()
