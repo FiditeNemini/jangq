@@ -233,8 +233,14 @@ def hc_split_sinkhorn(
     Same output semantics as `_hc_split_sinkhorn_ops`.
     """
     if _hc_split_sinkhorn_kernel is None:
-        return _hc_split_sinkhorn_ops(mixes, scale=hc_scale, base=hc_base,
-                                       hc_mult=hc_mult, iters=iters, eps=eps)
+        return _hc_split_sinkhorn_ops(
+            mixes,
+            hc_scale=hc_scale,
+            hc_base=hc_base,
+            hc_mult=hc_mult,
+            iters=iters,
+            eps=eps,
+        )
     global _hc_eps_array_cache
     if _hc_eps_array_cache is None:
         _hc_eps_array_cache = mx.array([eps], dtype=mx.float32)

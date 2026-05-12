@@ -38,3 +38,26 @@ def test_dsv4_hc_split_sinkhorn_matches_source_pre_post_contract():
     assert torch.allclose(post, expected_post)
     assert torch.allclose(comb, expected_comb)
     assert not torch.allclose(pre.sum(-1), torch.ones_like(pre.sum(-1)))
+
+
+def test_mlx_dsv4_hc_split_sinkhorn_pure_fallback_accepts_public_keywords(monkeypatch):
+    import numpy as np
+    import mlx.core as mx
+
+    import jang_tools.dsv4.mlx_model as dsv4
+
+    monkeypatch.setattr(dsv4, "_hc_split_sinkhorn_kernel", None)
+    mixes = mx.zeros((2, (2 + 4) * 4), dtype=mx.float32)
+    scale = mx.ones((3,), dtype=mx.float32)
+    base = mx.zeros(((2 + 4) * 4,), dtype=mx.float32)
+
+    pre, post, comb = dsv4.hc_split_sinkhorn(
+        mixes, scale, base, hc_mult=4, iters=3, eps=1e-6
+    )
+    mx.eval(pre, post, comb)
+
+    assert pre.shape == (2, 4)
+    assert post.shape == (2, 4)
+    assert comb.shape == (2, 4, 4)
+    np.testing.assert_allclose(np.asarray(comb).sum(axis=-1), 1.0, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(comb).sum(axis=-2), 1.0, rtol=1e-5, atol=1e-5)
