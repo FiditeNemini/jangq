@@ -3,14 +3,16 @@
 No REAP prune — converts all 256 experts as-is.
 
 Profiles (--profile sets ROUTED-EXPERT bits):
-  JANGTQ2 (default): routed experts 2-bit MXTQ, attention + embed +
-                     lm_head + shared experts 8-bit affine, norms +
-                     router + mHC params fp16 passthrough
+  JANGTQ2 (default): V3 runtime-candidate lane. Routed experts use 2-bit
+                     MXTQ with V3 mixed-bit overrides, attention + embed +
+                     lm_head + shared experts stay 8-bit affine, norms +
+                     router + mHC params are passthrough, and MTP is dropped.
   JANGTQ4: routed experts 4-bit MXTQ (bigger bundle, better fidelity)
 
 Variants (--variant tweaks NON-routed bits + drops MTP):
-  std (default)     : preserves legacy behavior (8-bit affine on
-                      attention/shared/embed/head; MTP layers shipped).
+  std               : legacy baseline/repro mode (8-bit affine on
+                      attention/shared/embed/head; MTP layers shipped). This
+                      is not the current DSV4 runtime candidate.
   K (JANG_DSV4_K)   : MAX-QUALITY 70-80 GB profile. Drops MTP head
                       (~6.5B params unused at decode-time sanitize) and
                       keeps EVERY non-routed module at 8-bit affine
@@ -21,12 +23,16 @@ Variants (--variant tweaks NON-routed bits + drops MTP):
                       Source FP4 routed → 2-bit MXTQ; source FP8
                       non-routed → 8-bit affine (≤0.5% RMS, lossless
                       vs FP8). Use --profile 2 for 70-80 GB bundle.
+  V3 (default)      : runtime-candidate lane. Drops MTP, uses 2/4-bit MXTQ
+                      routed experts, and accepts DSV4_V3_PLAN_PATH for the
+                      exact proven/rebuilt bit plan. A production candidate
+                      needs DSV4_V3_PLAN_PATH; no-plan V3 is a fallback.
 
 Usage:
   python -m jang_tools.dsv4.convert_dsv4_jangtq \\
       --src <path/to/DeepSeek-V4-Flash> \\
-      --dst ~/.mlxstudio/models/JANGQ-AI/DSV4-Flash-JANGTQ_K \\
-      --profile 2 --variant K
+      --dst ~/.mlxstudio/models/JANGQ-AI/DSV4-Flash-JANGTQ_V3 \\
+      --profile 2 --variant V3
 """
 
 from __future__ import annotations
@@ -50,7 +56,7 @@ from jang_tools.dsv4.weight_loader import ShardIndex
 
 SEED = 42
 FORMAT = "jangtq"  # set by main() from --format flag: "jang" or "jangtq"
-VARIANT = "std"    # set by main() from --variant flag: "std" or "K"
+VARIANT = "V3"     # set by main() from --variant flag: "std", "K", or "V3"
 _V3_PLAN_CACHE_PATH: str | None = None
 _V3_PLAN_CACHE: dict | None = None
 _V3_PLAN_CONFIG_CACHE: dict | None = None
@@ -448,7 +454,13 @@ def convert(
     print(f"[convert] profile: {profile_name} (format={FORMAT}, variant={VARIANT})")
     drop_mtp = (VARIANT in ("K", "V3"))
     if drop_mtp:
-        print("[convert] MTP head: DROP (variant=K, ~6.5B params unused at decode)")
+        print(f"[convert] MTP head: DROP (variant={VARIANT}, ~6.5B params unused at decode)")
+    if VARIANT == "V3" and not os.environ.get("DSV4_V3_PLAN_PATH", "").strip():
+        print(
+            "[convert] WARN: V3 without DSV4_V3_PLAN_PATH uses the built-in "
+            "hash-layer fallback. A production candidate needs DSV4_V3_PLAN_PATH.",
+            flush=True,
+        )
     print(f"[convert] scanning for .weight keys (skip sibling .scale)...")
     weight_keys = [k for k in idx.keys if not k.endswith(".scale")]
     if drop_mtp:
@@ -817,11 +829,11 @@ def main() -> int:
                     help="Routed-expert bit count.")
     ap.add_argument("--format", default="jangtq", choices=("jang", "jangtq"),
                     help="jang=standard affine everywhere; jangtq=MXTQ for 2-bit routed.")
-    ap.add_argument("--variant", default="std", choices=("std", "K", "V3"),
-                    help="std=legacy with MTP shipped; K=MAX-QUALITY 70-80GB "
+    ap.add_argument("--variant", default="V3", choices=("std", "K", "V3"),
+                    help="std=legacy baseline with MTP shipped; K=MAX-QUALITY 70-80GB "
                          "profile (drops MTP head, all non-routed stay 8-bit); "
                          "V3=K + hash layers 0-2 routed lifted to 4-bit MXTQ "
-                         "(target ~80%% MMLU, ~80GB).")
+                         "(target ~80%% MMLU, ~80GB); production candidate needs DSV4_V3_PLAN_PATH.")
     ap.add_argument("--no-prestack", action="store_true",
                     help="Debug only: leave per-expert TQ tensors instead of "
                          "finalizing to JANGTQ-PRESTACK layout.")

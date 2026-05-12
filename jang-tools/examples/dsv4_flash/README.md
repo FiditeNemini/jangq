@@ -24,7 +24,7 @@ Pass any other path as the first argument.
 | Env var | Default | Purpose |
 |---|---|---|
 | `DSV4_LONG_CTX` | `1` | Tri-mode HSA + CSA + SWA. Set `0` to fall back to legacy SWA-only (loses ≥7pp MMLU). |
-| `DSV4_POOL_QUANT` | `1` (when LC=1) | 4-bit affine on Compressor + Indexer pool. ~4× pool RAM saved at 1M ctx. Cosine ≥0.996. |
+| `DSV4_POOL_QUANT` | `0` | Correctness default. Pool quant is opt-in until compressor/indexer pool restore is proven for the exact runtime. |
 | `JANG_MEMORY_LIMIT_GB` | `200` | mx.set_memory_limit. Bump if you have >200 GB unified. |
 
 ## Reasoning mode glossary

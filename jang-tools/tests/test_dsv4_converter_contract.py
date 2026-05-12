@@ -215,3 +215,35 @@ def test_dsv4_converter_help_renders_percent_literals():
 
     assert result.returncode == 0
     assert "80% MMLU" in result.stdout
+
+
+def test_dsv4_converter_default_variant_is_runtime_candidate_v3():
+    """Bare JANGTQ2 conversion must not silently build the legacy MTP baseline."""
+    src = CONVERTER.read_text()
+
+    assert 'VARIANT = "V3"' in src
+    assert 'ap.add_argument("--variant", default="V3"' in src
+    assert "std=legacy baseline with MTP shipped" in src
+    assert "production candidate needs DSV4_V3_PLAN_PATH" in src
+
+
+def test_dsv4_docs_separate_std_baseline_from_runtime_candidate():
+    """Public DSV4 docs must not present uniform std JANGTQ2 as the proven lane."""
+    readme = (
+        Path(__file__).resolve().parents[1]
+        / "jang_tools"
+        / "dsv4"
+        / "README.md"
+    ).read_text()
+    examples = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "dsv4_flash"
+        / "README.md"
+    ).read_text()
+
+    assert "--variant V3" in readme
+    assert "DSV4_V3_PLAN_PATH" in readme
+    assert "uniform `std` JANGTQ2" in readme
+    assert "not a production-cleared DSV4 runtime candidate" in readme
+    assert "DSV4_POOL_QUANT` | `0`" in examples

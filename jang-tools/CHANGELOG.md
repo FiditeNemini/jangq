@@ -1,5 +1,11 @@
 ## Unreleased
 
+- DSV4 JANGTQ conversion now defaults to the V3 runtime-candidate lane
+  (`--variant V3`): MTP is dropped, prestack/sidecar finalization remains on by
+  default, and `DSV4_V3_PLAN_PATH` is documented as required for a production
+  candidate. The legacy uniform `std` JANGTQ2 path remains available for
+  baseline/repro builds but is no longer presented as the recommended DSV4
+  artifact.
 - `convert_ling_mxfp4.py` now preserves rank-3 pre-stacked
   `switch_mlp` expert tensors after MLX affine quantization. `mx.quantize`
   flattens `(n_experts, out, in)` stacks to `(n_experts, out * packed_in)`;

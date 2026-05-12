@@ -5,11 +5,20 @@ DeepSeek-V4 (Flash 284B / Pro 1.6T) JANG quantization + MLX runtime.
 ## Convert a model
 
 ```bash
-# JANGTQ2 — smallest (74 GB for V4-Flash). 2-bit MXTQ routed + 8-bit attn.
+# JANGTQ2 V3 — current DSV4 runtime-candidate lane. Drops MTP, keeps
+# non-routed modules 8-bit affine, and applies an explicit V3 routed bit plan.
+DSV4_V3_PLAN_PATH=/path/to/dsv4_v3_bit_plan.json \
 python -m jang_tools.dsv4.convert_dsv4_jangtq \
   --src <path/to/DSV4-Flash-source> \
   --dst <path/to/output-bundle> \
-  --profile 2 --format jangtq
+  --profile 2 --format jangtq --variant V3
+
+# uniform `std` JANGTQ2 — baseline/repro only. It keeps MTP and is
+# not a production-cleared DSV4 runtime candidate.
+python -m jang_tools.dsv4.convert_dsv4_jangtq \
+  --src <path/to/DSV4-Flash-source> \
+  --dst <path/to/std-baseline-output-bundle> \
+  --profile 2 --format jangtq --variant std
 
 # JANG_2L — 2-bit affine everywhere (107 GB).
 python -m jang_tools.dsv4.convert_dsv4_jangtq \
@@ -45,7 +54,8 @@ out = generate(model, tok, prompt=prompt, max_tokens=200)
 |---|---|---|---|---|
 | `jang` profile=2 | 2-bit affine | 2-bit affine | 107 GB | Most compact |
 | `jang` profile=4 | 4-bit affine | 4-bit affine | 173 GB | Highest fidelity |
-| `jangtq` profile=2 | 2-bit MXTQ | 8-bit affine | **74 GB** | Recommended |
+| `jangtq` profile=2 `--variant V3` | 2/4-bit MXTQ with explicit V3 plan | 8-bit affine | ~80 GB | Current runtime-candidate lane; production builds need `DSV4_V3_PLAN_PATH` |
+| `jangtq` profile=2 `--variant std` | uniform 2-bit MXTQ | 8-bit affine | ~74 GB | Baseline/repro only; keeps MTP, not production-cleared |
 | `jangtq` profile=4 | 4-bit affine | 8-bit affine | 173 GB | High fidelity, larger |
 
 **Avoid** mxfp4-direct-copy + bf16-passthrough (HP) format — unstable inference
