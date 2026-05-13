@@ -54,8 +54,8 @@ python -m jang_tools.kimi_prune.prune \
 
 python -m jang_tools.kimi_prune.convert_kimi_jangtq \
   --src <path/to/Kimi-K2.6-REAP-30> \
-  --dst <path/to/Kimi-K2.6-REAP-30-JANGTQ2> \
-  --profile 2
+  --dst <path/to/Kimi-K2.6-REAP-30-JANGTQ_K> \
+  --profile K
 ```
 
 ## Target models
@@ -70,7 +70,10 @@ top-8 routing, MLA). Same pipeline applies to:
 Each new model needs:
 1. Profile capture pass (architecture-aware hooks)
 2. Calibration mix tuned to model's training distribution
-3. Quantization profile selection (2-bit usually OK for 64+ expert MoE)
+3. Quantization profile selection. For Kimi K2.6, start with `K` /
+   `JANGTQ_K`: routed `gate_proj` and `up_proj` at 2-bit MXTQ,
+   routed `down_proj` at 4-bit MXTQ, non-routed control plane at
+   8-bit affine, and norms/router passthrough.
 
 See the JANGReap lessons doc for the canonical bug/trap list — read
 before running on a new model.

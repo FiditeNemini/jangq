@@ -1,6 +1,6 @@
 """Kimi K2.6 (REAP-pruned or raw) → JANGTQ conversion.
 
-Supports JANGTQ_1L / JANGTQ_2L / JANGTQ_3L profiles:
+Supports JANGTQ_1L / JANGTQ_2L / JANGTQ_3L / JANGTQ_K profiles:
 
   JANGTQ_1L (~1.8 bpw avg):
     routed experts     -> 2-bit MXTQ (no AWQ)
@@ -20,6 +20,12 @@ Supports JANGTQ_1L / JANGTQ_2L / JANGTQ_3L profiles:
   JANGTQ_3L (~3.3 bpw avg):
     routed experts     -> 3-bit MXTQ
     attention / shared / embed / lm_head / norms / router -> FP16
+
+  JANGTQ_K:
+    routed gate/up      -> 2-bit MXTQ
+    routed down         -> 4-bit MXTQ
+    attention/shared/embed/lm_head/dense MLP -> 8-bit affine
+    norms/router        -> FP16 passthrough
 
 Source: Kimi K2.6 compressed-tensors INT4 format (Moonshot's original or
 our REAP-pruned output with the same on-disk layout).
@@ -51,6 +57,102 @@ from .int4_codec import unpack_int4
 
 SEED = 42
 
+KIMI_JANGTQ_K_BITS = {
+    "gate_proj": 2,
+    "up_proj": 2,
+    "down_proj": 4,
+}
+
+PROFILE_ALIASES = {
+    "1": "1L",
+    "1L": "1L",
+    "JANGTQ_1L": "1L",
+    "JANGTQ1L": "1L",
+    "2": "2L",
+    "2L": "2L",
+    "JANGTQ_2L": "2L",
+    "JANGTQ2L": "2L",
+    "3": "3L",
+    "3L": "3L",
+    "JANGTQ_3L": "3L",
+    "JANGTQ3L": "3L",
+    "K": "K",
+    "2K": "K",
+    "JANGTQ_K": "K",
+    "JANGTQK": "K",
+}
+
+
+def normalize_profile(profile: str) -> str:
+    """Normalize user-facing Kimi JANGTQ profile names."""
+    key = profile.upper().replace("-", "_")
+    try:
+        return PROFILE_ALIASES[key]
+    except KeyError as exc:
+        raise ValueError(f"unknown profile: {profile}") from exc
+
+
+def profile_label(profile: str) -> str:
+    profile = normalize_profile(profile)
+    return "JANGTQ_K" if profile == "K" else f"JANGTQ_{profile}"
+
+
+def auxiliary_files_to_copy() -> tuple[str, ...]:
+    """Auxiliary files required for text and VL Kimi bundle loading."""
+    return (
+        "tokenizer_config.json",
+        "generation_config.json",
+        "preprocessor_config.json",
+        "tokenization_kimi.py",
+        "tiktoken.model",
+        "chat_template.jinja",
+        "tool_declaration_ts.py",
+        "configuration_kimi_k25.py",
+        "configuration_deepseek.py",
+        "modeling_kimi_k25.py",
+        "modeling_deepseek.py",
+        "kimi_k25_processor.py",
+        "kimi_k25_vision_processing.py",
+        "media_utils.py",
+    )
+
+
+def build_jang_config(
+    *,
+    src: Path,
+    profile: str,
+    n_experts: int,
+    first_dense: int,
+    n_layers: int,
+) -> dict:
+    """Build the Kimi JANG metadata sidecar."""
+    profile = normalize_profile(profile)
+    if profile == "K":
+        routed_bits: int | dict[str, int] = dict(KIMI_JANGTQ_K_BITS)
+    else:
+        routed_bits = 2 if profile != "3L" else 3
+
+    return {
+        "weight_format": "mxtq",
+        "profile": profile_label(profile),
+        "mxtq_seed": SEED,
+        "source_model": str(src),
+        "source_config": {
+            "n_routed_experts": n_experts,
+            "first_k_dense_replace": first_dense,
+            "num_hidden_layers": n_layers,
+        },
+        "mxtq_bits": {
+            "routed_expert": routed_bits,
+            "attention": 8 if profile in ("1L", "K") else 16,
+            "shared_expert": 8 if profile in ("1L", "K") else 16,
+            "dense_mlp": 8 if profile in ("1L", "K") else 16,
+            "embed_tokens": 8 if profile in ("1L", "K") else 16,
+            "lm_head": 8 if profile in ("1L", "K") else 16,
+            "norms_router": 16,
+        },
+    }
+
 
 def get_bits_and_method(tensor_name: str, profile: str) -> tuple[int, str]:
     """Return (bits, method) for each tensor based on JANGTQ profile.
@@ -58,6 +160,7 @@ def get_bits_and_method(tensor_name: str, profile: str) -> tuple[int, str]:
     method in {"passthrough" (FP16), "affine" (mlx-native quant),
                "mxtq" (JANG turbo-quant), "mxtq_awq"}
     """
+    profile = normalize_profile(profile)
     name = tensor_name.lower()
 
     # Norms + router bias + router weight + MTP scalars → FP16
@@ -97,6 +200,19 @@ def get_bits_and_method(tensor_name: str, profile: str) -> tuple[int, str]:
             return 3, "mxtq"
         if is_attn or is_shared or is_embed or is_lmhead or is_dense_mlp:
             return 16, "passthrough"
+        return 16, "passthrough"
+
+    if profile == "K":
+        if is_routed:
+            if ".down_proj" in name:
+                return KIMI_JANGTQ_K_BITS["down_proj"], "mxtq"
+            if ".gate_proj" in name:
+                return KIMI_JANGTQ_K_BITS["gate_proj"], "mxtq"
+            if ".up_proj" in name:
+                return KIMI_JANGTQ_K_BITS["up_proj"], "mxtq"
+            raise ValueError(f"unknown routed projection for K profile: {tensor_name}")
+        if is_attn or is_shared or is_embed or is_lmhead or is_dense_mlp:
+            return 8, "affine"
         return 16, "passthrough"
 
     raise ValueError(f"unknown profile: {profile}")
@@ -165,6 +281,7 @@ def convert(src: Path, dst: Path, profile: str, awq_scales_file: Path | None = N
     from safetensors.numpy import load_file
 
     dst.mkdir(parents=True, exist_ok=True)
+    profile = normalize_profile(profile)
     with open(src / "config.json") as f:
         config = json.load(f)
     tc = config.get("text_config", config)
@@ -178,7 +295,7 @@ def convert(src: Path, dst: Path, profile: str, awq_scales_file: Path | None = N
                       for k, v in load_file(str(awq_scales_file)).items()}
 
     print("=" * 62, flush=True)
-    print(f"  Kimi K2.6 → JANGTQ_{profile}", flush=True)
+    print(f"  Kimi K2.6 → {profile_label(profile)}", flush=True)
     print(f"  src: {src}", flush=True)
     print(f"  dst: {dst}", flush=True)
     print(f"  layers: {n_layers} ({first_dense} dense + {n_layers - first_dense} MoE)",
@@ -220,7 +337,7 @@ def convert(src: Path, dst: Path, profile: str, awq_scales_file: Path | None = N
         if shard_bytes >= MAX_SHARD:
             flush_shard()
 
-    print(f"\nconverting (JANGTQ_{profile})...", flush=True)
+    print(f"\nconverting ({profile_label(profile)})...", flush=True)
 
     # Group tensors by shard so we only open each shard once.
     by_shard: dict[Path, list[str]] = {}
@@ -302,26 +419,13 @@ def convert(src: Path, dst: Path, profile: str, awq_scales_file: Path | None = N
         json.dump(config, f, indent=2)
 
     # jang_config.json sidecar
-    jang_cfg = {
-        "weight_format": "mxtq",
-        "profile": f"JANGTQ_{profile}",
-        "mxtq_seed": SEED,
-        "source_model": str(src),
-        "source_config": {
-            "n_routed_experts": n_experts,
-            "first_k_dense_replace": first_dense,
-            "num_hidden_layers": n_layers,
-        },
-        "mxtq_bits": {
-            "routed_expert": 2 if profile != "3L" else 3,
-            "attention": 8 if profile == "1L" else 16,
-            "shared_expert": 8 if profile == "1L" else 16,
-            "dense_mlp": 8 if profile == "1L" else 16,
-            "embed_tokens": 8 if profile == "1L" else 16,
-            "lm_head": 8 if profile == "1L" else 16,
-            "norms_router": 16,
-        },
-    }
+    jang_cfg = build_jang_config(
+        src=src,
+        profile=profile,
+        n_experts=n_experts,
+        first_dense=first_dense,
+        n_layers=n_layers,
+    )
     with (dst / "jang_config.json").open("w") as f:
         json.dump(jang_cfg, f, indent=2)
 
@@ -337,8 +441,7 @@ def convert(src: Path, dst: Path, profile: str, awq_scales_file: Path | None = N
                 shutil.copy2(p, dst / p.name)
                 copied += 1
     # Also copy tokenizer_config + generation_config explicitly
-    for req in ("tokenizer_config.json", "generation_config.json", "tokenization_kimi.py",
-                "tiktoken.model", "chat_template.jinja", "tool_declaration_ts.py"):
+    for req in auxiliary_files_to_copy():
         s = src / req
         if s.exists() and not (dst / req).exists():
             shutil.copy2(s, dst / req)
@@ -379,7 +482,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True, type=Path)
     ap.add_argument("--dst", required=True, type=Path)
-    ap.add_argument("--profile", choices=("1L", "2L", "3L"), default="1L")
+    ap.add_argument("--profile", default="1L",
+                    help="1L, 2L, 3L, or K/JANGTQ_K/2K")
     ap.add_argument("--awq-scales", type=Path, default=None)
     ap.add_argument("--no-prestack", action="store_true",
                     help="skip rebundle post-process (debug only; produces non-spec bundle)")

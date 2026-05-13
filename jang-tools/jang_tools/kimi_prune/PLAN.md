@@ -74,7 +74,12 @@ Estimated sizes (rough):
 - 40% prune: ~360 GB
 - 50% prune: ~300 GB
 
-Subsequent JANGTQ conversion would bring these to ~100 / 85 / 70 GB at JANGTQ_2L. Potentially shippable on a 128 GB MacBook Pro at 50% + JANGTQ_2L.
+Subsequent JANGTQ conversion would bring these to ~100 / 85 / 70 GB at
+JANGTQ_2L. The first current quality target should be `JANGTQ_K`: routed
+`gate_proj`/`up_proj` at 2-bit MXTQ, routed `down_proj` at 4-bit MXTQ, and
+attention/shared/embed/lm_head/dense MLP at 8-bit affine. Potentially
+shippable on a 128 GB MacBook Pro at 50% prune + K profile, pending live
+text/VL quality gates.
 
 ## Known gaps / TODO when work resumes
 
