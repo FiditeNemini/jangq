@@ -131,6 +131,7 @@ class NemotronHForCausalLM(nn.Module):
 def _populate_omni_encoder_view(bundle_path: Path, view_dir: Path) -> None:
     """Create the temporary HF view used to load only Omni encoder modules."""
     import os
+    import shutil
 
     for f in os.listdir(bundle_path):
         src = bundle_path / f
@@ -138,9 +139,27 @@ def _populate_omni_encoder_view(bundle_path: Path, view_dir: Path) -> None:
         if f == "config.json":
             continue  # skip the flat LLM config
         if f == "config_omni.json":
-            os.symlink(src, view_dir / "config.json")
+            shutil.copy2(src, view_dir / "config.json")
+        elif f == "modeling.py":
+            text = src.read_text()
+            text += (
+                "\n\n# vMLX dynamic-module cache hints: Transformers copies only\n"
+                "# direct relative imports of the requested module before hashing\n"
+                "# recursive imports from the cache. Keep configuration.py's\n"
+                "# transitive imports present when AutoModel loads modeling.py.\n"
+                "from .configuration_nemotron_h import NemotronHConfig as _vmlx_NemotronHConfig\n"
+                "from .configuration_radio import RADIOConfig as _vmlx_RADIOConfig\n"
+            )
+            dst.write_text(text)
         elif f == "modeling_nemotron_h.py":
             dst.write_text(_PYTORCH_LANGUAGE_MODEL_STUB)
+        elif f.endswith(".py"):
+            # Transformers' dynamic-module cache recursively scans relative
+            # imports after copying files out of this temp view. Real files are
+            # more robust here than symlinks: some cache paths previously
+            # copied configuration.py but then failed to materialize
+            # configuration_radio.py, breaking RADIO/Parakeet media startup.
+            shutil.copy2(src, dst)
         else:
             os.symlink(src, dst)
 

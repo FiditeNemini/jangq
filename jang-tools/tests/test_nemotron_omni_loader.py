@@ -42,7 +42,13 @@ def test_nemotron_omni_mlx_llm_loader_uses_non_strict_model_load(monkeypatch, tm
 
 
 def test_nemotron_omni_encoder_view_stubs_duplicate_torch_llm(tmp_path):
-    """The PyTorch encoder view must not instantiate a second full LLM."""
+    """The PyTorch encoder view must not instantiate a second full LLM.
+
+    Files imported by Transformers remote-code loading must be materialized as
+    real files. Symlinks worked for the local temp view but failed after
+    Transformers copied the requested module into its dynamic-module cache and
+    then recursively scanned direct relative imports from the cache.
+    """
 
     from jang_tools.nemotron_omni_chat import _populate_omni_encoder_view
 
@@ -52,18 +58,37 @@ def test_nemotron_omni_encoder_view_stubs_duplicate_torch_llm(tmp_path):
     view.mkdir()
     (bundle / "config.json").write_text('{"model_type":"nemotron_h"}')
     (bundle / "config_omni.json").write_text('{"model_type":"omni"}')
+    (bundle / "configuration.py").write_text(
+        "from .configuration_nemotron_h import NemotronHConfig\n"
+        "from .configuration_radio import RADIOConfig\n"
+    )
+    (bundle / "configuration_nemotron_h.py").write_text(
+        "class NemotronHConfig: pass\n"
+    )
+    (bundle / "configuration_radio.py").write_text(
+        "class RADIOConfig: pass\n"
+    )
     (bundle / "modeling_nemotron_h.py").write_text("REAL_LLM = True\n")
-    (bundle / "modeling.py").write_text("MODEL = True\n")
+    (bundle / "modeling.py").write_text(
+        "from .configuration import NemotronOmniConfig\n"
+        "MODEL = True\n"
+    )
 
     _populate_omni_encoder_view(bundle, view)
 
-    assert (view / "config.json").is_symlink()
-    assert (view / "config.json").resolve() == bundle / "config_omni.json"
+    assert not (view / "config.json").is_symlink()
+    assert (view / "config.json").read_text() == '{"model_type":"omni"}'
     assert not (view / "modeling_nemotron_h.py").is_symlink()
     stub = (view / "modeling_nemotron_h.py").read_text()
     assert "class NemotronHForCausalLM" in stub
     assert "stubbed in vMLX Omni" in stub
-    assert (view / "modeling.py").is_symlink()
+    assert not (view / "configuration.py").is_symlink()
+    assert not (view / "configuration_nemotron_h.py").is_symlink()
+    assert not (view / "configuration_radio.py").is_symlink()
+    assert not (view / "modeling.py").is_symlink()
+    modeling = (view / "modeling.py").read_text()
+    assert "_vmlx_NemotronHConfig" in modeling
+    assert "_vmlx_RADIOConfig" in modeling
 
 
 def test_nemotron_omni_video_prompt_uses_image_placeholders():
