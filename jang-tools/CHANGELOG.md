@@ -14,9 +14,11 @@
   tokenizer files, tiktoken model, chat template, and generation config.
 - Added the `jang-convert-kimi-jangtq` console script for PyPI installs.
 - Verified the full Kimi K2.6 JANGTQ_K artifact on `erics-m5-max.local`:
-  `/Volumes/EricsLLMDrive/JANGQ/Kimi-K2.6-JANGTQ_K` is a prestacked external
-  drive bundle with 193 final shards, `switch_mlp` TQ tensors, zero per-expert
-  TQ keys in the index, and routed bits `gate=2`, `up=2`, `down=4`.
+  `/Users/eric/models/Kimi-K2.6-JANGTQ_K` is the SSH-visible bundle, with a
+  matching external-drive copy visible from this Mac at
+  `/Volumes/EricsLLMDrive 1/JANGQ/Kimi-K2.6-JANGTQ_K`. The artifact has 193
+  final shards, `switch_mlp` TQ tensors, zero per-expert TQ keys in the index,
+  and routed bits `gate=2`, `up=2`, `down=4`.
 
 - DSV4 JANGTQ conversion now defaults to the V3 runtime-candidate lane
   (`--variant V3`): MTP is dropped, prestack/sidecar finalization remains on by
