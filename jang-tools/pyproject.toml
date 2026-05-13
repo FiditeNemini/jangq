@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.28"
-description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.28: DSV4 JANGTQ conversion defaults to the V3 runtime-candidate lane with MTP dropped and explicit bit-plan metadata; std remains baseline-only. v2.5.27: ZAYA JANGTQ/MXFP converters and tools-only CCA capability contract."
+version = "2.5.29"
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.29: Kimi K2.6 JANGTQ_K conversion adds mixed routed bits, VL aux-file preservation, and prestacked runtime metadata. v2.5.28: DSV4 JANGTQ conversion defaults to the V3 runtime-candidate lane."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]
@@ -41,6 +41,7 @@ jang-convert-zaya-jangtq = "jang_tools.convert_zaya_jangtq:main"
 jang-convert-zaya-mxfp4 = "jang_tools.convert_zaya_mxfp4:main"
 jang-convert-zaya1-vl-jangtq = "jang_tools.convert_zaya1_vl_jangtq:main"
 jang-convert-zaya1-vl-mxfp4 = "jang_tools.convert_zaya1_vl_mxfp4:main"
+jang-convert-kimi-jangtq = "jang_tools.kimi_prune.convert_kimi_jangtq:main"
 jang-laguna-runtime  = "jang_tools.laguna.runtime:main"
 jang-mistral3-runtime = "jang_tools.mistral3.runtime:main"
 jang-mmlu = "jang_tools.eval.mmlu:main"

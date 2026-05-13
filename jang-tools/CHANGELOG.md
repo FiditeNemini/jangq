@@ -1,5 +1,23 @@
 ## Unreleased
 
+## 2.5.29 — 2026-05-13
+
+- Kimi K2.6 conversion now has a real `JANGTQ_K` profile. Routed
+  `gate_proj` and `up_proj` use 2-bit MXTQ, routed `down_proj` uses 4-bit
+  MXTQ, non-routed attention/shared/embed/lm_head/dense MLP tensors use
+  8-bit affine, and norms/router/bias/control tensors stay passthrough.
+- Kimi converter metadata now records per-projection routed bits in
+  `jang_config.json`, preserving the mixed-bit runtime contract used by the
+  JANGTQ_K decode kernels.
+- Kimi conversion now preserves the VL runtime aux files needed by downstream
+  loaders, including processor config, Kimi processor code, media utilities,
+  tokenizer files, tiktoken model, chat template, and generation config.
+- Added the `jang-convert-kimi-jangtq` console script for PyPI installs.
+- Verified the full Kimi K2.6 JANGTQ_K artifact on `erics-m5-max.local`:
+  `/Volumes/EricsLLMDrive/JANGQ/Kimi-K2.6-JANGTQ_K` is a prestacked external
+  drive bundle with 193 final shards, `switch_mlp` TQ tensors, zero per-expert
+  TQ keys in the index, and routed bits `gate=2`, `up=2`, `down=4`.
+
 - DSV4 JANGTQ conversion now defaults to the V3 runtime-candidate lane
   (`--variant V3`): MTP is dropped, prestack/sidecar finalization remains on by
   default, and `DSV4_V3_PLAN_PATH` is documented as required for a production
