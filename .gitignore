@@ -96,6 +96,8 @@ vectors/
 
 # JANGStudio
 JANGStudio/build/
+JANGStudio/.build/
+JANGStudio/*.profraw
 JANGStudio/JANGStudio.xcodeproj/xcuserdata/
 JANGStudio/DerivedData/
 .superpowers/
@@ -125,6 +127,9 @@ swift-stage/
 # Investigation outputs at repo root (jsonl/json bundle audits)
 /*_2026-*.jsonl
 /*_2026-*.json
+jang-tools/*_nax_live_*.json
+jang-tools/*_tensorops_component_probe_*.json
+jang-tools/swift/.build/
 
 # Internal eval/probe scripts at repo root
 humaneval_*.py

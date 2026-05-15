@@ -28,6 +28,9 @@ Returns `(model, processor)` ready for `mlx_vlm.generate`:
 
 from __future__ import annotations
 
+import math
+import os
+
 from pathlib import Path
 from typing import Tuple
 
@@ -250,15 +253,19 @@ def _warmup_jit_per_layer(model, verbose: bool = True) -> None:
     # We run through the TOP-LEVEL model (not per-layer) so embed_tokens,
     # the outer DeepseekV3Model.__call__ path, final norm, and lm_head
     # all land in the cached-shader set. Uses a real KVCache and a tiny
-    # token input (N=16 to match our text/VL prefill_step_size default).
+    # token input. The length is model-aware because JANGTQ_MPP_NAX=auto only
+    # takes the accelerated routed-expert prefill lane once the routed dispatch
+    # count crosses its threshold. MiniMax top_k=8 needs 32 prompt tokens
+    # (32*8=256) to compile that lane; the old hardcoded 16-token warmup left
+    # the first real short prompt paying a large cold-compile penalty.
     try:
         from mlx_lm.models.cache import make_prompt_cache
-        WARMUP_N = 16
+        WARMUP_N = _warmup_prefill_tokens(model, lm)
         cache_for_warm = make_prompt_cache(lm)
         tiny_ids = _mx.zeros((1, WARMUP_N), dtype=_mx.int32)
         t1 = _time.time()
         if verbose:
-            print(f"  [warmup] full-model 16-token prefill shape ...",
+            print(f"  [warmup] full-model {WARMUP_N}-token prefill shape ...",
                   flush=True)
         # Some VLM wrappers expect different call signatures; try several.
         call_variants = [
@@ -291,6 +298,72 @@ def _warmup_jit_per_layer(model, verbose: bool = True) -> None:
     if verbose:
         print(f"  [warmup] done in {_time.time() - t0:.1f}s "
               f"(Metal kernels now JIT-cached)", flush=True)
+
+
+def _warmup_prefill_tokens(model, lm=None) -> int:
+    """Return the full-model prefill warmup length.
+
+    vMLX sets ``JANGTQ_MPP_NAX=auto`` by default on M5 Max. The routed
+    accelerated prefill path is intentionally gated to larger dispatches, so a
+    too-small warmup can miss the accelerated kernel shape and push compilation
+    into the first real user request. Pick the shortest prompt length that
+    crosses the auto threshold for the model's trained router top-k.
+    """
+    raw_override = os.environ.get("JANGTQ_WARMUP_PREFILL_TOKENS", "").strip()
+    if raw_override:
+        try:
+            value = int(raw_override)
+            if value > 0:
+                return max(1, min(value, 512))
+        except ValueError:
+            pass
+
+    mode = os.environ.get("JANGTQ_MPP_NAX", "").strip().lower()
+    if mode != "auto":
+        return 16
+
+    top_k = _trained_router_top_k(model, lm) or 8
+    # Matches the current auto gate in turboquant gather/fused kernels:
+    # dispatches >= 256 when the matrix is large enough. Using 256 instead of
+    # 512 keeps load warmup bounded while still compiling MiniMax/Qwen/ZAYA
+    # prefill shapes that otherwise surprise the first user request.
+    return max(16, min(256, math.ceil(256 / max(1, int(top_k)))))
+
+
+def _trained_router_top_k(model, lm=None) -> int | None:
+    for src in (
+        getattr(model, "config", None),
+        getattr(model, "args", None),
+        getattr(lm, "config", None) if lm is not None else None,
+        getattr(lm, "args", None) if lm is not None else None,
+        model,
+        lm,
+    ):
+        value = _router_top_k_from_config(src)
+        if value:
+            return value
+    return None
+
+
+def _router_top_k_from_config(src) -> int | None:
+    if src is None:
+        return None
+    for key in (
+        "num_experts_per_tok",
+        "num_experts_per_token",
+        "moe_top_k",
+        "top_k",
+        "n_experts_per_tok",
+    ):
+        value = getattr(src, key, None)
+        if isinstance(value, int) and value > 0:
+            return value
+    for nested in ("text_config", "text", "llm_config"):
+        sub = getattr(src, nested, None)
+        value = _router_top_k_from_config(sub)
+        if value:
+            return value
+    return None
 
 
 def _install_vl_command_buffer_split(model) -> None:

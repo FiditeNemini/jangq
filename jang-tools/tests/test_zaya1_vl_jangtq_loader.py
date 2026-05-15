@@ -31,11 +31,19 @@ def test_zaya1_vl_runtime_loader_sets_eval_mode(tmp_path, monkeypatch):
     def fake_load(path, processor_config=None, lazy=False):
         return fake_model, fake_processor
 
+    register_calls = []
+
+    def fake_register():
+        register_calls.append(True)
+
     mlx_vlm = types.ModuleType("mlx_vlm")
     mlx_vlm_utils = types.ModuleType("mlx_vlm.utils")
+    zaya1_vl_model = types.ModuleType("jang_tools.zaya1_vl.model")
     mlx_vlm_utils.load = fake_load
+    zaya1_vl_model.register_mlx_vlm_zaya1_vl = fake_register
     monkeypatch.setitem(sys.modules, "mlx_vlm", mlx_vlm)
     monkeypatch.setitem(sys.modules, "mlx_vlm.utils", mlx_vlm_utils)
+    monkeypatch.setitem(sys.modules, "jang_tools.zaya1_vl.model", zaya1_vl_model)
 
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "zaya1_vl"}))
 
@@ -43,6 +51,7 @@ def test_zaya1_vl_runtime_loader_sets_eval_mode(tmp_path, monkeypatch):
 
     assert model is fake_model
     assert processor is fake_processor
+    assert register_calls == [True]
     assert model.eval_called is True
     assert model.training is False
 

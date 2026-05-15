@@ -123,6 +123,19 @@ def _mpp_nax_mode() -> str:
     return os.environ.get("JANGTQ_MPP_NAX", "").strip().lower()
 
 
+def _dense_mpp_nax_wins(x: mx.array, in_features: int, out_features: int) -> bool:
+    """Gate dense MPP/NAX to prefill-sized dispatches."""
+    if x.ndim == 1:
+        batch_size = 1
+    elif x.ndim > 2:
+        batch_size = int(np.prod(tuple(x.shape[:-1])))
+    else:
+        batch_size = int(x.shape[0])
+    if batch_size >= 512:
+        return True
+    return batch_size >= 256 and (int(in_features) * int(out_features)) >= (2048 * 2048)
+
+
 def _tq_matmul_mpp_dense(
     x: mx.array,
     packed: mx.array,
@@ -175,7 +188,12 @@ def tq_matmul(x: mx.array, packed: mx.array, norms: mx.array,
     Returns:
         (batch, out_features) float32
     """
-    if _mpp_nax_mode() in {"1", "true", "yes", "auto"}:
+    _nax_mode = _mpp_nax_mode()
+    _nax_allowed = _nax_mode in {"1", "true", "yes", "on"} or (
+        _nax_mode == "auto"
+        and _dense_mpp_nax_wins(x, in_features, int(packed.shape[0]))
+    )
+    if _nax_allowed:
         try:
             return _tq_matmul_mpp_nax(
                 x, packed, norms, codebook, signs, in_features, bits

@@ -9,6 +9,19 @@ from jang_tools.turboquant.gather_tq_kernel import gather_tq_matmul
 from jang_tools.turboquant.tq_kernel import tq_matmul
 
 
+def test_mpp_nax_availability_does_not_run_smoke_eval(monkeypatch):
+    import jang_tools.turboquant.mpp_nax_kernel as nax_kernel
+
+    nax_kernel.mpp_nax_tensorops_available.cache_clear()
+
+    def fail_eval(*_args, **_kwargs):
+        raise AssertionError("availability check must not run a smoke Metal eval")
+
+    monkeypatch.setattr(nax_kernel.mx, "eval", fail_eval)
+
+    assert isinstance(nax_kernel.mpp_nax_tensorops_available(), bool)
+
+
 def _quantize_rows(weight: np.ndarray, bits: int) -> tuple[mx.array, mx.array, mx.array]:
     out_features, in_features = weight.shape
     codebook = mx.array(compute_codebook(in_features, bits), dtype=mx.float32)
@@ -84,6 +97,48 @@ def test_tq_matmul_opt_in_uses_nax_path(monkeypatch):
     y = tq_kernel.tq_matmul(x, packed, norms, codebook, signs, in_features, bits)
 
     mx.eval(y)
+    assert called["nax"] == 1
+
+
+def test_tq_matmul_auto_uses_nax_only_for_prefill_sized_shapes(monkeypatch):
+    from jang_tools.turboquant import tq_kernel
+
+    rng = np.random.default_rng(2035)
+    in_features = 64
+    out_features = 16
+    bits = 4
+    signs = mx.ones((in_features,), dtype=mx.float32)
+    packed, norms, codebook = _quantize_rows(
+        rng.standard_normal((out_features, in_features)).astype(np.float32),
+        bits,
+    )
+    called = {"nax": 0}
+
+    def fake_nax(x, *_args, **_kwargs):
+        called["nax"] += 1
+        if x.ndim == 1:
+            batch = 1
+        elif x.ndim > 2:
+            batch = int(np.prod(tuple(x.shape[:-1])))
+        else:
+            batch = int(x.shape[0])
+        return mx.zeros((batch, out_features), dtype=mx.float32)
+
+    monkeypatch.setenv("JANGTQ_MPP_NAX", "auto")
+    monkeypatch.setattr(tq_kernel, "_tq_matmul_mpp_nax", fake_nax)
+
+    small_x = mx.array(rng.standard_normal((1, in_features)).astype(np.float32))
+    small = tq_kernel.tq_matmul(
+        small_x, packed, norms, codebook, signs, in_features, bits
+    )
+    mx.eval(small)
+    assert called["nax"] == 0
+
+    large_x = mx.array(rng.standard_normal((512, in_features)).astype(np.float32))
+    large = tq_kernel.tq_matmul(
+        large_x, packed, norms, codebook, signs, in_features, bits
+    )
+    mx.eval(large)
     assert called["nax"] == 1
 
 

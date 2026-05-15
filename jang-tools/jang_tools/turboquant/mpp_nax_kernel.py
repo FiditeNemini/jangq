@@ -8,6 +8,7 @@ fragments and runs a 16x32x16 MPP matmul tile.
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 import weakref
 
 import mlx.core as mx
@@ -273,28 +274,22 @@ for (short nn = 0; nn < 2; nn++) {
 
 @lru_cache(maxsize=1)
 def mpp_nax_tensorops_available() -> bool:
-    """Return true if cooperative MPP TensorOps work via MLX metal_kernel."""
-    try:
-        kernel = mx.fast.metal_kernel(
-            name="jangtq_mpp_nax_smoke",
-            input_names=["A", "B"],
-            output_names=["C"],
-            header=_MPP_NAX_HEADER,
-            source=_MPP_NAX_SMOKE_SOURCE,
-        )
-        a = mx.ones((16, 16), dtype=mx.float16)
-        b = mx.ones((16, 32), dtype=mx.float16)
-        out = kernel(
-            inputs=[a, b],
-            output_shapes=[(16, 32)],
-            output_dtypes=[mx.float32],
-            grid=(32, 1, 1),
-            threadgroup=(32, 1, 1),
-        )[0]
-        mx.eval(out)
-        return bool(mx.all(mx.abs(out - 16.0) < 1e-3).item())
-    except Exception:
+    """Return whether the MPP/NAX TensorOps lane is allowed to try dispatch.
+
+    This must not run a smoke Metal command. vMLX queries it from /health after
+    loading large mmap-backed models, and executing an unrelated probe on the
+    live MLX stream can wedge the server before the first user generation. The
+    real kernels still compile/dispatch on demand; callers catch failures and
+    fall back unless JANGTQ_MPP_NAX_STRICT=1 is set.
+    """
+    if os.environ.get("JANGTQ_MPP_NAX_DISABLE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
         return False
+    return bool(getattr(getattr(mx, "fast", None), "metal_kernel", None))
 
 
 @lru_cache(maxsize=64)

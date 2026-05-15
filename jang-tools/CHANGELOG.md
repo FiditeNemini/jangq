@@ -1,5 +1,19 @@
 ## Unreleased
 
+## 2.5.30 — 2026-05-15
+
+- JANGTQ MPP/NAX availability checks no longer run a smoke Metal dispatch.
+  Runtime health/status probes can safely report capability after large models
+  have loaded; real generation kernels still compile on demand and fall back
+  unless strict mode is explicitly enabled.
+- Dense JANGTQ MPP/NAX auto dispatch is gated to prefill-sized shapes, keeping
+  single-token decode on the normal low-overhead path while preserving the M5
+  prefill acceleration lane.
+- Kimi/VLM JANGTQ warmup now sizes the full-model prefill warmup from the
+  trained router top-k, so the accelerated prefill kernel shape is compiled
+  before the first user request instead of being missed by the old fixed
+  16-token warmup.
+
 ## 2.5.29 — 2026-05-13
 
 - Kimi K2.6 conversion now has a real `JANGTQ_K` profile. Routed
