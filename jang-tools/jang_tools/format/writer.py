@@ -143,6 +143,16 @@ def write_jang_v2_model(
             if v == old_path.name:
                 weight_map[k] = new_name
 
+    # Compute actual indexed shard bytes after final shard renaming. For large
+    # conversions, most tensors may have been pre-flushed before this writer
+    # sees the final in-memory tail, so summing only `tensors` undercounts the
+    # bundle and emits misleading runtime metadata.
+    total_size = 0
+    for shard_name in set(weight_map.values()):
+        shard_path = output_dir / shard_name
+        if shard_path.exists():
+            total_size += shard_path.stat().st_size
+
     # Write standard safetensors index (model.safetensors.index.json)
     index = {
         "metadata": {

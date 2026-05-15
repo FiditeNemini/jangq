@@ -85,6 +85,144 @@ EOS_FIXES: dict[str, dict[int, int]] = {
 }
 
 
+def _is_mtp_tensor_name(tensor_name: str) -> bool:
+    """Return true for model-family MTP tensor namespaces."""
+    name = tensor_name.lower()
+    return name.startswith("mtp.") or ".mtp." in name or ".mtp_" in name
+
+
+def _is_vision_tensor_name(tensor_name: str) -> bool:
+    """Return true for vision/VL tower tensor namespaces that must be preserved."""
+    name = tensor_name.lower()
+    return (
+        name.startswith("model.visual")
+        or ".visual." in name
+        or name.startswith("vision_tower")
+        or "vision_model" in name
+        or "vision_encoder" in name
+        or "embed_vision" in name
+    )
+
+
+def _sanitize_output_tensor_name(tensor_name: str) -> str:
+    """Map wrapped HF checkpoint keys to the runtime-facing MLX names."""
+    if tensor_name.startswith("model.language_model."):
+        return tensor_name.replace("model.language_model", "language_model.model", 1)
+    if tensor_name.startswith("model.visual"):
+        return tensor_name.replace("model.visual", "vision_tower", 1)
+    if tensor_name == "lm_head.weight" or tensor_name.startswith("lm_head."):
+        return "language_model." + tensor_name
+    return tensor_name
+
+
+def _prepare_vision_passthrough_tensor(tensor_name: str, tensor: np.ndarray) -> np.ndarray:
+    """Prepare VL tensors for MLX layout while keeping them fp16 passthrough."""
+    out = tensor
+    if (
+        tensor_name.endswith("patch_embed.proj.weight")
+        and getattr(out, "ndim", None) == 5
+        and out.shape[1] in (1, 3)
+        and out.shape[-1] not in (1, 3)
+    ):
+        out = np.ascontiguousarray(np.transpose(out, (0, 2, 3, 4, 1)))
+    elif tensor_name.endswith("patch_embed.proj.weight") and getattr(out, "ndim", None) == 4:
+        out = np.ascontiguousarray(np.transpose(out, (0, 2, 3, 1)))
+    if getattr(out, "dtype", None) != np.float16:
+        out = out.astype(np.float16)
+    return out
+
+
+def _configured_mtp_layers_from_config(config: dict) -> int:
+    """Read MTP layer count from top-level or nested text_config keys."""
+    text_cfg = config.get("text_config", {}) if isinstance(config, dict) else {}
+    candidates = (
+        config.get("num_nextn_predict_layers"),
+        config.get("mtp_num_hidden_layers"),
+        text_cfg.get("num_nextn_predict_layers"),
+        text_cfg.get("mtp_num_hidden_layers"),
+    )
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _build_mtp_runtime_metadata(config: dict, tensor_names: set[str]) -> dict:
+    """Build explicit runtime metadata for MTP-capable bundles.
+
+    The current directive is to keep and enable MTP metadata when source MTP
+    tensors exist. Runtimes that cannot speculate yet can still run plain
+    autoregressive decode, but converters must not zero the fields.
+    """
+    mtp_layers = _configured_mtp_layers_from_config(config)
+    mtp_tensor_count = sum(1 for name in tensor_names if _is_mtp_tensor_name(name))
+    if mtp_layers == 0 and mtp_tensor_count == 0:
+        return {}
+
+    bundle_has_mtp = mtp_tensor_count > 0
+    mtp_mode = "preserved_enabled" if bundle_has_mtp else "metadata_only_missing_weights"
+    return {
+        "runtime": {
+            "bundle_has_mtp": bundle_has_mtp,
+            "mtp_layers": mtp_layers,
+            "mtp_mode": mtp_mode,
+        },
+        "mtp": {
+            "kept": bundle_has_mtp,
+            "enabled": bundle_has_mtp,
+            "num_layers": mtp_layers,
+            "tensor_count": mtp_tensor_count,
+        },
+        "bundle_has_mtp": bundle_has_mtp,
+        "mtp_layers": mtp_layers,
+    }
+
+
+def _indexed_shard_file_bytes(model_dir: Path) -> int:
+    """Return the byte size of all shards referenced by the v2 index."""
+    index_path = model_dir / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    shard_names = sorted(set(index.get("weight_map", {}).values()))
+    missing = [name for name in shard_names if not (model_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"indexed shard(s) missing: {', '.join(missing[:5])}"
+            f"{'...' if len(missing) > 5 else ''}"
+        )
+    return sum((model_dir / name).stat().st_size for name in shard_names)
+
+
+def _write_json_durable(path: Path, data: dict) -> None:
+    """Write a JSON file with a newline and fsync for model-dir metadata."""
+    payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(payload)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+
+
+def _patch_runtime_size_metadata(model_dir: Path, total_weight_bytes: int) -> None:
+    """Keep index and jang_config runtime sizes aligned with real shard bytes."""
+    index_path = model_dir / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index.setdefault("metadata", {})["total_size"] = total_weight_bytes
+    _write_json_durable(index_path, index)
+
+    jang_config_path = model_dir / "jang_config.json"
+    jang_config = json.loads(jang_config_path.read_text(encoding="utf-8"))
+    runtime = jang_config.setdefault("runtime", {})
+    runtime["total_weight_bytes"] = total_weight_bytes
+    runtime["total_weight_gb"] = round(total_weight_bytes / (1024 ** 3), 2)
+    _write_json_durable(jang_config_path, jang_config)
+
+
 def _forced_passthrough_bits(tensor_name: str) -> int | None:
     """Return the storage bit width for tensors that must not be quantized."""
     return _shared_forced_passthrough_bits(tensor_name)
@@ -345,9 +483,12 @@ def convert_model(
         all_importance = []
         all_tensor_names_for_alloc = []
 
+    source_tensor_names: set[str] = set()
     for sf_path in weight_files:
         with safe_open(str(sf_path), framework="numpy") as f:
             for tensor_name in f.keys():
+                if not tensor_name.endswith("_scale_inv"):
+                    source_tensor_names.add(tensor_name)
                 if any(skip in tensor_name for skip in skip_patterns):
                     continue
                 if tensor_name.endswith(".bias"):
@@ -365,7 +506,7 @@ def convert_model(
                     continue
                 if "lm_head" in tensor_name and _tie_embeddings:
                     continue
-                if ".visual." in tensor_name or "vision_tower" in tensor_name or "vision_model" in tensor_name or "vision_encoder" in tensor_name or "embed_vision" in tensor_name:
+                if _is_vision_tensor_name(tensor_name):
                     continue
 
                 shape = f.get_slice(tensor_name).get_shape()
@@ -550,10 +691,9 @@ def convert_model(
                 except TypeError:
                     w = _load_bf16_tensor(sf_path, tensor_name, shape)
                 w_out = w.astype(np.float16) if w.dtype != np.float16 else w
-                # Transpose 4D conv weights: PyTorch OIHW → MLX OHWI
-                if len(w_out.shape) == 4:
-                    w_out = np.transpose(w_out, (0, 2, 3, 1))
-                passthrough[tensor_name] = w_out
+                passthrough[_sanitize_output_tensor_name(tensor_name)] = (
+                    _prepare_vision_passthrough_tensor(tensor_name, w_out)
+                )
             continue
 
         with safe_open(str(sf_path), framework="numpy") as f:
@@ -815,7 +955,7 @@ def convert_model(
             _metal_cache_clear_error = _e
 
         # --- Store with MLX-ready names and shapes ---
-        base_name = tensor_name
+        base_name = _sanitize_output_tensor_name(tensor_name)
         if base_name.endswith(".weight"):
             base_name = base_name[:-7]
 
@@ -953,17 +1093,16 @@ def convert_model(
                 # Skip importance tensors (calibration-only)
                 if tensor_name.endswith(".importance"):
                     continue
-                if tensor_name in passthrough:
+                out_name = _sanitize_output_tensor_name(tensor_name)
+                if out_name in passthrough:
                     continue
-                base = tensor_name.replace(".weight", "")
+                base = out_name.replace(".weight", "")
                 if base in quantized_bases:
                     continue
 
                 is_norm = ("norm" in tensor_name.lower())
                 is_bias = tensor_name.endswith(".bias")
-                is_vision = (".visual." in tensor_name or "vision_tower" in tensor_name
-                             or "vision_model" in tensor_name or "vision_encoder" in tensor_name
-                             or "embed_vision" in tensor_name)
+                is_vision = _is_vision_tensor_name(tensor_name)
                 shape = f.get_slice(tensor_name).get_shape()
                 is_small = len(shape) == 1
                 n_el = 1
@@ -987,11 +1126,10 @@ def convert_model(
                         elif tensor.dtype != np.float16:
                             tensor = tensor.astype(np.float16)
 
-                        # Transpose 4D conv weights: PyTorch OIHW → MLX OHWI
-                        if len(tensor.shape) == 4:
-                            tensor = np.transpose(tensor, (0, 2, 3, 1))
+                        if is_vision:
+                            tensor = _prepare_vision_passthrough_tensor(out_name, tensor)
 
-                    passthrough[tensor_name] = tensor
+                    passthrough[out_name] = tensor
 
     print(f"  Found {len(passthrough)} non-quantized tensors (norms, biases)")
 
@@ -1043,10 +1181,11 @@ def convert_model(
         "architecture": {
             "type": arch_config.arch_type.value,
             "attention": arch_config.attention_type.value,
-            # has_vision is true only if vision weights are preserved as float
-            # (patch_embed skip in converter). If vision was quantized, VLM won't work.
+            # has_vision is true only if vision weights are preserved as float.
+            # If vision was quantized, VLM won't work.
             "has_vision": arch_config.has_vision_encoder and any(
-                k for k in v2_tensors if "patch_embed" in k and v2_tensors[k].dtype != np.uint32
+                k for k in v2_tensors
+                if "patch_embed" in k and v2_tensors[k].dtype != np.uint32
             ) if arch_config.has_vision_encoder else False,
             "has_ssm": arch_config.has_ssm_layers,
             "has_moe": arch_config.has_moe_layers,
@@ -1056,6 +1195,12 @@ def convert_model(
             "total_weight_gb": round(total_weight_bytes / (1024 ** 3), 2),
         },
     }
+    _mtp_meta = _build_mtp_runtime_metadata(model_config, source_tensor_names)
+    if _mtp_meta:
+        jang_config["runtime"].update(_mtp_meta["runtime"])
+        jang_config["mtp"] = _mtp_meta["mtp"]
+        jang_config["bundle_has_mtp"] = _mtp_meta["bundle_has_mtp"]
+        jang_config["mtp_layers"] = _mtp_meta["mtp_layers"]
 
     # Stamp Tier-1 capabilities (reasoning/tool parser, cache type, modality)
     # so vmlx CapabilityDetector picks the right parsers without falling back
@@ -1316,6 +1461,9 @@ def convert_model(
         importance_data=importance_data,
         preflushed_map=_preflushed_map,
     )
+
+    total_weight_bytes = _indexed_shard_file_bytes(output_path)
+    _patch_runtime_size_metadata(output_path, total_weight_bytes)
 
     # Validate the final jang_config — catch schema drift / typos / missing keys.
     from .capabilities import verify_directory
