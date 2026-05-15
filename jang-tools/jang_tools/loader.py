@@ -177,6 +177,149 @@ def _is_vlm_config(model_path: Path) -> bool:
 # ─── v2 loader (instant) ────────────────────────────────────────────
 
 
+def _strip_runtime_ignored_weights(weights: dict) -> dict:
+    """Drop preserved-sidecar tensors that current MLX decoders do not consume."""
+    return {
+        k: v
+        for k, v in weights.items()
+        if not k.endswith(".importance") and not k.startswith("mtp.")
+    }
+
+
+def _first_safetensors_metadata(path: Path) -> dict:
+    weight_files = _get_v2_weight_files(path)
+    if not weight_files:
+        return {}
+    try:
+        import safetensors
+    except ImportError:
+        return {}
+    try:
+        with safetensors.safe_open(str(weight_files[0]), framework="np") as f:
+            return dict(f.metadata() or {})
+    except (OSError, RuntimeError, ValueError):
+        return {}
+
+
+def _has_indexed_mtp_weights(path: Path) -> bool:
+    index_path = path / "model.safetensors.index.json"
+    if not index_path.exists():
+        return False
+    try:
+        index = json.loads(index_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return any(name.startswith("mtp.") for name in index.get("weight_map", {}))
+
+
+def _load_jang_v2_vlm_native_mlx(path: Path, jang_cfg: dict):
+    """Load native MLX VLM weights while filtering preserved MTP tensors.
+
+    Preserved MTP tensors are part of the bundle contract, but current mlx-vlm
+    model classes do not expose MTP modules. This mirrors mlx_vlm.load_model for
+    native `format=mlx` shards and removes only the tensors that are not part of
+    today's autoregressive runtime surface.
+    """
+    import mlx.nn as nn
+    from mlx_vlm.utils import (
+        get_model_and_args,
+        load_config as vlm_load_config,
+        load_image_processor,
+        load_processor,
+        sanitize_weights,
+        skip_multimodal_module,
+        update_module_configs,
+    )
+
+    start = time.perf_counter()
+    config = vlm_load_config(path)
+    weight_files = _get_v2_weight_files(path)
+    if not weight_files:
+        raise FileNotFoundError(f"No safetensors weights found in {path}")
+
+    weights = {}
+    for weight_file in weight_files:
+        weights.update(mx.load(str(weight_file)))
+    weights = _strip_runtime_ignored_weights(weights)
+
+    metadata = _first_safetensors_metadata(path)
+    is_mlx_format = metadata.get("format") == "mlx"
+
+    model_class, _ = get_model_and_args(config=config)
+    config.setdefault("text_config", config.pop("llm_config", {}))
+    config.setdefault("vision_config", {})
+    config.setdefault("audio_config", {})
+
+    has_quantization = "quantization" in config
+    model_config = model_class.ModelConfig.from_dict(config)
+    modules = ["text", "vision", "perceiver", "projector", "audio"]
+    model_config = update_module_configs(model_config, model_class, config, modules)
+    model = model_class.Model(model_config)
+
+    if not is_mlx_format:
+        weights = sanitize_weights(model, weights)
+        if hasattr(model_class, "VisionModel"):
+            weights = sanitize_weights(
+                model_class.VisionModel, weights, model_config.vision_config
+            )
+        if hasattr(model_class, "LanguageModel"):
+            weights = sanitize_weights(
+                model_class.LanguageModel, weights, model_config.text_config
+            )
+        if hasattr(model_class, "AudioModel"):
+            weights = sanitize_weights(
+                model_class.AudioModel, weights, model_config.audio_config
+            )
+
+    if has_quantization:
+        for quantization_key in ("quantization", "quantization_config"):
+            quantization_value = getattr(model_config, quantization_key, None)
+            if quantization_value is not None:
+                config[quantization_key] = quantization_value
+
+    quantization = config.get("quantization")
+    if quantization is not None:
+        skip_vision = config.get("vision_config", {}).get("skip_vision", False)
+
+        def get_class_predicate(p, m):
+            if skip_multimodal_module(p) and skip_vision:
+                return False
+            if p in config["quantization"]:
+                return config["quantization"][p]
+            if not hasattr(m, "to_quantized"):
+                return False
+            if hasattr(m, "weight") and m.weight.size % 64 != 0:
+                return False
+            return f"{p}.scales" in weights
+
+        nn.quantize(
+            model,
+            group_size=quantization["group_size"],
+            bits=quantization["bits"],
+            mode=quantization.get("mode", "affine"),
+            class_predicate=get_class_predicate,
+        )
+
+    model.load_weights(list(weights.items()))
+    _fix_quantized_bits(model, {})
+    mx.eval(model.parameters())
+    model.eval()
+
+    elapsed = time.perf_counter() - start
+    logger.info(f"JANG native MLX VLM loaded in {elapsed:.1f}s")
+
+    image_processor = load_image_processor(path)
+    eos_token_id = getattr(model.config, "eos_token_id", None)
+    try:
+        processor = load_processor(path, True, eos_token_ids=eos_token_id)
+    except (ImportError, ValueError, OSError, KeyError, TypeError):
+        processor = _build_vlm_processor(path, eos_token_id)
+    if image_processor is not None:
+        processor.image_processor = image_processor
+
+    return model, processor
+
+
 def _load_jang_v2(path: Path, jang_cfg: dict):
     """
     Load a JANG v2 model — instant via mx.load() mmap.
@@ -511,6 +654,19 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
     default_bits = _jang_default_bits(jang_cfg, [4])
 
     config = vlm_load_config(path)
+    quant_mode = (
+        (config.get("quantization") or {}).get("mode")
+        or (jang_cfg.get("quantization") or {}).get("mode")
+        or "affine"
+    )
+    if (
+        quant_mode in {"mxfp4", "mxfp8", "nvfp4"}
+        and jang_cfg.get("runtime", {}).get("bundle_has_mtp")
+        and _has_indexed_mtp_weights(path)
+        and _first_safetensors_metadata(path).get("format") == "mlx"
+    ):
+        return _load_jang_v2_vlm_native_mlx(path, jang_cfg)
+
     model_class, _ = get_model_and_args(config=config)
 
     config.setdefault("text_config", {})
@@ -544,7 +700,7 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
             return result
         return True
 
-    nn.quantize(model, group_size=block_size, bits=default_bits,
+    nn.quantize(model, group_size=block_size, bits=default_bits, mode=quant_mode,
                 class_predicate=get_class_predicate)
 
     # Load weights via mmap, stripping .importance keys (calibration-only)
@@ -1680,34 +1836,39 @@ def _fix_quantized_bits(model, weights):
         # reconfigure the module for mxfp4 (if bits=4) or mxfp8 (if bits=8).
         try:
             if module.scales.dtype == mx.uint8:
-                # biases field is absent or zero-size for mxfp4/mxfp8
-                if not hasattr(module, 'biases') or module.biases is None or (
-                    hasattr(module.biases, 'size') and module.biases.size == 0
-                ):
-                    # Infer bits from weight/scale shape ratio
-                    w_cols = module.weight.shape[-1]
-                    s_cols = module.scales.shape[-1]
-                    # mxfp4: weight is packed 8x per uint32 → in_dim = w_cols * 8
-                    # mxfp8: weight is packed 4x per uint32 → in_dim = w_cols * 4
-                    # scale block_size = 32 for both mxfp4 and mxfp8
-                    # in_dim = s_cols * 32
-                    in_dim_mxfp4 = w_cols * 8
-                    in_dim_mxfp8 = w_cols * 4
-                    if s_cols * 32 == in_dim_mxfp4:
-                        module.mode = 'mxfp4'
-                        module.bits = 4
-                        module.group_size = 32
-                    elif s_cols * 32 == in_dim_mxfp8:
-                        module.mode = 'mxfp8'
-                        module.bits = 8
-                        module.group_size = 32
-                    # Ensure biases attr removed so quantized_matmul skips it
-                    if hasattr(module, 'biases'):
-                        try:
-                            del module.biases
-                        except Exception:
-                            module.biases = None
-                    continue  # done with this module
+                # Infer bits from weight/scale shape ratio. Native MXFP4/MXFP8
+                # bundles store UE8M0 scales as uint8 and have no real affine
+                # biases on disk. However nn.quantize() initializes QuantizedLinear
+                # modules with a random affine `biases` placeholder before weights
+                # are loaded. Treat uint8 scales as authoritative and remove that
+                # placeholder, otherwise generation dispatches the affine uint8
+                # kernel instead of the MXFP kernel.
+                w_cols = module.weight.shape[-1]
+                s_cols = module.scales.shape[-1]
+                # mxfp4: weight is packed 8x per uint32 → in_dim = w_cols * 8
+                # mxfp8: weight is packed 4x per uint32 → in_dim = w_cols * 4
+                # scale block_size = 32 for both mxfp4 and mxfp8
+                # in_dim = s_cols * 32
+                in_dim_mxfp4 = w_cols * 8
+                in_dim_mxfp8 = w_cols * 4
+                if s_cols * 32 == in_dim_mxfp4:
+                    module.mode = 'mxfp4'
+                    module.bits = 4
+                    module.group_size = 32
+                elif s_cols * 32 == in_dim_mxfp8:
+                    module.mode = 'mxfp8'
+                    module.bits = 8
+                    module.group_size = 32
+                else:
+                    continue
+                # Ensure affine biases placeholder is removed so
+                # quantized_matmul skips affine dequantization.
+                if hasattr(module, 'biases'):
+                    try:
+                        del module.biases
+                    except Exception:
+                        module.biases = None
+                continue  # done with this module
         except Exception as exc:
             logger.debug("QuantizedLinear metadata fast-path skipped for %s: %s", name, exc)
         try:

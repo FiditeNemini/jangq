@@ -66,6 +66,33 @@ Expected converted-bundle signal:
 - `has_preprocessor_config=true`;
 - `has_video_preprocessor_config=true`.
 
+## Qwen3.6 MXFP4 MTP Patch
+
+For the local MXFP4 sibling artifact:
+
+```sh
+cd /Users/eric/jang/jang-tools
+uv run python examples/mtp/patch_qwen36_mxfp4_mtp.py --replace
+```
+
+This copies the known-good `Qwen3.6-27B-MXFP4-CRACK` bundle, appends native
+MTP tensors from `/Users/eric/models/Sources/Qwen/Qwen3.6-27B`, quantizes 2D
+MTP matmuls with MLX `mode="mxfp4"`, and stamps
+`runtime.mtp_mode=preserved_enabled`.
+
+Expected local output:
+
+- `/Users/eric/models/dealign.ai/Qwen3.6-27B-MXFP4-MTP`;
+- `runtime.total_weight_gb=14.38`;
+- `mtp_tensor_count=23`;
+- `visual_tensor_count=333`;
+- text smoke output: `4`;
+- image smoke output for a red square: `red`.
+
+Current autoregressive runtime filters `mtp.*` tensors while loading because
+today's `mlx-vlm` Qwen3.6 class does not expose MTP modules. The tensors remain
+in the bundle for an MTP-aware speculative runtime.
+
 ## Estimate Hy3 Fit
 
 ```sh
