@@ -11,6 +11,12 @@ CONVERTER = (
     / "dsv4"
     / "convert_dsv4_jangtq.py"
 )
+AFFINE_CONVERTER = (
+    Path(__file__).resolve().parents[1]
+    / "jang_tools"
+    / "dsv4"
+    / "convert_dsv4_jang.py"
+)
 
 
 def test_dsv4_converter_preserves_f32_control_tensors():
@@ -247,3 +253,141 @@ def test_dsv4_docs_separate_std_baseline_from_runtime_candidate():
     assert "uniform `std` JANGTQ2" in readme
     assert "not a production-cleared DSV4 runtime candidate" in readme
     assert "DSV4_POOL_QUANT` | `0`" in examples
+
+
+def test_dsv4_affine_converter_separates_routed_and_bookend_group_sizes():
+    """Affine JANG DSV4 must use 128-group routed experts without touching bookends."""
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jang")
+
+    assert conv.classify(
+        "layers.2.ffn.experts.0.w1.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+    ) == (2, "affine", 128)
+    assert conv.classify(
+        "mtp.0.ffn.experts.255.w3.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+    ) == (2, "affine", 128)
+    assert conv.classify(
+        "layers.2.attn.wq_b.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+    ) == (8, "affine", 64)
+    assert conv.classify(
+        "layers.2.ffn.gate.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+    ) == (16, "passthrough", 0)
+
+
+def test_dsv4_affine_converter_supports_selected_4bit_routed_layers():
+    """Pure JANG selected-layer compromise keeps MTP/default routed at 2-bit."""
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jang")
+    routed_layer_bits = {23: 4, 25: 4, 28: 4, 34: 4, 36: 4}
+
+    for proj in ("w1", "w2", "w3"):
+        assert conv.classify(
+            f"layers.23.ffn.experts.7.{proj}.weight",
+            profile_bits=2,
+            bookend_bits=8,
+            routed_group_size=128,
+            bookend_group_size=64,
+            routed_layer_bits=routed_layer_bits,
+        ) == (4, "affine", 128)
+
+    assert conv.classify(
+        "layers.24.ffn.experts.7.w2.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_layer_bits=routed_layer_bits,
+    ) == (2, "affine", 128)
+    assert conv.classify(
+        "mtp.0.ffn.experts.7.w2.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_layer_bits=routed_layer_bits,
+    ) == (2, "affine", 128)
+
+
+def test_dsv4_affine_converter_supports_jang_k_down_projection_bits():
+    """Pure JANG_K can lift only DSV4 w2/down routed projections."""
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jang")
+    routed_projection_bits = conv.parse_routed_projection_bits("down=4")
+
+    assert routed_projection_bits == {"w2": 4}
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w1.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_projection_bits=routed_projection_bits,
+    ) == (2, "affine", 128)
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w2.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_projection_bits=routed_projection_bits,
+    ) == (4, "affine", 128)
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w3.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_projection_bits=routed_projection_bits,
+    ) == (2, "affine", 128)
+    assert conv.classify(
+        "mtp.0.ffn.experts.3.w2.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_projection_bits=routed_projection_bits,
+    ) == (4, "affine", 128)
+    assert conv.classify(
+        "layers.23.ffn.experts.3.w1.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_layer_bits={23: 4},
+        routed_projection_bits=routed_projection_bits,
+    ) == (4, "affine", 128)
+
+
+def test_dsv4_affine_converter_records_mtp_chat_cache_and_group_contracts():
+    """The affine bundle must be self-describing for later MTP/cache activation."""
+    src = AFFINE_CONVERTER.read_text()
+
+    assert "routed_group_size" in src
+    assert "bookend_group_size" in src
+    assert "quant_overrides" in src
+    assert "group_size=gsz" in src
+    assert '"native_cache_schema": "deepseek_v4_v7"' in src
+    assert '"generic_turboquant_kv": False' in src
+    assert '"sliding_window": src_cfg.get("sliding_window")' in src
+    assert '"compress_ratios": src_cfg.get("compress_ratios")' in src
+    assert '"model_family": "deepseek_v4"' in src
+    assert '"chat_template_source": "tokenizer_config"' in src
+    assert "DSV4_CHAT_TEMPLATE_JINJA" in src
+    assert '"runtime_self_spec_enabled": False' in src
+    assert '"mtp_mode": "preserved_disabled"' in src
+    assert '"rope_parameters"' in src
+    assert "routed_layer_bits" in src
+    assert "--routed-4bit-layers" in src
