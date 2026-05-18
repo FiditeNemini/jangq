@@ -48,6 +48,23 @@ def is_routed_expert_weight(name: str) -> bool:
     return re.search(r"ffn\.experts\.\d+\.(w1|w2|w3)\.weight$", name) is not None
 
 
+def is_token_bookend_weight(name: str) -> bool:
+    """Return true for input/output token projection weights."""
+    return name in {"embed.weight", "head.weight"} or name.endswith(
+        (
+            ".embed_tokens.weight",
+            ".tok_embeddings.weight",
+            ".lm_head.weight",
+            ".output.weight",
+        )
+    )
+
+
+def is_attention_weight(name: str) -> bool:
+    """Return true for DSV4 attention/compressor/indexer matrix weights."""
+    return re.match(r"^(layers\.\d+|mtp\.\d+)\.attn\..*\.weight$", name) is not None
+
+
 def parse_routed_4bit_layers(value: str | None) -> dict[int, int]:
     """Parse a comma/space-separated main-layer list into an affine bit plan."""
     if not value:
@@ -61,6 +78,11 @@ def parse_routed_4bit_layers(value: str | None) -> dict[int, int]:
             raise ValueError(f"invalid negative routed layer index: {layer}")
         out[layer] = 4
     return dict(sorted(out.items()))
+
+
+def parse_routed_down_4bit_layers(value: str | None) -> dict[int, int]:
+    """Parse main-layer list whose routed w2/down projections should be 4-bit."""
+    return parse_routed_4bit_layers(value)
 
 
 def parse_routed_projection_bits(value: str | None) -> dict[str, int]:
@@ -108,19 +130,164 @@ def parse_routed_projection_bits(value: str | None) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
+_PROJECTION_ALIASES = {
+    "w1": "w1",
+    "gate": "w1",
+    "gate_proj": "w1",
+    "w2": "w2",
+    "down": "w2",
+    "down_proj": "w2",
+    "w3": "w3",
+    "up": "w3",
+    "up_proj": "w3",
+}
+
+
+def _canonical_projection(raw: str) -> str:
+    proj = _PROJECTION_ALIASES.get(raw.strip().lower())
+    if proj is None:
+        raise ValueError(f"invalid routed projection {raw!r}")
+    return proj
+
+
+def _merge_projection_layer_bits(
+    left: dict[str, dict[int, int]],
+    right: dict[str, dict[int, int]],
+) -> dict[str, dict[int, int]]:
+    out: dict[str, dict[int, int]] = {
+        proj: dict(layer_bits) for proj, layer_bits in left.items()
+    }
+    for proj, layer_bits in right.items():
+        out.setdefault(proj, {}).update(layer_bits)
+    return {
+        proj: dict(sorted(layer_bits.items()))
+        for proj, layer_bits in sorted(out.items())
+        if layer_bits
+    }
+
+
+def parse_routed_projection_layer_bits(
+    value: str | None,
+) -> dict[str, dict[int, int]]:
+    """Parse selected main-layer projection bits.
+
+    Accepted entries are comma/space-separated forms like:
+
+      ``down:7=3,down:8=3,gate:12=3``
+
+    Projection aliases match ``--routed-projection-bits``. Only main
+    ``layers.N`` routed experts are affected; preserved MTP routed experts
+    stay at the global projection/default bit plan.
+    """
+    if not value:
+        return {}
+    out: dict[str, dict[int, int]] = {}
+    for part in re.split(r"[,\s]+", value.strip()):
+        if not part:
+            continue
+        match = re.fullmatch(r"([A-Za-z0-9_]+):(\d+)=(\d+)", part)
+        if not match:
+            raise ValueError(
+                f"invalid routed projection layer bit entry {part!r}; "
+                "use down:7=3"
+            )
+        proj = _canonical_projection(match.group(1))
+        layer = int(match.group(2))
+        bits = int(match.group(3))
+        if bits not in (2, 3, 4):
+            raise ValueError(f"invalid routed projection bits for {proj}: {bits}")
+        out.setdefault(proj, {})[layer] = bits
+    return {
+        proj: dict(sorted(layer_bits.items()))
+        for proj, layer_bits in sorted(out.items())
+    }
+
+
+def parse_routed_projection_layer_bits_file(
+    path: Path | None,
+) -> dict[str, dict[int, int]]:
+    """Read selected projection/layer bit plan JSON.
+
+    Supported JSON shapes:
+
+      ``{"w2": {"7": 3, "8": 3}, "gate": {"12": 3}}``
+      ``{"routed_projection_layer_bits": {...}}``
+    """
+    if path is None:
+        return {}
+    raw = json.loads(path.read_text())
+    data = raw.get("routed_projection_layer_bits", raw)
+    out: dict[str, dict[int, int]] = {}
+    for raw_proj, raw_layer_bits in data.items():
+        proj = _canonical_projection(str(raw_proj))
+        if not isinstance(raw_layer_bits, dict):
+            raise ValueError(f"layer bit plan for {raw_proj!r} must be an object")
+        for raw_layer, raw_bits in raw_layer_bits.items():
+            layer = int(raw_layer)
+            bits = int(raw_bits)
+            if layer < 0:
+                raise ValueError(f"invalid negative layer index: {layer}")
+            if bits not in (2, 3, 4):
+                raise ValueError(f"invalid routed projection bits for {proj}: {bits}")
+            out.setdefault(proj, {})[layer] = bits
+    return {
+        proj: dict(sorted(layer_bits.items()))
+        for proj, layer_bits in sorted(out.items())
+    }
+
+
+def parse_routed_projection_group_sizes(value: str | None) -> dict[str, int]:
+    """Parse projection-specific affine group sizes such as ``gate=32,down=64``."""
+    if not value:
+        return {}
+    aliases = {
+        "w1": "w1",
+        "gate": "w1",
+        "gate_proj": "w1",
+        "w2": "w2",
+        "down": "w2",
+        "down_proj": "w2",
+        "w3": "w3",
+        "up": "w3",
+        "up_proj": "w3",
+    }
+    out: dict[str, int] = {}
+    for part in re.split(r"[,\s]+", value.strip()):
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(
+                f"invalid routed projection group-size entry {part!r}; use gate=32"
+            )
+        raw_proj, raw_gs = part.split("=", 1)
+        proj = aliases.get(raw_proj.strip().lower())
+        if proj is None:
+            raise ValueError(f"invalid routed projection {raw_proj!r}")
+        group_size = int(raw_gs)
+        if group_size not in (32, 64, 128):
+            raise ValueError(
+                f"invalid routed projection group size for {proj}: {group_size}"
+            )
+        out[proj] = group_size
+    return dict(sorted(out.items()))
+
+
 def routed_bits_for_name(
     name: str,
     profile_bits: int,
     routed_layer_bits: dict[int, int] | None = None,
     routed_projection_bits: dict[str, int] | None = None,
+    routed_down_layer_bits: dict[int, int] | None = None,
+    routed_projection_layer_bits: dict[str, dict[int, int]] | None = None,
 ) -> int:
     """Return routed expert bits for source tensor name.
 
     The selected-layer compromise applies only to main `layers.N` routed
-    experts and wins over projection defaults. Projection defaults implement
-    pure JANG_K style plans such as `w1/w2/w3 = 2/4/2`; they apply to both
-    main and preserved MTP routed experts because they describe the projection
-    contract, not a single main-layer exception.
+    experts and wins over projection defaults. Down-layer plans are narrower:
+    they lift only `w2` / down projections for selected main layers. Projection
+    defaults implement pure JANG_K style plans such as `w1/w2/w3 = 2/4/2`;
+    they apply to both main and preserved MTP routed experts because they
+    describe the projection contract, not a single main-layer exception.
     """
     m = re.match(r"^(layers\.(\d+)|mtp\.\d+)\.ffn\.experts\.\d+\.(w[123])\.weight$", name)
     if not m:
@@ -129,9 +296,31 @@ def routed_bits_for_name(
         layer_bits = routed_layer_bits.get(int(m.group(2)))
         if layer_bits is not None:
             return int(layer_bits)
+    if m.group(2) is not None and routed_projection_layer_bits:
+        layer_bits = routed_projection_layer_bits.get(m.group(3))
+        if layer_bits is not None:
+            bits = layer_bits.get(int(m.group(2)))
+            if bits is not None:
+                return int(bits)
+    if m.group(2) is not None and m.group(3) == "w2" and routed_down_layer_bits:
+        layer_bits = routed_down_layer_bits.get(int(m.group(2)))
+        if layer_bits is not None:
+            return int(layer_bits)
     if routed_projection_bits:
         return int(routed_projection_bits.get(m.group(3), profile_bits))
     return profile_bits
+
+
+def routed_group_size_for_name(
+    name: str,
+    routed_group_size: int,
+    routed_projection_group_sizes: dict[str, int] | None = None,
+) -> int:
+    """Return routed expert affine group size for source tensor name."""
+    m = re.match(r"^(layers\.(\d+)|mtp\.\d+)\.ffn\.experts\.\d+\.(w[123])\.weight$", name)
+    if not m or not routed_projection_group_sizes:
+        return routed_group_size
+    return int(routed_projection_group_sizes.get(m.group(3), routed_group_size))
 
 
 def compatible_group_size(in_dim: int, requested: int) -> int:
@@ -172,8 +361,15 @@ def classify(
     bookend_bits: int = 8,
     routed_group_size: int = 64,
     bookend_group_size: int = 64,
+    attention_bits: int | None = None,
+    attention_group_size: int | None = None,
+    token_bookend_bits: int | None = None,
+    token_bookend_group_size: int | None = None,
     routed_layer_bits: dict[int, int] | None = None,
     routed_projection_bits: dict[str, int] | None = None,
+    routed_down_layer_bits: dict[int, int] | None = None,
+    routed_projection_layer_bits: dict[str, dict[int, int]] | None = None,
+    routed_projection_group_sizes: dict[str, int] | None = None,
 ) -> tuple[int, str, int]:
     """Same rules as convert_dsv4_jangtq.classify but all quantizable
     weights go through `affine` (mx.quantize). bookend_bits controls
@@ -188,9 +384,26 @@ def classify(
         return 16, "passthrough", 0
     # Routed expert → affine at profile_bits (2, 3, or 4)
     if is_routed_expert_weight(name):
-        return routed_bits_for_name(
-            name, profile_bits, routed_layer_bits, routed_projection_bits
-        ), "affine", routed_group_size
+        bits = routed_bits_for_name(
+            name,
+            profile_bits,
+            routed_layer_bits,
+            routed_projection_bits,
+            routed_down_layer_bits,
+            routed_projection_layer_bits,
+        )
+        group_size = routed_group_size_for_name(
+            name,
+            routed_group_size,
+            routed_projection_group_sizes,
+        )
+        return bits, "affine", group_size
+    if token_bookend_bits is not None and is_token_bookend_weight(name):
+        return token_bookend_bits, "affine", (
+            token_bookend_group_size or bookend_group_size
+        )
+    if attention_bits is not None and is_attention_weight(name):
+        return attention_bits, "affine", attention_group_size or bookend_group_size
     # Everything else (incl. MTP matmuls) → bookend_bits affine
     if name.endswith(".weight"):
         return bookend_bits, "affine", bookend_group_size
@@ -201,12 +414,28 @@ def convert(src: Path, dst: Path, profile_bits: int,
             bookend_bits: int = 8,
             routed_group_size: int = 64,
             bookend_group_size: int = 64,
+            attention_bits: int | None = None,
+            attention_group_size: int | None = None,
             routed_layer_bits: dict[int, int] | None = None,
-            routed_projection_bits: dict[str, int] | None = None) -> None:
+            routed_projection_bits: dict[str, int] | None = None,
+            routed_down_layer_bits: dict[int, int] | None = None,
+            routed_projection_group_sizes: dict[str, int] | None = None,
+            token_bookend_bits: int | None = None,
+            token_bookend_group_size: int | None = None,
+            routed_projection_layer_bits: dict[str, dict[int, int]] | None = None,
+            drop_mtp: bool = False) -> None:
     import mlx.core as mx
 
     routed_layer_bits = dict(sorted((routed_layer_bits or {}).items()))
     routed_projection_bits = dict(sorted((routed_projection_bits or {}).items()))
+    routed_down_layer_bits = dict(sorted((routed_down_layer_bits or {}).items()))
+    routed_projection_layer_bits = {
+        proj: dict(sorted(layer_bits.items()))
+        for proj, layer_bits in sorted((routed_projection_layer_bits or {}).items())
+    }
+    routed_projection_group_sizes = dict(
+        sorted((routed_projection_group_sizes or {}).items())
+    )
     dst.mkdir(parents=True, exist_ok=True)
     idx = ShardIndex(src)
     print(f"[convert] source: {src}")
@@ -214,11 +443,38 @@ def convert(src: Path, dst: Path, profile_bits: int,
     print(f"[convert] profile: JANG_{profile_bits}L (all-affine, "
           f"routed_gs={routed_group_size}, bookend={bookend_bits}-bit/"
           f"gs={bookend_group_size})")
+    if attention_bits is not None:
+        print(
+            "[convert] attention override: "
+            f"{attention_bits}-bit/gs={attention_group_size or bookend_group_size}"
+        )
+    if token_bookend_bits is not None:
+        print("[convert] token bookend override: "
+              f"{token_bookend_bits}-bit/gs="
+              f"{token_bookend_group_size or bookend_group_size}")
     if routed_layer_bits:
         print(f"[convert] routed layer bit plan: {routed_layer_bits}")
     if routed_projection_bits:
         print(f"[convert] routed projection bit plan: {routed_projection_bits}")
+    if routed_down_layer_bits:
+        print(f"[convert] routed down-projection layer bit plan: {routed_down_layer_bits}")
+    if routed_projection_layer_bits:
+        print(
+            "[convert] routed projection/layer bit plan: "
+            f"{routed_projection_layer_bits}"
+        )
+    if routed_projection_group_sizes:
+        print(
+            "[convert] routed projection group-size plan: "
+            f"{routed_projection_group_sizes}"
+        )
+    if drop_mtp:
+        print("[convert] MTP tensors: DROP", flush=True)
     weight_keys = [k for k in idx.keys if not k.endswith(".scale")]
+    if drop_mtp:
+        before = len(weight_keys)
+        weight_keys = [k for k in weight_keys if not k.startswith("mtp.")]
+        print(f"[convert] dropped {before - len(weight_keys)} mtp.* tensors")
     print(f"[convert] {len(weight_keys)} logical tensors")
 
     MAX_SHARD_BYTES = 1_000_000_000
@@ -260,8 +516,15 @@ def convert(src: Path, dst: Path, profile_bits: int,
             bookend_bits,
             routed_group_size,
             bookend_group_size,
+            attention_bits,
+            attention_group_size,
+            token_bookend_bits,
+            token_bookend_group_size,
             routed_layer_bits,
             routed_projection_bits,
+            routed_down_layer_bits,
+            routed_projection_layer_bits,
+            routed_projection_group_sizes,
         )
         if method == "passthrough":
             arr = read_passthrough(idx, name)
@@ -329,8 +592,22 @@ def convert(src: Path, dst: Path, profile_bits: int,
         "bookend_bits": bookend_bits,
         "bookend_group_size": bookend_group_size,
     }
+    if token_bookend_bits is not None:
+        quant_cfg["token_bookend_bits"] = token_bookend_bits
+        quant_cfg["token_bookend_group_size"] = (
+            token_bookend_group_size or bookend_group_size
+        )
+    if attention_bits is not None:
+        quant_cfg["attention_bits"] = attention_bits
+        quant_cfg["attention_group_size"] = attention_group_size or bookend_group_size
     routed_expert_bit_plan = None
-    if routed_layer_bits or routed_projection_bits:
+    if (
+        routed_layer_bits
+        or routed_projection_bits
+        or routed_down_layer_bits
+        or routed_projection_layer_bits
+        or routed_projection_group_sizes
+    ):
         routed_expert_bit_plan = {
             "default_bits": profile_bits,
             "codec": "affine",
@@ -342,6 +619,16 @@ def convert(src: Path, dst: Path, profile_bits: int,
             "mtp_routed_bits": profile_bits,
             "mtp_routed_projection_bits": {
                 str(k): int(v) for k, v in routed_projection_bits.items()
+            },
+            "routed_down_layer_bits": {
+                str(k): int(v) for k, v in routed_down_layer_bits.items()
+            },
+            "routed_projection_layer_bits": {
+                str(proj): {str(k): int(v) for k, v in layer_bits.items()}
+                for proj, layer_bits in routed_projection_layer_bits.items()
+            },
+            "routed_projection_group_sizes": {
+                str(k): int(v) for k, v in routed_projection_group_sizes.items()
             },
         }
         quant_cfg["routed_expert_bit_plan"] = routed_expert_bit_plan
@@ -363,11 +650,44 @@ def convert(src: Path, dst: Path, profile_bits: int,
             f"{proj_tags.get(k, k)}{v}" for k, v in routed_projection_bits.items()
         )
         profile_suffix += f"_P{proj_tag}"
+    if routed_down_layer_bits:
+        layers_tag = "-".join(str(k) for k in routed_down_layer_bits)
+        profile_suffix += f"_D{layers_tag}x4"
+    if routed_projection_layer_bits:
+        profile_suffix += "_ProjLayerBits"
+    if routed_projection_group_sizes:
+        proj_tags = {"w1": "G", "w2": "D", "w3": "U"}
+        gs_tag = "-".join(
+            f"{proj_tags.get(k, k)}gs{v}"
+            for k, v in routed_projection_group_sizes.items()
+        )
+        profile_suffix += f"_{gs_tag}"
     if bookend_group_size != routed_group_size:
         profile_suffix += f"_BKGS{bookend_group_size}"
     if bookend_bits != 8:
         profile_suffix += f"_bk{bookend_bits}"
-    if mtp_layers > 0:
+    if attention_bits is not None:
+        profile_suffix += (
+            f"_Attn{attention_bits}g"
+            f"{attention_group_size or bookend_group_size}"
+        )
+    if token_bookend_bits is not None:
+        profile_suffix += (
+            f"_Tok{token_bookend_bits}g"
+            f"{token_bookend_group_size or bookend_group_size}"
+        )
+    if drop_mtp:
+        profile_suffix += "_NoMTP"
+        src_cfg["num_nextn_predict_layers"] = 0
+        src_cfg["mtp_num_hidden_layers"] = None
+        src_cfg["use_mtp"] = False
+        runtime_cfg = src_cfg.setdefault("runtime", {})
+        runtime_cfg.update({
+            "bundle_has_mtp": False,
+            "mtp_layers": 0,
+            "mtp_mode": "dropped",
+        })
+    if mtp_layers > 0 and not drop_mtp:
         profile_suffix += "_MTP"
         src_cfg.setdefault("runtime", {})
         src_cfg["runtime"].update({
@@ -394,19 +714,19 @@ def convert(src: Path, dst: Path, profile_bits: int,
         },
         "affine_bits": {
             "routed_expert": profile_bits,
-            "attention": bookend_bits,
+            "attention": attention_bits or bookend_bits,
             "shared_expert": bookend_bits,
-            "embed_tokens": bookend_bits,
-            "lm_head": bookend_bits,
+            "embed_tokens": token_bookend_bits or bookend_bits,
+            "lm_head": token_bookend_bits or bookend_bits,
             "mtp_matmul": bookend_bits,
             "norms_router_hc": 16,
         },
         "affine_group_size": {
             "routed_expert": routed_group_size,
-            "attention": bookend_group_size,
+            "attention": attention_group_size or bookend_group_size,
             "shared_expert": bookend_group_size,
-            "embed_tokens": bookend_group_size,
-            "lm_head": bookend_group_size,
+            "embed_tokens": token_bookend_group_size or bookend_group_size,
+            "lm_head": token_bookend_group_size or bookend_group_size,
             "mtp_matmul": bookend_group_size,
         },
         "quantization": {
@@ -427,6 +747,18 @@ def convert(src: Path, dst: Path, profile_bits: int,
                 "codec": "affine",
                 "group_size": bookend_group_size,
             },
+            "token_bookends": {
+                "bits": token_bookend_bits or bookend_bits,
+                "codec": "affine",
+                "group_size": token_bookend_group_size or bookend_group_size,
+                "override": token_bookend_bits is not None,
+            },
+            "attention": {
+                "bits": attention_bits or bookend_bits,
+                "codec": "affine",
+                "group_size": attention_group_size or bookend_group_size,
+                "override": attention_bits is not None,
+            },
             "critical_control_tensors": "source-f32",
             "override_count": len(quant_overrides),
             "group_totals": group_totals,
@@ -439,6 +771,21 @@ def convert(src: Path, dst: Path, profile_bits: int,
             {str(k): int(v) for k, v in routed_projection_bits.items()}
             if routed_projection_bits else {}
         ),
+        "routed_down_layer_bits": (
+            {str(k): int(v) for k, v in routed_down_layer_bits.items()}
+            if routed_down_layer_bits else {}
+        ),
+        "routed_projection_layer_bits": (
+            {
+                str(proj): {str(k): int(v) for k, v in layer_bits.items()}
+                for proj, layer_bits in routed_projection_layer_bits.items()
+            }
+            if routed_projection_layer_bits else {}
+        ),
+        "routed_projection_group_sizes": (
+            {str(k): int(v) for k, v in routed_projection_group_sizes.items()}
+            if routed_projection_group_sizes else {}
+        ),
         "cache": {
             "schema": "deepseek_v4_v7",
             "components": ["swa", "csa", "hsa"],
@@ -449,10 +796,12 @@ def convert(src: Path, dst: Path, profile_bits: int,
             "mtp_activation_requires_draft_cache": True,
         },
         "mtp": {
-            "preserved": mtp_layers > 0,
+            "preserved": mtp_layers > 0 and not drop_mtp,
             "runtime_self_spec_enabled": False,
-            "mode": "preserved_disabled" if mtp_layers > 0 else "absent",
-            "num_nextn_predict_layers": mtp_layers,
+            "mode": "dropped" if drop_mtp else (
+                "preserved_disabled" if mtp_layers > 0 else "absent"
+            ),
+            "num_nextn_predict_layers": 0 if drop_mtp else mtp_layers,
             "activation_requires": (
                 "separate MTP drafter, draft cache, accept/reject verifier, "
                 "and DSV4 SWA+CSA/HSA composite-cache-safe rollback"
@@ -577,6 +926,20 @@ def main() -> int:
                          "the compact M5 affine DSV4 build.")
     ap.add_argument("--bookend-group-size", type=int, default=64, choices=(32, 64, 128),
                     help="affine group size for non-routed quantized tensors.")
+    ap.add_argument("--attention-bits", type=int, choices=(4, 6, 8),
+                    help="optional bits just for attention/compressor/indexer "
+                         "matrix weights. Leave unset to use --bookend-bits.")
+    ap.add_argument("--attention-group-size", type=int, choices=(32, 64, 128),
+                    help="optional group size just for attention/compressor/"
+                         "indexer matrix weights. Defaults to "
+                         "--bookend-group-size.")
+    ap.add_argument("--token-bookend-bits", type=int, choices=(4, 6, 8),
+                    help="optional bits just for token input/output projections "
+                         "(embed/head or embed_tokens/lm_head). Leave unset to "
+                         "use --bookend-bits for these tensors.")
+    ap.add_argument("--token-bookend-group-size", type=int, choices=(32, 64, 128),
+                    help="optional group size just for token input/output "
+                         "projections. Defaults to --bookend-group-size.")
     ap.add_argument("--routed-4bit-layers", default="",
                     help="comma/space-separated main layer indexes whose routed "
                          "experts should use 4-bit affine while the rest stay "
@@ -586,16 +949,55 @@ def main() -> int:
                     help="projection-specific routed bits such as down=4 or "
                          "2/4/2 for w1/w2/w3. Selected --routed-4bit-layers "
                          "override this for main layers.")
+    ap.add_argument("--routed-down-4bit-layers", default="",
+                    help="comma/space-separated main layer indexes whose routed "
+                         "w2/down projections should use 4-bit affine while "
+                         "w1/gate and w3/up stay at --profile bits. This does "
+                         "not affect MTP routed experts.")
+    ap.add_argument("--routed-projection-layer-bits", default="",
+                    help="comma/space-separated selected projection/layer bits "
+                         "such as down:7=3,gate:8=3. Applies only to main "
+                         "layers.N routed experts; preserved MTP routed experts "
+                         "stay at the projection/default bit plan.")
+    ap.add_argument("--routed-projection-layer-bits-file", type=Path,
+                    help="JSON file for selected projection/layer bits, either "
+                         "{'down': {'7': 3}} or "
+                         "{'routed_projection_layer_bits': {...}}.")
+    ap.add_argument("--routed-projection-group-sizes", default="",
+                    help="projection-specific routed expert affine group sizes "
+                         "such as gate=32,up=64,down=64. This is useful for "
+                         "DQ-style all-affine size experiments.")
+    ap.add_argument("--drop-mtp", action="store_true",
+                    help="drop mtp.* tensors and mark the bundle as no-MTP. "
+                         "Keep unset for preserved-disabled MTP artifacts.")
     args = ap.parse_args()
+    routed_projection_layer_bits = _merge_projection_layer_bits(
+        parse_routed_projection_layer_bits(args.routed_projection_layer_bits),
+        parse_routed_projection_layer_bits_file(args.routed_projection_layer_bits_file),
+    )
     convert(
-        args.src,
-        args.dst,
-        args.profile,
-        args.bookend_bits,
-        args.routed_group_size,
-        args.bookend_group_size,
-        parse_routed_4bit_layers(args.routed_4bit_layers),
-        parse_routed_projection_bits(args.routed_projection_bits),
+        src=args.src,
+        dst=args.dst,
+        profile_bits=args.profile,
+        bookend_bits=args.bookend_bits,
+        routed_group_size=args.routed_group_size,
+        bookend_group_size=args.bookend_group_size,
+        attention_bits=args.attention_bits,
+        attention_group_size=args.attention_group_size,
+        routed_layer_bits=parse_routed_4bit_layers(args.routed_4bit_layers),
+        routed_projection_bits=parse_routed_projection_bits(
+            args.routed_projection_bits
+        ),
+        routed_down_layer_bits=parse_routed_down_4bit_layers(
+            args.routed_down_4bit_layers
+        ),
+        routed_projection_group_sizes=parse_routed_projection_group_sizes(
+            args.routed_projection_group_sizes
+        ),
+        token_bookend_bits=args.token_bookend_bits,
+        token_bookend_group_size=args.token_bookend_group_size,
+        routed_projection_layer_bits=routed_projection_layer_bits,
+        drop_mtp=args.drop_mtp,
     )
     return 0
 

@@ -371,6 +371,251 @@ def test_dsv4_affine_converter_supports_jang_k_down_projection_bits():
     ) == (4, "affine", 128)
 
 
+def test_dsv4_affine_converter_supports_layer_scoped_down_projection_bits():
+    """Size-search artifacts can lift only selected main-layer down projections."""
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jang")
+    routed_down_layer_bits = conv.parse_routed_down_4bit_layers("7,8,11")
+
+    assert routed_down_layer_bits == {7: 4, 8: 4, 11: 4}
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w1.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_down_layer_bits=routed_down_layer_bits,
+    ) == (2, "affine", 128)
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w2.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_down_layer_bits=routed_down_layer_bits,
+    ) == (4, "affine", 128)
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w3.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_down_layer_bits=routed_down_layer_bits,
+    ) == (2, "affine", 128)
+    assert conv.classify(
+        "layers.12.ffn.experts.3.w2.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_down_layer_bits=routed_down_layer_bits,
+    ) == (2, "affine", 128)
+    assert conv.classify(
+        "mtp.0.ffn.experts.3.w2.weight",
+        profile_bits=2,
+        bookend_bits=8,
+        routed_group_size=128,
+        bookend_group_size=64,
+        routed_down_layer_bits=routed_down_layer_bits,
+    ) == (2, "affine", 128)
+
+
+def test_dsv4_affine_converter_supports_projection_group_sizes():
+    """DQ-style affine plans can use smaller groups for selected routed projections."""
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jang")
+    routed_projection_group_sizes = conv.parse_routed_projection_group_sizes(
+        "gate=32,up=64,down=64"
+    )
+
+    assert routed_projection_group_sizes == {"w1": 32, "w2": 64, "w3": 64}
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w1.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        routed_projection_group_sizes=routed_projection_group_sizes,
+    ) == (2, "affine", 32)
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w2.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        routed_projection_group_sizes=routed_projection_group_sizes,
+    ) == (2, "affine", 64)
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w3.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        routed_projection_group_sizes=routed_projection_group_sizes,
+    ) == (2, "affine", 64)
+    assert conv.classify(
+        "layers.7.attn.wq_b.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        routed_projection_group_sizes=routed_projection_group_sizes,
+    ) == (4, "affine", 64)
+
+
+def test_dsv4_affine_converter_supports_projection_layer_bits(tmp_path):
+    """Calibration builds can lift one routed projection in selected layers."""
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jang")
+    plan_path = tmp_path / "projection_layer_bits.json"
+    plan_path.write_text(json.dumps({
+        "routed_projection_layer_bits": {
+            "down": {"7": 3},
+            "gate": {"8": 3},
+        }
+    }))
+    routed_projection_layer_bits = conv._merge_projection_layer_bits(
+        conv.parse_routed_projection_layer_bits("up:9=3"),
+        conv.parse_routed_projection_layer_bits_file(plan_path),
+    )
+
+    assert routed_projection_layer_bits == {
+        "w1": {8: 3},
+        "w2": {7: 3},
+        "w3": {9: 3},
+    }
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w2.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        routed_projection_group_sizes={"w1": 32, "w2": 32, "w3": 64},
+        routed_projection_layer_bits=routed_projection_layer_bits,
+    ) == (3, "affine", 32)
+    assert conv.classify(
+        "layers.7.ffn.experts.3.w1.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        routed_projection_group_sizes={"w1": 32, "w2": 32, "w3": 64},
+        routed_projection_layer_bits=routed_projection_layer_bits,
+    ) == (2, "affine", 32)
+    assert conv.classify(
+        "mtp.0.ffn.experts.3.w2.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        routed_projection_group_sizes={"w1": 32, "w2": 32, "w3": 64},
+        routed_projection_layer_bits=routed_projection_layer_bits,
+    ) == (2, "affine", 32)
+
+
+def test_dsv4_affine_converter_cli_wires_projection_layer_bits_and_drop_mtp(
+    monkeypatch, tmp_path
+):
+    """CLI must not pass --drop-mtp into the projection/layer bit-plan slot."""
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jang")
+    plan_path = tmp_path / "projection_layer_bits.json"
+    plan_path.write_text(json.dumps({"gate": {"8": 3}}))
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    received = {}
+
+    def fake_convert(*args, **kwargs):
+        received["args"] = args
+        received["kwargs"] = kwargs
+
+    monkeypatch.setattr(conv, "convert", fake_convert)
+    monkeypatch.setattr(sys, "argv", [
+        str(AFFINE_CONVERTER),
+        "--src",
+        str(src),
+        "--dst",
+        str(dst),
+        "--routed-projection-layer-bits",
+        "down:7=3",
+        "--routed-projection-layer-bits-file",
+        str(plan_path),
+        "--attention-bits",
+        "8",
+        "--drop-mtp",
+    ])
+
+    assert conv.main() == 0
+    assert received["args"] == ()
+    assert received["kwargs"]["src"] == src
+    assert received["kwargs"]["dst"] == dst
+    assert received["kwargs"]["profile_bits"] == 2
+    assert received["kwargs"]["routed_projection_layer_bits"] == {
+        "w1": {8: 3},
+        "w2": {7: 3},
+    }
+    assert received["kwargs"]["attention_bits"] == 8
+    assert received["kwargs"]["drop_mtp"] is True
+
+
+def test_dsv4_affine_converter_supports_token_bookend_override():
+    """DQ2 repair builds can lift only embed/head without changing attention."""
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jang")
+
+    assert conv.classify(
+        "embed.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        token_bookend_bits=8,
+    ) == (8, "affine", 64)
+    assert conv.classify(
+        "head.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        token_bookend_bits=8,
+    ) == (8, "affine", 64)
+    assert conv.classify(
+        "layers.7.attn.wq_b.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        token_bookend_bits=8,
+    ) == (4, "affine", 64)
+
+
+def test_dsv4_affine_converter_supports_attention_override():
+    """Copy-path experiments can lift attention without lifting shared experts."""
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jang")
+
+    assert conv.classify(
+        "layers.7.attn.wq_b.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        attention_bits=8,
+    ) == (8, "affine", 64)
+    assert conv.classify(
+        "layers.7.attn.compressor.wkv.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        attention_bits=8,
+        attention_group_size=32,
+    ) == (8, "affine", 32)
+    assert conv.classify(
+        "layers.7.ffn.shared_experts.w1.weight",
+        profile_bits=2,
+        bookend_bits=4,
+        routed_group_size=64,
+        bookend_group_size=64,
+        attention_bits=8,
+    ) == (4, "affine", 64)
+
+
 def test_dsv4_affine_converter_records_mtp_chat_cache_and_group_contracts():
     """The affine bundle must be self-describing for later MTP/cache activation."""
     src = AFFINE_CONVERTER.read_text()
@@ -391,3 +636,68 @@ def test_dsv4_affine_converter_records_mtp_chat_cache_and_group_contracts():
     assert '"rope_parameters"' in src
     assert "routed_layer_bits" in src
     assert "--routed-4bit-layers" in src
+    assert "routed_down_layer_bits" in src
+    assert "--routed-down-4bit-layers" in src
+    assert "routed_projection_group_sizes" in src
+    assert "--routed-projection-group-sizes" in src
+    assert "token_bookend_bits" in src
+    assert "--token-bookend-bits" in src
+    assert "attention_bits" in src
+    assert "--attention-bits" in src
+    assert "drop_mtp" in src
+    assert "--drop-mtp" in src
+    assert 'src_cfg["num_nextn_predict_layers"] = 0' in src
+    assert 'src_cfg["mtp_num_hidden_layers"] = None' in src
+    assert 'src_cfg["use_mtp"] = False' in src
+
+
+def test_dsv4_affine_rebundler_preserves_layer_projection_bit_overrides(tmp_path):
+    """Prestacked switch metadata must match selected projection/layer tensors."""
+    rebundler = importlib.import_module("jang_tools.rebundle_affine_stacked")
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "config.json").write_text(json.dumps({
+        "num_hidden_layers": 10,
+        "quantization": {
+            "bits": 4,
+            "group_size": 64,
+            "routed_expert_bits": 2,
+            "routed_expert_group_size": 64,
+            "bookend_bits": 4,
+            "bookend_group_size": 64,
+            "routed_expert_bit_plan": {
+                "default_bits": 2,
+                "group_size": 64,
+                "routed_projection_layer_bits": {
+                    "w1": {"8": 3},
+                    "w2": {"7": 3},
+                },
+                "routed_projection_group_sizes": {
+                    "w1": 32,
+                    "w2": 32,
+                    "w3": 64,
+                },
+            },
+        },
+    }))
+    (bundle / "jang_config.json").write_text(json.dumps({}))
+
+    rebundler.patch_prestacked_affine_config(bundle)
+
+    cfg = json.loads((bundle / "config.json").read_text())
+    quant = cfg["quantization"]
+    assert quant["model.layers.7.mlp.switch_mlp.down_proj"] == {
+        "bits": 3,
+        "group_size": 32,
+        "mode": "affine",
+    }
+    assert quant["model.layers.8.mlp.switch_mlp.gate_proj"] == {
+        "bits": 3,
+        "group_size": 32,
+        "mode": "affine",
+    }
+    assert quant["model.layers.7.mlp.switch_mlp.gate_proj"] == {
+        "bits": 2,
+        "group_size": 32,
+        "mode": "affine",
+    }
