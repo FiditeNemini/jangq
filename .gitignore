@@ -35,6 +35,8 @@ gemma4_*.md
 /scripts/jangpress/kimi_jangpress_agent_fix.patch
 # Nested scripts/ dirs (jang-tools/jang_tools/scripts, etc.) stay private
 jang-tools/**/scripts/
+!jang-tools/scripts/
+!jang-tools/scripts/validate_dsv4_flash_rope_scaling.py
 # Allow JANGStudio build scripts (build-python-bundle, codesign, notarize)
 !JANGStudio/Scripts/
 crack_*.py

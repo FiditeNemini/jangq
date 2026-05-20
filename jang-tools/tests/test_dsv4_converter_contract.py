@@ -17,6 +17,11 @@ AFFINE_CONVERTER = (
     / "dsv4"
     / "convert_dsv4_jang.py"
 )
+ROPE_VALIDATOR = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "validate_dsv4_flash_rope_scaling.py"
+)
 
 
 def test_dsv4_converter_preserves_f32_control_tensors():
@@ -75,6 +80,65 @@ def test_dsv4_converter_metadata_declares_f32_controls_and_mtp_policy():
     assert '"limited_swiglu_tq_patch": FORMAT == "jangtq"' in src
     assert "if drop_mtp:" in src
     assert 'src_cfg["num_nextn_predict_layers"] = 0' in src
+
+
+def test_dsv4_converters_preserve_runtime_rope_scaling_metadata():
+    """DeepSeek-V4 Flash YaRN metadata is load-bearing for compressed layers."""
+    for converter in (CONVERTER, AFFINE_CONVERTER):
+        src = converter.read_text()
+
+        assert 'pop("rope_scaling")' not in src
+        assert 'rs = dict(src_cfg["rope_scaling"])' in src
+        assert 'src_cfg["rope_parameters"] = rp' in src
+
+
+def test_dsv4_rope_scaling_validator_blocks_upload_without_runtime_metadata(tmp_path):
+    """Artifact checks must fail before publishing a DSV4 Flash config without YaRN."""
+    artifact = tmp_path / "DeepSeek-V4-Flash-JANG"
+    artifact.mkdir()
+    cfg = {
+        "model_type": "deepseek_v4",
+        "compress_ratios": [0, 0, 4, 128],
+        "compress_rope_theta": 160000,
+        "rope_scaling": None,
+    }
+    (artifact / "config.json").write_text(json.dumps(cfg))
+
+    bad = subprocess.run(
+        [sys.executable, str(ROPE_VALIDATOR), str(artifact)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert bad.returncode == 1
+    assert "rope_scaling must be present and non-null" in bad.stderr
+
+    cfg["rope_scaling"] = {
+        "type": "yarn",
+        "factor": 16,
+        "original_max_position_embeddings": 65536,
+        "beta_fast": 32,
+        "beta_slow": 1,
+    }
+    cfg["rope_parameters"] = {
+        "rope_type": "yarn",
+        "factor": 16.0,
+        "original_max_position_embeddings": 65536,
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+    }
+    (artifact / "config.json").write_text(json.dumps(cfg))
+
+    good = subprocess.run(
+        [sys.executable, str(ROPE_VALIDATOR), str(artifact)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert good.returncode == 0
+    assert "PASS" in good.stdout
 
 
 def test_dsv4_converter_config_has_top_level_jangtq_metadata():

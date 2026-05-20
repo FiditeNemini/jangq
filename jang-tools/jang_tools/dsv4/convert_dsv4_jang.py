@@ -566,10 +566,11 @@ def convert(src: Path, dst: Path, profile_bits: int,
     src_cfg.pop("quantization_config", None)
     mtp_layers = int(src_cfg.get("num_nextn_predict_layers", 0))
     # transformers 4.45+ renamed `rope_scaling` -> `rope_parameters` and
-    # `type` -> `rope_type` inside the dict. Emit forward-compatible config
-    # while preserving source RoPE numbers.
+    # `type` -> `rope_type` inside the dict. Add the newer spelling for
+    # compatibility, but never remove rope_scaling: jang_tools.dsv4.mlx_model
+    # consumes it directly for DSV4 Flash compressed-context YaRN.
     if "rope_scaling" in src_cfg and "rope_parameters" not in src_cfg:
-        rs = src_cfg.pop("rope_scaling")
+        rs = dict(src_cfg["rope_scaling"])
         rp = dict(rs)
         if "type" in rp:
             rp["rope_type"] = rp.pop("type")
