@@ -201,3 +201,215 @@ This only proves the converter guard for the next rebuilt candidate. It does
 not clear the current DSV4 model artifact. The rebuilt/source-equivalent DSV4
 body still has to pass the vMLX identifier and long-output live gates before
 vMLX can honestly release-claim DSV4 long-output/code/file generation.
+
+## vMLX Update - 2026-05-22 08:00 PDT
+
+Latest vMLX Python/Electron checkpoint:
+
+- repo/worktree: `/Users/eric/mlx/vllm-mlx-finite-launch-guard`
+- branch: `codex/pr-intake-manifest`
+- commit: `6de1134e test: pin persisted chat output cap isolation`
+- pushed branch: `origin/codex/pr-intake-manifest`
+- release gate version triple: `1.5.47`
+
+Fresh vMLX proof after the persisted Chat Max Output Tokens isolation guard:
+
+- `build/current-max-output-context-contract-20260522-persisted-chat-output-cap-final.json`
+  - `status=pass`
+  - `failed=[]`
+  - `missing_markers=[]`
+  - engine `20 passed`
+  - panel `39 passed / 292 skipped`
+- `build/current-release-regression-manifest-20260522-persisted-chat-output-cap-final.json`
+  - 18 release-regression rows
+- `build/current-release-surface-contract-20260522-post-persisted-chat-output-cap.json`
+  - `status=pass`
+- `build/current-regression-suite-20260522-post-persisted-chat-output-cap.json`
+  - `status=pass`
+  - `failed_steps=[]`
+  - still open: `DSV4 long-output/code/file-generation quality is release-cleared`
+- direct vMLX release gate:
+  - `panel/scripts/release-gate-python-app.py --skip-app --skip-gui`
+  - rc=1 with `[FAIL] objective proof digest: DSV4 long-output/code/file-generation quality is release-cleared`
+
+Fresh JANG-side guard recheck from the vMLX worktree:
+
+```bash
+PYTHONPATH=/Users/eric/jang/jang-tools .venv/bin/python -m pytest -q \
+  /Users/eric/jang/jang-tools/tests/test_dsv4_converter_contract.py \
+  -k "high_precision or rope_scaling or f32_control or metadata_declares"
+```
+
+Result: `6 passed, 21 deselected, 2 warnings`.
+
+Current local DSV4 artifact inventory:
+
+- `/Users/eric/models/JANGQ/DeepSeek-V4-Flash-JANG`
+  - size: `97G`
+  - `weight_format=affine`
+  - `profile=JANG_2L_GS64_ProjLayerBits_Ggs32-Dgs32-Ugs64_bk4_Tok8g64_NoMTP`
+  - `rope_scaling` is present and matches the required YaRN block.
+- `/Users/eric/models/JANGQ/DeepSeek-V4-Flash-JANGTQ-K`
+  - size: `80G`
+  - `weight_format=mxtq`
+  - `profile=JANGTQ_K`
+  - `rope_scaling` is present and matches the required YaRN block.
+- `/Users/eric/models/Sources/DeepSeek-V4-Flash`
+  - size: `149G`
+  - available locally, but not a realistic live vMLX clearance target on the
+    128G local machine without a different loading strategy or remote machine.
+
+Interpretation:
+
+- vMLX max-output/context wiring, persisted chat output caps, parser registry,
+  DSV4 default native cache/tool loops, API/cache surfaces, and release-surface
+  checks are green in the current suite.
+- The release gate still intentionally blocks because the current DSV4 local
+  model body has not passed exact multi-identifier/code and long-output
+  generation.
+- The next real DSV4 release-clearance path remains a rebuilt/source-equivalent
+  body, likely using the guarded `DSV4_HIGH_PRECISION=1` lane or another
+  source-vs-quant parity-proven rebuild. Do not clear this by changing sampler
+  defaults, hiding max-token caps, or documenting around the failure.
+
+## vMLX Update - 2026-05-22 08:21 PDT
+
+Latest vMLX checkpoint:
+
+- repo/worktree: `/Users/eric/mlx/vllm-mlx-finite-launch-guard`
+- branch: `codex/pr-intake-manifest`
+- commit: `79f14837 fix: block stale dsv4 native mtp args`
+- pushed branch: `origin/codex/pr-intake-manifest`
+- release gate version triple: `1.5.47`
+
+Fresh vMLX release-path state:
+
+- post-push release surface:
+  `build/current-release-surface-contract-20260522-post-dsv4-additional-args.json`
+  -> `status=pass`
+- post-push umbrella:
+  `build/current-regression-suite-20260522-post-dsv4-additional-args.json`
+  -> `status=pass`, `failed_steps=[]`, still open:
+  `DSV4 long-output/code/file-generation quality is release-cleared`
+- direct release gate after rebuilding bundled Python:
+  `docs/internal/release-gates/20260522_081735/SUMMARY.md`
+  -> all non-app checks pass except objective digest, which fails only on:
+  `DSV4 long-output/code/file-generation quality is release-cleared`
+
+Bundled-runtime parity was repaired locally:
+
+- initial direct release gate failed because bundled
+  `jang_tools/convert_hy3_jangtq.py` drifted from clean JANG source.
+- reran vMLX `./panel/scripts/bundle-python.sh` with clean JANG source:
+  `/Users/eric/jang/.worktrees/vmlx-release-clean-7f643ed/jang-tools`
+- `npm --prefix panel run verify-bundled` now passes all critical imports and
+  source-vs-bundle hash parity for `vmlx_engine` and `jang_tools`.
+
+Current DSV4 artifact header-only checks:
+
+```bash
+PYTHONPATH=/Users/eric/jang/.worktrees/vmlx-release-clean-7f643ed/jang-tools:$PWD \
+  .venv/bin/python - <<'PY'
+from pathlib import Path
+from vmlx_engine.loaders.load_jangtq_dsv4 import (
+    _audit_dsv4_control_tensor_dtypes,
+    _dsv4_nested_routed_bit_plan,
+    _dsv4_routed_default_bits,
+    _read_json,
+)
+for p in [
+    Path('/Users/eric/models/JANGQ/DeepSeek-V4-Flash-JANGTQ-K'),
+    Path('/Users/eric/models/JANGQ/DeepSeek-V4-Flash-JANG'),
+    Path('/Users/eric/models/JANGQ/DeepSeek-V4-Flash-JANGTQ-K-HeadBF16-Probe-20260520'),
+]:
+    cfg=_read_json(p/'config.json'); jang=_read_json(p/'jang_config.json')
+    print(p, _audit_dsv4_control_tensor_dtypes(p))
+    print('default_bits', _dsv4_routed_default_bits(cfg,jang))
+    print('routed_plan', _dsv4_nested_routed_bit_plan(cfg,jang))
+PY
+```
+
+Result:
+
+- all three local DSV4 artifacts have `critical_count=344`,
+  `non_f32_count=0`;
+- all three pass `scripts/validate_dsv4_flash_rope_scaling.py`;
+- DSV4-K routed plan is still:
+  `{'0': 2, '1': 2, '2': 2, '23': 4, '25': 4, '28': 4, '34': 4, '36': 4}`.
+
+This means the current blocker is not missing YaRN config or downcast mHC/
+router/sink controls in the local artifacts. The existing failing live
+artifacts remain failing evidence, not clearance evidence:
+
+- `/Users/eric/mlx/vllm-mlx/build/dsv4-source-full-output/result.json`
+  -> `status=open`
+- `/Users/eric/mlx/vllm-mlx/build/dsv4-chat-prompt-ablation-20260520101331/result.json`
+  -> still shows `THREE.WebWebGLRenderer`, `THREE.ScScene`,
+  `THREE.PPerspectiveCamera`, `THREE.BBoxGeometry`,
+  `THREE.MMeshBasicMaterial`
+- `/Users/eric/mlx/vllm-mlx/docs/internal/release-gates/20260520_sisyphus_dsv4_identifier_gate_jang_affine_current/result.json`
+  -> failing identifier evidence, not a pass artifact
+
+JANG worktree nuance:
+
+- The clean JANG release worktree used for bundling does not contain tracked
+  `jang-tools/_internal/jang_v3/*`.
+- The dirty main JANG checkout has those files only as untracked local files.
+- Therefore this JANG-side test batch currently fails in the clean worktree:
+
+```bash
+PYTHONPATH=/Users/eric/jang/.worktrees/vmlx-release-clean-7f643ed/jang-tools:$PWD \
+  .venv/bin/python -m pytest -q \
+  /Users/eric/jang/.worktrees/vmlx-release-clean-7f643ed/jang-tools/tests/test_dsv4_converter_contract.py \
+  /Users/eric/jang/.worktrees/vmlx-release-clean-7f643ed/jang-tools/tests/test_jang_v3_dsv4_contract.py \
+  /Users/eric/jang/.worktrees/vmlx-release-clean-7f643ed/jang-tools/tests/test_dsv4_rope_reference.py \
+  /Users/eric/jang/.worktrees/vmlx-release-clean-7f643ed/jang-tools/tests/test_dsv4_hc_sinkhorn.py
+```
+
+Result: `29 passed, 3 failed`; the three failures are all missing
+`_internal.jang_v3` / missing `jang-tools/_internal/jang_v3/encode.py`.
+
+Interpretation:
+
+- vMLX release-path parity is now clean except the DSV4 objective row.
+- Current local DSV4-K/JANG artifacts have correct rope metadata and F32
+  critical controls, but still do not have live exact-code/identifier
+  clearance.
+- The remaining real path is a rebuilt/source-equivalent DSV4 body plus live
+  vMLX identifier/full-output gate, not a vMLX UI/API/cache/parser setting and
+  not hidden sampler forcing.
+
+## JANG Update - 2026-05-22 08:32 PDT
+
+Fixed the clean-worktree DSV4 V3 helper hygiene issue noted above:
+
+- `.gitignore` now keeps `jang-tools/_internal/` ignored by default but
+  explicitly unignores the narrow helper files required by the DSV4 V3 safety
+  tests:
+  - `jang-tools/_internal/jang_v3/__init__.py`
+  - `jang-tools/_internal/jang_v3/budget_solver.py`
+  - `jang-tools/_internal/jang_v3/encode.py`
+- The rest of `jang-tools/_internal/jang_v3/` remains ignored because it is
+  calibration/scratch pipeline code and not needed for the release safety
+  contract.
+
+Fresh focused JANG verification:
+
+```bash
+PYTHONPATH=/Users/eric/jang/jang-tools \
+  /Users/eric/mlx/vllm-mlx-finite-launch-guard/.venv/bin/python \
+  -m pytest -q jang-tools/tests/test_jang_v3_dsv4_contract.py
+```
+
+Result: `3 passed`.
+
+```bash
+PYTHONPATH=/Users/eric/jang/jang-tools \
+  /Users/eric/mlx/vllm-mlx-finite-launch-guard/.venv/bin/python \
+  -m pytest -q \
+  jang-tools/tests/test_dsv4_converter_contract.py \
+  jang-tools/tests/test_dsv4_rope_reference.py \
+  jang-tools/tests/test_dsv4_hc_sinkhorn.py
+```
+
+Result: `30 passed, 2 warnings`.

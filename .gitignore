@@ -65,6 +65,13 @@ jang-runtime/.build/
 jang-runtime/.swiftpm/
 jang-tools/build/
 jang-tools/_internal/
+!jang-tools/_internal/
+jang-tools/_internal/*
+!jang-tools/_internal/jang_v3/
+jang-tools/_internal/jang_v3/*
+!jang-tools/_internal/jang_v3/__init__.py
+!jang-tools/_internal/jang_v3/budget_solver.py
+!jang-tools/_internal/jang_v3/encode.py
 jang-tools/dist/
 
 # Environment & config
