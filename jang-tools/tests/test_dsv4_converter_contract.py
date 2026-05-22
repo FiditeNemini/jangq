@@ -70,6 +70,40 @@ def test_dsv4_converter_v3_profile_still_lifts_hash_layers():
     assert "return profile_bits, \"mxtq\", 0" in src
 
 
+def test_dsv4_jangtq_high_precision_keeps_full_nonrouted_path_passthrough(monkeypatch):
+    """Full high-precision DSV4 is not the same as a head/norm-only overlay.
+
+    The live vMLX identifier blocker reproduced after a BF16 head/norm overlay,
+    so the next rebuild candidate must preserve the entire every-token
+    non-routed path: attention, shared experts, compressor/indexer, embed, and
+    head. Routed experts stay on the selected MXTQ profile.
+    """
+    conv = importlib.import_module("jang_tools.dsv4.convert_dsv4_jangtq")
+    monkeypatch.setattr(conv, "FORMAT", "jangtq")
+    monkeypatch.setattr(conv, "VARIANT", "V3")
+    monkeypatch.setenv("DSV4_HIGH_PRECISION", "1")
+    monkeypatch.delenv("DSV4_V3_PLAN_PATH", raising=False)
+    monkeypatch.setattr(conv, "_V3_PLAN_CACHE_PATH", None)
+    monkeypatch.setattr(conv, "_V3_PLAN_CACHE", None)
+    monkeypatch.setattr(conv, "_V3_PLAN_CONFIG_CACHE", None)
+
+    assert conv.classify("embed.weight", 2) == (16, "passthrough", 0)
+    assert conv.classify("head.weight", 2) == (16, "passthrough", 0)
+    assert conv.classify("layers.7.attn.wq_b.weight", 2) == (16, "passthrough", 0)
+    assert conv.classify("layers.7.attn.compressor.wkv.weight", 2) == (
+        16,
+        "passthrough",
+        0,
+    )
+    assert conv.classify("layers.8.ffn.shared_experts.w2.weight", 2) == (
+        16,
+        "passthrough",
+        0,
+    )
+    assert conv.classify("layers.7.ffn.experts.0.w1.weight", 2) == (2, "mxtq", 0)
+    assert conv.classify("layers.0.ffn.experts.0.w1.weight", 2) == (4, "mxtq", 0)
+
+
 def test_dsv4_converter_metadata_declares_f32_controls_and_mtp_policy():
     """Runtime metadata must tell loaders what was preserved or dropped."""
     src = CONVERTER.read_text()

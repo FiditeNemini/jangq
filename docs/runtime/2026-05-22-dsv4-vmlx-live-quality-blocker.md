@@ -107,6 +107,23 @@ Before uploading/replacing the DSV4 model artifact, the JANG side needs a fresh 
 
 The likely repair lane is model artifact / quantization boundary work, especially around output head, final norm, routed-bit plan, group sizes, and source-vs-quant parity. Do not hide this with sampler defaults or hard output constraints.
 
+Important 2026-05-22 follow-up:
+
+- The earlier `DeepSeek-V4-Flash-JANGTQ-K-HeadBF16-Probe-20260520` overlay is
+  only a head/norm overlay on top of the existing quantized body. It is not
+  equivalent to a full high-precision DSV4 rebuild.
+- `jang_tools.dsv4.convert_dsv4_jangtq` has a full candidate lane:
+  `DSV4_HIGH_PRECISION=1`.
+- That lane preserves the whole every-token non-routed path as passthrough:
+  attention, shared experts, compressor/indexer, embed, and head. Routed
+  experts remain on the selected MXTQ profile.
+- The guard is now pinned in
+  `jang-tools/tests/test_dsv4_converter_contract.py` as
+  `test_dsv4_jangtq_high_precision_keeps_full_nonrouted_path_passthrough`.
+- This still does not clear release quality by itself. A new full
+  high-precision or otherwise rebuilt artifact must pass the vMLX identifier
+  canary and long-output gates before upload/release claims.
+
 Current vMLX evidence makes the failure narrower than "long context only":
 
 - Single identifier copy can pass:
