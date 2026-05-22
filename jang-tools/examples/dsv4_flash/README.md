@@ -24,7 +24,7 @@ Pass any other path as the first argument.
 | Env var | Default | Purpose |
 |---|---|---|
 | `DSV4_LONG_CTX` | `1` | Tri-mode HSA + CSA + SWA. Set `0` to fall back to legacy SWA-only (loses ≥7pp MMLU). |
-| `DSV4_POOL_QUANT` | `0` | Correctness default. Pool quant is opt-in until compressor/indexer pool restore is proven for the exact runtime. |
+| `DSV4_POOL_QUANT` | `0` | Correctness and speed default. Pool quant is experimental; the append-only codec avoids requantizing old rows, but live vMLX probes on 2026-05-22 still showed ~2.4 streamed deltas/s with pool quant on versus ~6.4 deltas/s off. Do not make it a release default until full-pool read cost is fixed and live cache/tool/code/spacing gates pass. |
 | `JANG_MEMORY_LIMIT_GB` | `200` | mx.set_memory_limit. Bump if you have >200 GB unified. |
 
 ## Reasoning mode glossary
