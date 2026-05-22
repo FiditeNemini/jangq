@@ -147,3 +147,57 @@ Release implication:
 - A v1.5.47 public release should not claim DSV4 long-output/code quality as
   cleared until a rebuilt/source-equivalent DSV4 body passes the identifier and
   long-output gates above.
+
+## vMLX Update - 2026-05-22 07:25 PDT
+
+Latest vMLX Python/Electron checkpoint:
+
+- repo/worktree: `/Users/eric/mlx/vllm-mlx-finite-launch-guard`
+- branch: `codex/pr-intake-manifest`
+- commit: `29286344 test: pin qwen nemotron hybrid cache rows`
+- pushed branch: `origin/codex/pr-intake-manifest`
+
+Fresh vMLX proof after the Qwen/Nemotron family-gate checkpoint:
+
+- `build/current-model-family-detection-contract-20260522-qwen-nemotron-hybrid-cache.json`
+  - `status=pass`
+  - `missing_rows=[]`
+  - engine `41 passed / 111 deselected`
+  - panel `41 passed / 12 skipped`
+- `build/current-regression-suite-20260522-qwen-nemotron-hybrid-cache.json`
+  - `status=pass`
+  - `failed_steps=[]`
+  - still open: `DSV4 long-output/code/file-generation quality is release-cleared`
+- `build/current-release-surface-contract-20260522-post-qwen-nemotron-hybrid-cache.json`
+  - `status=pass`
+
+The current objective digest still keeps the DSV4 quality row open because:
+
+- exact-code identifier checks are false:
+  - `identifier_integrity=false`
+  - `threejs_single_file=false`
+  - `no_markdown_fence=false`
+  - `no_corrupt_identifiers=false`
+  - `non_length_stop=false`
+  - `source_or_rebuilt_body_clearance=false`
+- missing clearance artifacts include:
+  - `build/dsv4-source-full-output/result.json`
+  - `build/dsv4-chat-prompt-ablation-20260520101331/result.json`
+- the current identifier ablation still shows corrupted multi-identifier API
+  names such as `THREE.WebWebGLRenderer`, `THREE.PPerspectiveCamera`,
+  `THREE.MMeshBasicMaterial`, `THREE.BBoxGeometry`, and `THREE.ScScene`.
+
+JANG-side converter guard rechecked from vMLX at 2026-05-22 07:25 PDT:
+
+```bash
+PYTHONPATH=/Users/eric/jang/jang-tools .venv/bin/python -m pytest -q \
+  /Users/eric/jang/jang-tools/tests/test_dsv4_converter_contract.py \
+  -k "high_precision or rope_scaling or f32_control or metadata_declares"
+```
+
+Result: `6 passed, 21 deselected`.
+
+This only proves the converter guard for the next rebuilt candidate. It does
+not clear the current DSV4 model artifact. The rebuilt/source-equivalent DSV4
+body still has to pass the vMLX identifier and long-output live gates before
+vMLX can honestly release-claim DSV4 long-output/code/file generation.
