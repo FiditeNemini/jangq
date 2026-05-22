@@ -59,12 +59,15 @@ class _StateProxy(MutableMapping[str, Any]):
     def __init__(self, initial: dict[str, Any] | None = None):
         self._data = {"buffer_kv": None, "buffer_gate": None}
         self._pooled_q_segments: list[Any] = []
+        self._pooled_materialized: Any = None
         if initial:
             for key, value in initial.items():
                 self[key] = value
 
     def __getitem__(self, key: str) -> Any:
         if key == "pooled":
+            if self._pooled_materialized is not None:
+                return self._pooled_materialized
             if not self._pooled_q_segments:
                 return None
             parts = [
@@ -75,13 +78,16 @@ class _StateProxy(MutableMapping[str, Any]):
             if not parts:
                 return None
             if len(parts) == 1:
-                return parts[0]
-            return mx.concatenate(parts, axis=1)
+                self._pooled_materialized = parts[0]
+            else:
+                self._pooled_materialized = mx.concatenate(parts, axis=1)
+            return self._pooled_materialized
         return self._data[key]
 
     def __setitem__(self, key: str, value: Any) -> None:
         if key == "pooled":
             self._pooled_q_segments = [] if value is None else [_quant_pool(value)]
+            self._pooled_materialized = value
         else:
             self._data[key] = value
 
@@ -90,6 +96,13 @@ class _StateProxy(MutableMapping[str, Any]):
         if value is None or value.shape[1] <= 0:
             return
         self._pooled_q_segments.append(_quant_pool(value))
+        if self._pooled_materialized is None:
+            self._pooled_materialized = value
+        else:
+            self._pooled_materialized = mx.concatenate(
+                [self._pooled_materialized, value],
+                axis=1,
+            )
 
     def __delitem__(self, key: str) -> None:
         self[key] = None
@@ -114,6 +127,7 @@ class _StateProxy(MutableMapping[str, Any]):
                 continue
             for part in qpool[:3]:
                 total += getattr(part, "nbytes", 0)
+        total += getattr(self._pooled_materialized, "nbytes", 0)
         return total
 
 
