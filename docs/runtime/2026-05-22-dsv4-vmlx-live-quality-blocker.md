@@ -2,10 +2,14 @@
 
 Date: 2026-05-22 00:20 PDT
 
+Update: 2026-05-22 00:55 PDT
+
 Source evidence from vMLX Python/Electron worktree:
 
 - Repo: `/Users/eric/mlx/vllm-mlx-finite-launch-guard`
 - Commit tested: `55dbd3bd`
+- Latest vMLX release-hardening commit after suite work:
+  `af141b30 test: require mcp policy gate markers`
 - Bundled runtime: `panel/release/mac-arm64/vMLX.app/.../python3`, `vmlx_engine 1.5.47`
 - Model tested: `/Users/eric/models/JANGQ/DeepSeek-V4-Flash-JANG`
 - vMLX live artifact: `build/current-production-family-audit-live-dsv4-jang-local-20260522.json`
@@ -49,8 +53,25 @@ Recent vMLX no-heavy gates are green for:
 - DSV4 DSML tool parser and default-cache multi-tool rows
 - VL/media/cache/tool-followup named rows
 - API surfaces for Chat, Responses, Anthropic, and Ollama
+- MCP autodiscovery, policy filtering, secret redaction, gateway routing, and
+  built-in-tool separation marker rows
 
 The remaining DSV4 blocker is output quality on the tested artifact/runtime path.
+
+Latest vMLX proof after the MCP marker hardening:
+
+- `build/current-mcp-policy-contract-20260522-marker-hardening.json`
+  - pass, `missing_markers=[]`
+  - engine MCP/security: 76 passed
+  - panel MCP/gateway: 13 passed, 3 optional live rows skipped
+- `build/current-regression-suite-20260522-mcp-marker-hardening.json`
+  - pass, `failed_steps=[]`
+  - still lists only:
+    `DSV4 long-output/code/file-generation quality is release-cleared`
+- `build/current-release-surface-contract-20260522-post-mcp-marker-hardening-push.json`
+  - pass
+  - public updater and PyPI remain at `1.5.46`
+  - GitHub `jjang-ai/vmlx` release `v1.5.47` is still not published
 
 ## vMLX Harness Fix Made During Diagnosis
 
@@ -85,3 +106,27 @@ Before uploading/replacing the DSV4 model artifact, the JANG side needs a fresh 
 3. Re-run the vMLX live row after the rebuilt artifact is in place.
 
 The likely repair lane is model artifact / quantization boundary work, especially around output head, final norm, routed-bit plan, group sizes, and source-vs-quant parity. Do not hide this with sampler defaults or hard output constraints.
+
+Current vMLX evidence makes the failure narrower than "long context only":
+
+- Single identifier copy can pass:
+  `THREE.WebGLRenderer`
+- Multi-identifier exact-copy probes fail with duplicated API-name fragments:
+  - `THREE.WebWebGLRenderer`
+  - `THREE.PPerspectiveCamera`
+  - `THREE.MMeshBasicMaterial`
+  - `THREE.BBoxGeometry`
+  - `THREE.ScScene`
+- The identifier-count ablation was run with:
+  - `DSV4_LONG_CTX=1`
+  - `DSV4_POOL_QUANT=0`
+  - `VMLINUX_DSV4_ENABLE_PREFIX_CACHE=0`
+- That means the current blocker is not proven to be caused by prefix cache,
+  L2 cache, MCP, Responses assembly, UI settings, or tool parsing.
+
+Release implication:
+
+- vMLX can continue hardening and testing other family rows.
+- A v1.5.47 public release should not claim DSV4 long-output/code quality as
+  cleared until a rebuilt/source-equivalent DSV4 body passes the identifier and
+  long-output gates above.
