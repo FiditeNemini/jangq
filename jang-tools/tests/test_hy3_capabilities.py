@@ -46,3 +46,21 @@ def test_importing_hy3_registers_mlx_lm_model_module():
     module = importlib.import_module("mlx_lm.models.hy_v3")
 
     assert module.Model.__name__ == "Model"
+
+
+def test_hy3_converter_stamps_long_output_safe_chat_defaults():
+    src = (Path(__file__).parents[1] / "jang_tools/convert_hy3_jangtq.py").read_text()
+
+    assert '"sampling_defaults"' in src
+    assert '"temperature": 0.0' in src
+    assert '"top_p": 1.0' in src
+    assert '"top_k": 0' in src
+    assert '"max_new_tokens": 2048' in src
+
+
+def test_hy3_converter_patches_generation_config_after_copy():
+    src = (Path(__file__).parents[1] / "jang_tools/convert_hy3_jangtq.py").read_text()
+
+    assert "HY3_CHAT_SAMPLING_DEFAULTS" in src
+    assert "gen_cfg_path = OUT / \"generation_config.json\"" in src
+    assert "gen_cfg.update(HY3_GENERATION_CONFIG_OVERRIDES)" in src
