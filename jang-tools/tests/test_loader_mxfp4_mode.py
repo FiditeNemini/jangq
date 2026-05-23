@@ -26,6 +26,26 @@ def test_fix_quantized_bits_promotes_uint8_scales_to_mxfp4_and_drops_affine_bias
     assert not hasattr(wrapper.child, "biases") or wrapper.child.biases is None
 
 
+def test_fix_quantized_bits_uses_embedding_logical_dims_for_ambiguous_affine_shape():
+    """Qwen3.6 JANG_4M embeds are 4-bit/gs64 despite an 8-bit/gs32 alias."""
+    module = nn.QuantizedEmbedding(248320, 5120, group_size=32, bits=8)
+    module.weight = mx.zeros((248320, 640), dtype=mx.uint32)
+    module.scales = mx.zeros((248320, 80), dtype=mx.float16)
+    module.biases = mx.zeros((248320, 80), dtype=mx.float16)
+
+    class Wrapper(nn.Module):
+        def __init__(self, child):
+            super().__init__()
+            self.child = child
+
+    wrapper = Wrapper(module)
+
+    _fix_quantized_bits(wrapper, {})
+
+    assert wrapper.child.bits == 4
+    assert wrapper.child.group_size == 64
+
+
 def test_strip_runtime_ignored_weights_drops_mtp_and_importance_only():
     weights = {
         "language_model.model.layers.0.self_attn.q_proj.weight": object(),
