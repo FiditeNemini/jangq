@@ -259,6 +259,72 @@ Current local DSV4 artifact inventory:
   - available locally, but not a realistic live vMLX clearance target on the
     128G local machine without a different loading strategy or remote machine.
 
+## vMLX Update - 2026-05-23 15:55 PDT
+
+Latest vMLX Python/Electron checkpoint:
+
+- repo/worktree: `/Users/eric/mlx/vllm-mlx-finite-launch-guard`
+- branch: `codex/pr-intake-manifest`
+- release gate version triple: `1.5.48`
+
+Fresh vMLX proof after the Qwen native-MTP/VLM norm-format fix and bundled
+runtime rebuild:
+
+- Qwen VLM+native-MTP default live artifact:
+  `build/current-decode-speed-live-qwen27-jang4m-mtp-default-after-norm-shift-20260523.json`
+  - `status=pass`
+  - prompt-processing rows around `865`, `817`, and `760 tok/s`
+  - deterministic counting output, no loopish output
+  - native MTP active for `text+vl`, depth 3
+- bundled Python was rebuilt from the vMLX checkout and verified with
+  `npm --prefix panel run verify-bundled`;
+  source-vs-bundled `vmlx_engine` and `jang_tools` hash parity passed.
+- canonical vMLX umbrella suite:
+  `build/current-regression-suite-20260523-profile-chat-cap-clean-jang.json`
+  - `status=pass`
+  - `failed_steps=[]`
+  - only open requirement:
+    `DSV4 long-output/code/file-generation quality is release-cleared`
+- release-regression manifest proof sweep:
+  `build/current-release-regression-manifest-20260521.json`
+  - `current_proof_sweep=pass`
+
+This narrows the release blocker again. Do not reopen Qwen based on older
+pre-norm-shift artifacts unless a new no-env default live artifact regresses.
+The current vMLX release gate has exactly one known open requirement: this DSV4
+long-output/code/file-generation row.
+
+The DSV4 quality failure must not be papered over with hidden parameters:
+
+- do not force temperature, top-p, top-k, repetition penalty, reasoning, or
+  output caps outside the model metadata / request / explicit UI setting path;
+- do not call DSV4 cleared because max output vs max context wiring is now
+  guarded;
+- do not call DSV4 cleared because DSML tools, Responses assembly, prefix,
+  paged cache, block-disk L2, or pool-quant rows pass;
+- do not call DSV4 cleared because a single exact identifier can pass.
+
+The remaining failure evidence is model/runtime output quality on the current
+artifact. The current diagnostic evidence includes an installed-tokenizer
+roundtrip pass for identifiers and logprob/context probes where the model path
+can rank corrupted identifier continuations above the exact continuation in
+multi-identifier/code contexts. That points the next JANG-side work back to
+artifact/runtime parity: source-vs-quant, full high-precision or otherwise
+rebuilt DSV4 body, final norm/output head/non-routed path precision, routed-bit
+plan, group sizes, and exact source-body clearance.
+
+Next clearance action:
+
+1. Build or stage a rebuilt/source-equivalent DSV4 candidate. The existing
+   `DSV4_HIGH_PRECISION=1` converter lane is only a candidate path until a full
+   artifact exists.
+2. Re-run the exact vMLX identifier, long-output, and tool-history live gates
+   against that candidate.
+3. Only update the vMLX objective proof row from open to pass after the live
+   artifacts prove exact identifiers, no corrupt duplicated fragments, visible
+   requested content, non-`length` finish for bounded prompts, and no hidden
+   sampler/config forcing.
+
 Interpretation:
 
 - vMLX max-output/context wiring, persisted chat output caps, parser registry,
