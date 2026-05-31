@@ -344,8 +344,6 @@ def _install_video_fallback(processor):
     token count. Callers still pass ``videos=[[frame1, frame2, ...]]`` — the
     wrapper then converts internally.
     """
-    if getattr(processor, "video_processor", None) is not None:
-        return
     if not hasattr(processor, "image_processor"):
         return
 
@@ -357,9 +355,35 @@ def _install_video_fallback(processor):
 
     temporal_patch = int(getattr(ip, "temporal_patch_size", 2) or 2)
 
+    def _is_video_processor_dependency_error(exc: Exception) -> bool:
+        if isinstance(exc, (ImportError, ModuleNotFoundError)):
+            return True
+        msg = str(exc)
+        if not msg:
+            return False
+        return (
+            "PyAV is not installed" in msg
+            or "PyAV" in msg
+            or "video operations in torchvision" in msg
+            or "torchvision.io" in msg
+            and "read_video" in msg
+        )
+
     def _patched_call(self, images=None, text=None, videos=None, **kwargs):
-        if videos is None or self.video_processor is not None:
+        if videos is None:
             return orig_call(self, images=images, text=text, videos=videos, **kwargs)
+
+        video_processor = getattr(self, "video_processor", None)
+        if video_processor is None:
+            pass
+        else:
+            try:
+                return orig_call(self, images=images, text=text, videos=videos, **kwargs)
+            except Exception as exc:  # pragma: no cover - environment dependent
+                if not _is_video_processor_dependency_error(exc):
+                    raise
+                # Fall through to image-processor fallback for optional-dependency
+                # missing (known failure shape: torchvision+PyAV absence in dev envs).
 
         # Lift each video's frames into a flat image batch, one row per frame.
         # image_processor produces image_grid_thw shape (sum_frames, 3) with t=1.
