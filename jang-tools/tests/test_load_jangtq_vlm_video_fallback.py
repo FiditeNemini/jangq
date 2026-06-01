@@ -55,3 +55,23 @@ def test_video_fallback_uses_real_video_processor_until_optional_dependency_fail
     assert result["input_ids"].tolist() == [[4, 5, 6]]
     assert result["pixel_values_videos"].shape == (4, 2)
     assert result["video_grid_thw"].tolist() == [[2, 2, 2]]
+
+
+def test_video_fallback_handles_mlx_vlm_frame_list_shape_error():
+    class ProcessorWithShapeStrictVideoProcessor:
+        image_processor = FakeImageProcessor()
+        video_processor = object()
+
+        def __call__(self, images=None, text=None, videos=None, **kwargs):
+            if videos is not None:
+                raise ValueError("Expected video as (T, C, H, W), got shape (4,).")
+            return {"input_ids": np.array([[7, 8, 9]], dtype=np.int32)}
+
+    processor = ProcessorWithShapeStrictVideoProcessor()
+    _install_video_fallback(processor)
+
+    result = processor(videos=[["frame-a", "frame-b", "frame-c", "frame-d"]])
+
+    assert result["input_ids"].tolist() == [[7, 8, 9]]
+    assert result["pixel_values_videos"].shape == (4, 2)
+    assert result["video_grid_thw"].tolist() == [[2, 2, 2]]

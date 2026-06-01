@@ -369,6 +369,14 @@ def _install_video_fallback(processor):
             and "read_video" in msg
         )
 
+    def _is_video_processor_frame_list_error(exc: Exception) -> bool:
+        msg = str(exc)
+        return (
+            isinstance(exc, ValueError)
+            and "Expected video as (T, C, H, W)" in msg
+            and "got shape" in msg
+        )
+
     def _patched_call(self, images=None, text=None, videos=None, **kwargs):
         if videos is None:
             return orig_call(self, images=images, text=text, videos=videos, **kwargs)
@@ -380,10 +388,14 @@ def _install_video_fallback(processor):
             try:
                 return orig_call(self, images=images, text=text, videos=videos, **kwargs)
             except Exception as exc:  # pragma: no cover - environment dependent
-                if not _is_video_processor_dependency_error(exc):
+                if not (
+                    _is_video_processor_dependency_error(exc)
+                    or _is_video_processor_frame_list_error(exc)
+                ):
                     raise
                 # Fall through to image-processor fallback for optional-dependency
-                # missing (known failure shape: torchvision+PyAV absence in dev envs).
+                # missing, or mlx-vlm video processors that expect a pre-decoded
+                # (T, C, H, W) array while callers pass frame path lists.
 
         # Lift each video's frames into a flat image batch, one row per frame.
         # image_processor produces image_grid_thw shape (sum_frames, 3) with t=1.
