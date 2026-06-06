@@ -26,3 +26,25 @@ Conclusion:
 - Do not classify the remaining MiMo corruption as only a native MLX `sinks=` kernel bug.
 - Do not disable sinks as a fake fix.
 - Next proof should compare the local quantized JANG_2L path against a known-good source or higher-quality MiMo profile, and then trace first divergence through attention vs routed expert quantized forward.
+
+## 2026-06-06 manual sink boolean-mask fix
+
+Runtime bug fixed in `jang_tools.mimo_v2.mlx_model._sdpa_with_sink`:
+
+- Boolean attention masks are now converted to additive `0/-inf` masks before adding to attention logits.
+- Before this fix, manual sink fallback added boolean masks as `0/1`, which is not equivalent to MiMo reference attention masking.
+- Focused proof: `pytest -q tests/test_mimo_v2_mlx_runtime.py` passed `3` tests, including boolean-mask vs additive-mask equivalence for manual sink SDPA.
+
+Post-fix real-model probe:
+
+- Artifact: `/Users/eric/mlx/vllm-mlx-finite-launch-guard/build/current-mimo-v2-jang2l-sink-above-swa-probe-after-bool-mask-fix-20260606.json`
+- Prompt length: `303` tokens.
+- Native MLX `sinks=` path: aborted with Metal GPU timeout.
+- Manual sink softmax: still corrupt/repetitive.
+- Sink disabled: still corrupt punctuation.
+
+Conclusion:
+
+- The boolean-mask fix is a real runtime correctness fix for the manual fallback.
+- It does not release-clear MiMo JANG_2L long-prompt quality.
+- The remaining blocker still points to routed-expert quant/profile quality and/or native sink/kernel working-set behavior, not a fake setting that should be forced off.

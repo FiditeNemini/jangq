@@ -272,7 +272,15 @@ def _sdpa_with_sink(
                           mx.array(-mx.inf, dtype=attn.dtype))
             attn = attn + cm
     elif mask is not None:
-        attn = attn + mask
+        if mask.dtype == mx.bool_:
+            additive_mask = mx.where(
+                mask,
+                mx.array(0.0, dtype=attn.dtype),
+                mx.array(-mx.inf, dtype=attn.dtype),
+            )
+            attn = attn + additive_mask
+        else:
+            attn = attn + mask
         # If a fully-formed mask was provided, sliding_window was already baked in by the caller.
     # Build sink column: shape (B, H, T, 1), value = sink_bias broadcast across (T,1).
     sink_col = mx.broadcast_to(sink_bias.reshape(1, H, 1, 1), (B, H, T, 1))
