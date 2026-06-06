@@ -59,6 +59,23 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
             failures.append(f"config.json missing required top-level key: {k}")
     if cfg.get("capabilities", {}).get("cache_type") != "kv":
         failures.append(f"capabilities.cache_type = {cfg.get('capabilities', {}).get('cache_type')} (want kv)")
+    modalities = cfg.get("capabilities", {}).get("modalities")
+    if modalities != ["text"]:
+        failures.append(
+            f"capabilities.modalities = {modalities!r} (want ['text'] until MiMo media forward is wired)"
+        )
+    preserved_modalities = cfg.get("capabilities", {}).get("preserved_modalities")
+    if preserved_modalities != ["vision", "audio"]:
+        failures.append(
+            "capabilities.preserved_modalities = "
+            f"{preserved_modalities!r} (want ['vision', 'audio'])"
+        )
+    unwired_modalities = cfg.get("capabilities", {}).get("unwired_modalities")
+    if unwired_modalities != ["vision", "audio"]:
+        failures.append(
+            "capabilities.unwired_modalities = "
+            f"{unwired_modalities!r} (want ['vision', 'audio'])"
+        )
     tool_parser = cfg.get("capabilities", {}).get("tools", {}).get("parser")
     if tool_parser != "xml_function":
         failures.append(
@@ -89,6 +106,12 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
         failures.append(
             f"runtime.mtp_mode = {cfg.get('runtime', {}).get('mtp_mode')} "
             f"(want {expected_mtp_mode})"
+        )
+    if cfg.get("runtime", {}).get("multimodal_mode") != "weights_preserved_text_runtime":
+        failures.append(
+            "runtime.multimodal_mode = "
+            f"{cfg.get('runtime', {}).get('multimodal_mode')!r} "
+            "(want 'weights_preserved_text_runtime')"
         )
     bit_plan = cfg.get("runtime", {}).get("routed_expert_bit_plan", {})
     layer_1_plan = bit_plan.get("layer_overrides", {}).get("1")

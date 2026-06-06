@@ -215,7 +215,13 @@ def _write_config_json(
     cfg["jang_version"] = "v2"
     cfg["capabilities"] = {
         "family": "mimo_v2",
-        "modalities": ["text", "vision", "audio"],
+        # The released mlx runtime is text-only today. Vision/audio tensors are
+        # preserved in the bundle for a future multimodal module, but generated
+        # model metadata must not advertise media inference before that forward
+        # path exists and is live-proven.
+        "modalities": ["text"],
+        "preserved_modalities": ["vision", "audio"],
+        "unwired_modalities": ["vision", "audio"],
         "cache_type": "kv",
         "attention": {
             "full": True,
@@ -224,6 +230,7 @@ def _write_config_json(
         },
         "reasoning": {"supported": True, "default": True, "parser": "think_xml"},
         "tools": {"supported": True, "parser": "xml_function"},
+        "multimodal_status": "weights_preserved_text_runtime",
     }
     cfg["runtime"] = {
         "cache_type": "kv",
