@@ -1051,6 +1051,32 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     print("  Replacing modules with TurboQuantLinear...", flush=True)
     n_replaced = 0
 
+    def _tq_target_candidates(base: str) -> list[str]:
+        """Return possible runtime module paths for one TQ tensor group.
+
+        VLM skeletons can expose the text decoder under
+        ``language_model.model`` while bundles store text weights as
+        ``model.layers``. Regular weights are normalized later in
+        sanitize/load; TQ module replacement runs before that and needs the
+        same path reconciliation.
+        """
+        candidates = [base]
+        if base.startswith("model.layers."):
+            candidates.append(
+                "language_model.model.layers." + base[len("model.layers."):]
+            )
+        if base.startswith("model.language_model."):
+            candidates.append(
+                "language_model.model." + base[len("model.language_model."):]
+            )
+        seen = set()
+        ordered = []
+        for candidate in candidates:
+            if candidate not in seen:
+                seen.add(candidate)
+                ordered.append(candidate)
+        return ordered
+
     def get_module(root, dotted):
         cur = root
         for p in dotted.split("."):
@@ -1105,9 +1131,17 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         bits = parts["bits"]
         vals_per_u32 = 32 // bits
 
-        try:
-            existing = get_module(model, base)
-        except (AttributeError, IndexError, KeyError):
+        resolved_base = None
+        existing = None
+        for candidate in _tq_target_candidates(base):
+            try:
+                existing = get_module(model, candidate)
+                resolved_base = candidate
+                break
+            except (AttributeError, IndexError, KeyError):
+                continue
+
+        if resolved_base is None:
             allowlisted = any(p.search(base) for p in _hydrate_allowlist)
             if allowlisted:
                 print(f"    Skip allowlisted (not in model): {base}", flush=True)
@@ -1154,7 +1188,7 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         new_module.packed = packed
         new_module.norms = norms
 
-        set_module(model, base, new_module)
+        set_module(model, resolved_base, new_module)
         n_replaced += 1
 
     print(f"  Replaced {n_replaced} modules", flush=True)

@@ -506,8 +506,19 @@ def load_jangtq_vlm_model(model_path) -> Tuple[nn.Module, object]:
 
     model, processor, _, model_config = _mlx_vlm_skeleton(model_path)
     print(f"  Built mlx_vlm skeleton: {type(model).__name__}", flush=True)
-    print(f"  vision_tower depth: {model.vision_tower.config.depth} layers", flush=True)
-    print(f"  language_model layers: {model.config.text_config.num_hidden_layers}", flush=True)
+    vision_module = getattr(model, "vision_tower", None) or getattr(model, "visual", None)
+    vision_config = getattr(vision_module, "config", None)
+    vision_depth = getattr(vision_config, "depth", None)
+    if vision_depth is not None:
+        print(f"  vision module depth: {vision_depth} layers", flush=True)
+    else:
+        print("  vision module depth: unavailable", flush=True)
+    text_config = getattr(getattr(model, "config", None), "text_config", None)
+    text_layers = getattr(text_config, "num_hidden_layers", None)
+    if text_layers is not None:
+        print(f"  language_model layers: {text_layers}", flush=True)
+    else:
+        print("  language_model layers: unavailable", flush=True)
 
     # Now apply the same TQ + quantization treatment as load_jangtq_model.
     # We delegate to a helper inside load_jangtq that does everything *except*
