@@ -53,6 +53,9 @@ jobs:
             -scheme JANGStudio \
             -destination 'platform=macOS' \
             -only-testing:JANGStudioTests \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 60 \
+            -maximum-test-execution-time-allowance 180 \
             -resultBundlePath TestResults.xcresult
 
       - name: Upload test results
