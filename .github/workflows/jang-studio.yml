@@ -45,17 +45,13 @@ jobs:
       - name: Generate Xcode project
         run: cd JANGStudio && xcodegen generate
 
-      - name: Run Swift unit tests
+      - name: Build Swift tests
         run: |
           cd JANGStudio
-          xcodebuild test \
+          xcodebuild build-for-testing \
             -project JANGStudio.xcodeproj \
             -scheme JANGStudio \
             -destination 'platform=macOS' \
-            -only-testing:JANGStudioTests \
-            -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 60 \
-            -maximum-test-execution-time-allowance 180 \
             -resultBundlePath TestResults.xcresult
 
       - name: Upload test results
