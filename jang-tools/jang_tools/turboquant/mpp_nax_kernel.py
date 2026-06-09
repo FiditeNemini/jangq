@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 import os
+from pathlib import Path
+import subprocess
 import weakref
 
 import mlx.core as mx
@@ -273,6 +275,38 @@ for (short nn = 0; nn < 2; nn++) {
 
 
 @lru_cache(maxsize=1)
+def _mpp_header_available() -> bool:
+    candidate_roots = []
+    if os.environ.get("SDKROOT"):
+        candidate_roots.append(Path(os.environ["SDKROOT"]))
+    try:
+        sdk_path = subprocess.run(
+            ["xcrun", "--sdk", "macosx", "--show-sdk-path"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if sdk_path:
+            candidate_roots.append(Path(sdk_path))
+    except (OSError, subprocess.SubprocessError):
+        sdk_path = ""
+
+    for root in candidate_roots:
+        header = (
+            root
+            / "System"
+            / "Library"
+            / "Frameworks"
+            / "MetalPerformancePrimitives.framework"
+            / "Headers"
+            / "MetalPerformancePrimitives.h"
+        )
+        if header.exists():
+            return True
+    return False
+
+
+@lru_cache(maxsize=1)
 def mpp_nax_tensorops_available() -> bool:
     """Return whether the MPP/NAX TensorOps lane is allowed to try dispatch.
 
@@ -288,6 +322,8 @@ def mpp_nax_tensorops_available() -> bool:
         "yes",
         "on",
     }:
+        return False
+    if not _mpp_header_available():
         return False
     return bool(getattr(getattr(mx, "fast", None), "metal_kernel", None))
 
