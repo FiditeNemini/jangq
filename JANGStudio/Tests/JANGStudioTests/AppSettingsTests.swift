@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class AppSettingsTests: XCTestCase {
-    private static let allLeafKeys: [String] = [
+    nonisolated private static let allLeafKeys: [String] = [
         BundleResolver.pythonOverrideDefaultsKey,
         BundleResolver.tickThrottleMsDefaultsKey,
         BundleResolver.mlxThreadCountDefaultsKey,
