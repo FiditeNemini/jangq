@@ -149,14 +149,27 @@ actor PythonRunner {
         do {
             try proc.run()
         } catch {
+            try? outPipe.fileHandleForWriting.close()
+            try? errPipe.fileHandleForWriting.close()
+            _ = await stdoutTask.result
+            _ = await stderrTask.result
             continuation.finish(throwing: error)
             return
+        }
+        try? outPipe.fileHandleForWriting.close()
+        try? errPipe.fileHandleForWriting.close()
+
+        if cancelled, proc.isRunning {
+            Self.terminateWithEscalation(proc)
         }
 
         // Wait for termination off the actor thread so cancel() can acquire
         // the actor and call proc.terminate() while we are waiting.
-        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            proc.terminationHandler = { _ in done.resume() }
+        await Task.detached { proc.waitUntilExit() }.value
+
+        if cancelled {
+            try? outPipe.fileHandleForReading.close()
+            try? errPipe.fileHandleForReading.close()
         }
 
         _ = await stdoutTask.result
@@ -179,6 +192,10 @@ actor PythonRunner {
     func cancel() {
         cancelled = true
         guard let proc = process, proc.isRunning else { return }
+        Self.terminateWithEscalation(proc)
+    }
+
+    private nonisolated static func terminateWithEscalation(_ proc: Process) {
         proc.terminate()   // SIGTERM
         Task.detached {
             try? await Task.sleep(for: .seconds(3))
