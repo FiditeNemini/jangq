@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.30"
-description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.30: JANGTQ MPP/NAX auto dispatch is prefill-gated, health checks avoid smoke Metal evals, and Kimi/VLM warmup compiles the trained-router prefill shape. v2.5.29: Kimi K2.6 JANGTQ_K conversion adds mixed routed bits, VL aux-file preservation, and prestacked runtime metadata."
+version = "2.5.31"
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.31: Gemma 4 QAT JANG_4M/MXFP converters preserve VL/audio sidecars and BF16 media tensors, split stacked SwitchGLU expert keys for runtime loaders, and expose MiMo-V2.5 converter/verifier CLIs. v2.5.30: JANGTQ MPP/NAX auto dispatch is prefill-gated and Kimi/VLM warmup compiles the trained-router prefill shape."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]
@@ -42,6 +42,10 @@ jang-convert-zaya-mxfp4 = "jang_tools.convert_zaya_mxfp4:main"
 jang-convert-zaya1-vl-jangtq = "jang_tools.convert_zaya1_vl_jangtq:main"
 jang-convert-zaya1-vl-mxfp4 = "jang_tools.convert_zaya1_vl_mxfp4:main"
 jang-convert-kimi-jangtq = "jang_tools.kimi_prune.convert_kimi_jangtq:main"
+jang-convert-gemma4-jang = "jang_tools.convert_gemma4_jang:main"
+jang-convert-gemma4-mxfp = "jang_tools.convert_gemma4_mxfp:main"
+jang-convert-mimo-v2-jang = "jang_tools.mimo_v2.convert_jang:main"
+jang-verify-mimo-v2 = "jang_tools.mimo_v2.verify_bundle:main"
 jang-laguna-runtime  = "jang_tools.laguna.runtime:main"
 jang-mistral3-runtime = "jang_tools.mistral3.runtime:main"
 jang-mmlu = "jang_tools.eval.mmlu:main"

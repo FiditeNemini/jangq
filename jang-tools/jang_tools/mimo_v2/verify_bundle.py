@@ -18,7 +18,6 @@ import json
 import sys
 from pathlib import Path
 
-import torch
 from safetensors import safe_open
 
 
