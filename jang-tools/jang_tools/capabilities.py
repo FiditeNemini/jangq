@@ -43,6 +43,11 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "minimax_m2":       ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax_m2_5":     ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax":          ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
+    # MiMo V2.5 — hybrid full-attention + SWA KV. Cache topology details
+    # live in the MiMo converter/runtime metadata; the shared capability stamp
+    # keeps generic JANG restamping on the XML reasoning/tool parser path.
+    "mimo_v2":          ("mimo_v2",     "think_xml",   "xml_function", False, "kv"),
+    "mimo_v2_flash":    ("mimo_v2",     "think_xml",   "xml_function", False, "kv"),
     # GLM 5.x (MLA + DSA)
     "glm_moe_dsa":      ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
     "glm5":             ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
@@ -82,6 +87,19 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # `content` null — visible as empty UI bubbles on thinking-off prompts.
     "bailing_hybrid":   ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
     "bailing_moe_v2_5": ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
+    # Liquid LFM2/LFM2.5 hybrid LIV-conv + GQA + MoE. The template does not
+    # pre-open a think block, but model outputs use <think>...</think> and
+    # tool calls use the Liquid Python-call format parsed by vmlx as "lfm2".
+    "lfm2":             ("lfm2",       "qwen3",       "lfm2",     False, "hybrid"),
+    "lfm2_moe":         ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
+    "lfm2_5":           ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
+    "lfm25":            ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
+    # StepFun Step 3.7 Flash is a Step3p7 VLM wrapper around Step3p5 text
+    # weights. The chat template opens <think> on assistant prefill and the
+    # official serving recipes use the Step3p5 XML tool parser. Attention is
+    # standard KV with a full/sliding-window layer pattern, not MLA or SSM.
+    "step3p5":          ("step3p7",     "qwen3",       "step3p5",  True,  "kv"),
+    "step3p7":          ("step3p7",     "qwen3",       "step3p5",  True,  "kv"),
     # Tencent Hy3-preview (HYV3ForCausalLM) — text-only MoE, 295B/21B active.
     # GQA + qk_norm, sigmoid router with expert_bias (DSV3-style aux-free balancing),
     # 1 shared expert, first_k_dense_replace=1, native MTP layer, 256K context.
@@ -147,8 +165,21 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
     return None, unique
 
 
+def _resolve_modalities(jang: dict, config: dict) -> dict[str, bool]:
+    """Resolve source-backed modal components from JANG and HF config stamps."""
+    has_vision = bool(jang.get("has_vision", config.get("has_vision", bool(config.get("vision_config")))))
+    has_audio = bool(jang.get("has_audio", config.get("has_audio", bool(config.get("audio_config")))))
+    has_video = bool(jang.get("has_video", config.get("has_video", bool(config.get("video_config")))))
+    return {
+        "text": True,
+        "vision": has_vision,
+        "audio": has_audio,
+        "video": has_video,
+    }
+
+
 def _resolve_modality(jang: dict, config: dict, model_path: Path | None = None) -> str:
-    """text | vision. jang.has_vision is authoritative when present.
+    """text | vision | audio | multimodal. jang has_* stamps are authoritative.
 
     M127 (iter 50): the fallback used to return "vision" if EITHER
     ``text_config`` OR ``vision_config`` appeared in the HF config. But many
@@ -160,8 +191,13 @@ def _resolve_modality(jang: dict, config: dict, model_path: Path | None = None) 
     VLMModelFactory and fail to load. Tightened to require ``vision_config``
     specifically — text_config alone is NOT a vision signal.
     """
-    if "has_vision" in jang:
-        return "vision" if jang["has_vision"] else "text"
+    modalities = _resolve_modalities(jang, config)
+    active_modal = [k for k in ("vision", "audio", "video") if modalities.get(k)]
+    if len(active_modal) > 1:
+        return "multimodal"
+    if active_modal:
+        return active_modal[0]
+
     arch_dict = jang.get("architecture")
     if isinstance(arch_dict, dict) and "has_vision" in arch_dict:
         return "vision" if arch_dict["has_vision"] else "text"
@@ -191,6 +227,7 @@ def build_capabilities(
         return None
     family, reasoning, tool, think_in_template, cache_type = FAMILY_MAP[matched]
     modality = _resolve_modality(jang, config, model_path)
+    modalities = _resolve_modalities(jang, config)
     # supports_thinking advertises whether the model architecturally produces
     # chain-of-thought reasoning. ZAYA / ZAYA1-VL DO reason — measured live:
     # `enable_thinking=False` (default template) still produces chain-of-thought
@@ -208,6 +245,10 @@ def build_capabilities(
         "supports_thinking": supports_thinking,
         "family": family,
         "modality": modality,
+        "modalities": modalities,
+        "has_vision": modalities["vision"],
+        "has_audio": modalities["audio"],
+        "has_video": modalities["video"],
         "cache_type": cache_type,
     }
 
@@ -282,6 +323,7 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
     valid_tool = {"qwen", "qwen3", "hermes", "llama", "mistral", "deepseek",
                   "kimi", "granite", "nemotron", "step3p5", "xlam",
                   "functionary", "glm47", "minimax", "gemma4", "native",
+                  "lfm2",
                   # DSV4 native DSML format + Zaya XML tool format. Both
                   # have dedicated parsers in vmlx_engine.tool_parsers.
                   # Without these, verify_directory rejected legitimate
@@ -292,7 +334,7 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
                   # registers this parser as "hy_v3", SGLang as "hunyuan".
                   "hunyuan"}
     valid_cache = {"kv", "hybrid", "mla", "mamba"}
-    valid_modality = {"text", "vision", "embedding", "rerank", "image"}
+    valid_modality = {"text", "vision", "audio", "multimodal", "embedding", "rerank", "image"}
 
     if caps["reasoning_parser"] not in valid_reasoning:
         return False, f"reasoning_parser={caps['reasoning_parser']!r} not in {sorted(valid_reasoning - {None})}"

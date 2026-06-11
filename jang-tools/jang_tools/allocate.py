@@ -62,7 +62,7 @@ def _prev_bit_width(current: int) -> Optional[int]:
 #               WARNING: 2-bit on 512+ expert models may cause NaN (proven on 397B).
 #
 #               Examples: MLP/FFN layers (dense or expert),
-#               linear attention out_proj, vision FFN, SSM input/output projections.
+#               vision FFN, generic SSM input/output projections.
 #
 # ── Precision Floor Rules (proven empirically) ──────────────
 #
@@ -144,6 +144,8 @@ TIER_RULES = [
     ("k_proj", Tier.CRITICAL),
     ("v_proj", Tier.CRITICAL),
     ("o_proj", Tier.CRITICAL),
+    ("self_attn.out_proj", Tier.CRITICAL),
+    ("self_attn.g_proj", Tier.CRITICAL),
 
     # ── SSM State Matrices (Mamba) ───────────────────────────
     ("a_log", Tier.CRITICAL),
@@ -185,6 +187,9 @@ TIER_RULES = [
     # Must come BEFORE generic "proj" catch-all.
     ("mixer.in_proj", Tier.IMPORTANT),
     ("mixer.out_proj", Tier.IMPORTANT),
+    ("conv.in_proj", Tier.IMPORTANT),
+    ("conv.out_proj", Tier.IMPORTANT),
+    ("conv.conv", Tier.CRITICAL),
     ("x_proj", Tier.IMPORTANT),
     ("conv1d", Tier.COMPRESS),
 
@@ -216,6 +221,7 @@ TIER_RULES = [
     ("in_proj_z", Tier.IMPORTANT),
     ("in_proj_a", Tier.IMPORTANT),
     ("in_proj_b", Tier.IMPORTANT),
+    ("linear_attn.out_proj", Tier.IMPORTANT),
     ("delta_net", Tier.IMPORTANT),
 
     # ── Vision FFN ───────────────────────────────────────────
@@ -223,7 +229,7 @@ TIER_RULES = [
     ("linear_fc2", Tier.COMPRESS),
 
     # ── Generic attention output (must come after specific patterns) ──
-    # Catches: Mamba out_proj, linear attention out_proj, vision proj
+    # Catches: generic out_proj variants and vision proj
     ("out_proj", Tier.COMPRESS),
 
     # ── Vision attention (fused QKV) ─────────────────────────
@@ -275,6 +281,9 @@ def classify_tensor(tensor_name: str, num_experts: int = 0, has_shared_mlp: bool
         for mlp_pat in ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
                         "mlp.fc1", "mlp.fc2"):
             if mlp_pat in name_lower:
+                return Tier.CRITICAL
+        for lfm_dense_pat in (".feed_forward.w1.", ".feed_forward.w2.", ".feed_forward.w3."):
+            if lfm_dense_pat in name_lower:
                 return Tier.CRITICAL
 
     for pattern, tier in TIER_RULES:
@@ -686,6 +695,7 @@ def allocate_bits_profile(
     profile: str = "JANG_3M",
     num_experts: int = 0,
     has_shared_mlp: bool = False,
+    apply_mlp_asymmetry: bool = True,
 ) -> np.ndarray:
     """
     Tier-based bit allocation — classifies each tensor into a sensitivity
@@ -737,7 +747,8 @@ def allocate_bits_profile(
                 runs.append((cache[prev_name], run_count))
             if name not in cache:
                 assigned = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
-                assigned = _apply_mlp_asymmetry_floor(name, assigned, num_experts)
+                if apply_mlp_asymmetry:
+                    assigned = _apply_mlp_asymmetry_floor(name, assigned, num_experts)
                 cache[name] = assigned
             prev_name = name
             run_count = 1
@@ -965,6 +976,7 @@ def allocate_bits_profile_compact(
     profile: str = "JANG_3M",
     num_experts: int = 0,
     has_shared_mlp: bool = False,
+    apply_mlp_asymmetry: bool = True,
 ) -> dict[str, int]:
     """Per-tensor profile allocation. Returns tensor_name → bits.
 
@@ -984,7 +996,8 @@ def allocate_bits_profile_compact(
     result = {}
     for name, n_blocks in tensor_info:
         bits = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
-        bits = _apply_mlp_asymmetry_floor(name, bits, num_experts)
+        if apply_mlp_asymmetry:
+            bits = _apply_mlp_asymmetry_floor(name, bits, num_experts)
         result[name] = bits
     return result
 
