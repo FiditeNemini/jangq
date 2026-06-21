@@ -35,7 +35,7 @@ from mlx_lm.models.base import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.cache import KVCache, RotatingKVCache
+from mlx_lm.models.cache import KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
 
@@ -472,10 +472,17 @@ class Model(nn.Module):
     def make_cache(self) -> list[KVCache]:
         caches: list[KVCache] = []
         for layer in self.model.layers:
-            if layer.is_swa:
-                caches.append(RotatingKVCache(max_size=self.args.sliding_window, keep=4))
-            else:
-                caches.append(KVCache())
+            # SWA layers MUST use a plain KVCache, NOT RotatingKVCache.
+            # RotatingKVCache(max_size=window) corrupts generation when the
+            # PREFILL exceeds max_size: _update_concat stores the full prompt,
+            # then the first decode step trims+rotates inconsistently, desyncing
+            # the rope'd key positions from the rotated buffer -> degenerate
+            # newline/im_end loops once total length > sliding_window (128).
+            # KVCache stores all keys and lets create_attention_mask(window_size)
+            # enforce the sliding window via make_mask in BOTH prefill and decode,
+            # which matches the (coherent) no-cache full-reforward path exactly.
+            # (A correct windowed rotating cache is a future memory optimization.)
+            caches.append(KVCache())
         return caches
 
     def sanitize(self, weights: dict[str, mx.array]) -> dict[str, mx.array]:

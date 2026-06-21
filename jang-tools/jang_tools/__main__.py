@@ -205,6 +205,7 @@ def cmd_convert(args):
         n2_self_attn_bits=args.n2_self_attn_bits,
         n2_shared_expert_gate_up_bits=args.n2_shared_expert_gate_up_bits,
         n2_token_io_bits=args.n2_token_io_bits,
+        n2_lm_head_bits=args.n2_lm_head_bits,
         progress_emitter=getattr(args, "progress_emitter", None),
     )
 
@@ -288,6 +289,9 @@ def main():
                           help="For Nex/N2 qwen3_5_moe, force shared_expert gate/up tensors to this bit width")
     p_convert.add_argument("--n2-token-io-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
                           help="For Nex/N2 qwen3_5_moe, force embed_tokens and lm_head tensors to this bit width")
+    p_convert.add_argument("--n2-lm-head-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
+                          help="For Nex/N2 qwen3_5_moe, force lm_head tensors to this bit width; overrides "
+                               "--n2-token-io-bits for lm_head only")
     p_convert.set_defaults(func=cmd_convert)
 
     # profile

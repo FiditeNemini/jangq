@@ -554,6 +554,7 @@ def convert_model(
     n2_self_attn_bits: Optional[int] = None,
     n2_shared_expert_gate_up_bits: Optional[int] = None,
     n2_token_io_bits: Optional[int] = None,
+    n2_lm_head_bits: Optional[int] = None,
     *,
     progress_emitter=None,
 ) -> dict:
@@ -616,6 +617,8 @@ def convert_model(
         print(f"  N2 shared_expert gate/up bits: {n2_shared_expert_gate_up_bits}")
     if n2_token_io_bits is not None:
         print(f"  N2 token input/output bits: {n2_token_io_bits}")
+    if n2_lm_head_bits is not None:
+        print(f"  N2 lm_head bits: {n2_lm_head_bits}")
     if force_dtype:
         print(f"  Force source dtype: {force_dtype} (per-tensor sniff overridden)")
     print(f"{'='*60}\n")
@@ -894,7 +897,7 @@ def convert_model(
         ".mlp.shared_expert.gate_proj.weight": n2_shared_expert_gate_up_bits,
         ".mlp.shared_expert.up_proj.weight": n2_shared_expert_gate_up_bits,
         "model.embed_tokens.weight": n2_token_io_bits,
-        "lm_head.weight": n2_token_io_bits,
+        "lm_head.weight": n2_lm_head_bits if n2_lm_head_bits is not None else n2_token_io_bits,
     }
     if any(_bits is not None for _bits in _n2_extra_overrides.values()):
         _model_type = str(getattr(arch_config, "model_type", "") or "").lower()
@@ -957,6 +960,9 @@ def convert_model(
         for _name in list(_tensor_bits):
             if _is_n2_expert_down(_name):
                 _tensor_bits[_name] = int(n2_down_bits)
+        if use_compact:
+            alloc_summary = summarize_allocation_compact(_tensor_bits, tensor_info, num_experts)
+            actual_bits = alloc_summary["average_bits"]
 
     print(f"  Target bits: {target_bits}")
     print(f"  Actual bits: {actual_bits:.2f}")
@@ -1010,6 +1016,31 @@ def convert_model(
     expert_buffer = {}  # (layer_prefix, wtype) → {expert_id: {weight, scales, biases}}
     passthrough = {}
     passthrough_bits = {}
+    tensor_quantization_manifest: dict[str, dict] = {}
+
+    def _shape_list(arr) -> list[int]:
+        return [int(v) for v in getattr(arr, "shape", ())]
+
+    def _record_quantized_tensor(
+        output_base: str,
+        source_name: str,
+        bits_value: int,
+        group_size_value: int,
+        qweight,
+        scales,
+        biases,
+    ) -> None:
+        tensor_quantization_manifest[output_base] = {
+            "source_tensor": source_name,
+            "bits": int(bits_value),
+            "group_size": int(group_size_value),
+            "weight_key": f"{output_base}.weight",
+            "scales_key": f"{output_base}.scales",
+            "biases_key": f"{output_base}.biases",
+            "weight_shape": _shape_list(qweight),
+            "scales_shape": _shape_list(scales),
+            "biases_shape": _shape_list(biases),
+        }
 
     total_tensors = len(all_tensors_info)
     for i, (tensor_name, shape, n_blocks, sf_path) in enumerate(all_tensors_info):
@@ -1171,6 +1202,24 @@ def convert_model(
             v2_tensors[f"{up_base}.weight"] = up_qw
             v2_tensors[f"{up_base}.scales"] = up_scales
             v2_tensors[f"{up_base}.biases"] = up_biases
+            _record_quantized_tensor(
+                gate_base,
+                tensor_name,
+                split_gate_bits,
+                tensor_gs,
+                gate_qw,
+                gate_scales,
+                gate_biases,
+            )
+            _record_quantized_tensor(
+                up_base,
+                tensor_name,
+                split_up_bits,
+                tensor_gs,
+                up_qw,
+                up_scales,
+                up_biases,
+            )
             del weights, gate_weights, up_weights, gate_qw, gate_scales, gate_biases, up_qw, up_scales, up_biases
 
             _buf_bytes = sum(arr.nbytes for arr in v2_tensors.values())
@@ -1382,6 +1431,24 @@ def convert_model(
                 v2_tensors[f"{up_base}.weight"] = mlx_weight[:, mid:, :]
                 v2_tensors[f"{up_base}.scales"] = mlx_scales[:, mid:, :]
                 v2_tensors[f"{up_base}.biases"] = mlx_biases[:, mid:, :]
+                _record_quantized_tensor(
+                    gate_base,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{gate_base}.weight"],
+                    v2_tensors[f"{gate_base}.scales"],
+                    v2_tensors[f"{gate_base}.biases"],
+                )
+                _record_quantized_tensor(
+                    up_base,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{up_base}.weight"],
+                    v2_tensors[f"{up_base}.scales"],
+                    v2_tensors[f"{up_base}.biases"],
+                )
             else:
                 # 2D: (2*inter, packed) → split into gate + up
                 mid = mlx_weight.shape[0] // 2
@@ -1393,6 +1460,24 @@ def convert_model(
                 v2_tensors[f"{up_base}.weight"] = mlx_weight[mid:, :]
                 v2_tensors[f"{up_base}.scales"] = mlx_scales[mid:, :]
                 v2_tensors[f"{up_base}.biases"] = mlx_biases[mid:, :]
+                _record_quantized_tensor(
+                    gate_base,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{gate_base}.weight"],
+                    v2_tensors[f"{gate_base}.scales"],
+                    v2_tensors[f"{gate_base}.biases"],
+                )
+                _record_quantized_tensor(
+                    up_base,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{up_base}.weight"],
+                    v2_tensors[f"{up_base}.scales"],
+                    v2_tensors[f"{up_base}.biases"],
+                )
 
         # Handle 3D expert down_proj renaming
         elif is_3d and "experts" in base_name and "down_proj" in base_name:
@@ -1400,6 +1485,15 @@ def convert_model(
             v2_tensors[f"{sw_base}.weight"] = mlx_weight
             v2_tensors[f"{sw_base}.scales"] = mlx_scales
             v2_tensors[f"{sw_base}.biases"] = mlx_biases
+            _record_quantized_tensor(
+                sw_base,
+                tensor_name,
+                bits,
+                tensor_gs,
+                mlx_weight,
+                mlx_scales,
+                mlx_biases,
+            )
 
         # Handle per-expert 2D tensors (MiniMax/Mixtral/GLM-5: experts.N.w1)
         # Stack into 3D as soon as all experts for a group are collected,
@@ -1431,6 +1525,15 @@ def convert_model(
                     [expert_buffer[group_key][e]["scales"] for e in range(n_exp)])
                 v2_tensors[f"{sw_key}.biases"] = np.stack(
                     [expert_buffer[group_key][e]["biases"] for e in range(n_exp)])
+                _record_quantized_tensor(
+                    sw_key,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{sw_key}.weight"],
+                    v2_tensors[f"{sw_key}.scales"],
+                    v2_tensors[f"{sw_key}.biases"],
+                )
                 del expert_buffer[group_key]
 
         # Standard tensor — store directly
@@ -1438,6 +1541,15 @@ def convert_model(
             v2_tensors[f"{base_name}.weight"] = mlx_weight
             v2_tensors[f"{base_name}.scales"] = mlx_scales
             v2_tensors[f"{base_name}.biases"] = mlx_biases
+            _record_quantized_tensor(
+                base_name,
+                tensor_name,
+                bits,
+                tensor_gs,
+                mlx_weight,
+                mlx_scales,
+                mlx_biases,
+            )
 
         del weights
 
@@ -1608,9 +1720,13 @@ def convert_model(
             "n2_self_attn_bits": n2_self_attn_bits,
             "n2_shared_expert_gate_up_bits": n2_shared_expert_gate_up_bits,
             "n2_token_io_bits": n2_token_io_bits,
+            "n2_lm_head_bits": n2_lm_head_bits,
             "expert_prune_keep": expert_prune_keep,
             "expert_prune_map": str(expert_prune_map) if expert_prune_map else None,
             "expert_prune_method": expert_prune_method,
+            "tensor_quantization_manifest_schema": 1,
+            "tensor_quantization_manifest_count": len(tensor_quantization_manifest),
+            "tensor_quantization_manifest": tensor_quantization_manifest,
         },
         "source_model": {
             "name": model_path.name,

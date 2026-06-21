@@ -1,6 +1,21 @@
 """MiMo-V2.5 → JANG bundle converter.
 
 Profiles:
+    JANG_2S  sub-105GB target: routed experts gate=4/up=2/down=3 affine,
+             qkv + layer-0 dense 6-bit affine, o_proj 8-bit affine,
+             token I/O + ViT/audio bf16
+    JANG_2C  coherence-leaning sub-105GB target: routed experts 4/3/3,
+             qkv + layer-0 dense 6-bit affine, o_proj 8-bit affine,
+             token I/O + ViT/audio bf16
+    JANG_2X  tighter-size sub-105GB target: routed experts 3/2/3,
+             qkv 5-bit + layer-0 dense 6-bit affine, o_proj 8-bit affine,
+             token I/O + ViT/audio bf16
+    JANG_2F  comfortable sub-105GB target: routed experts 2/2/2,
+             text affine bookends/o_proj/qkv/layer0 dense 4-bit,
+             ViT/audio bf16
+    JANG_2Q  quality-leaning comfortable sub-105GB target: routed experts 2/2/2,
+             default text affine/o_proj 4-bit, qkv + layer0 dense 6-bit,
+             ViT/audio bf16
     JANG_2L  routed experts: 2-bit affine, everything else 8-bit affine, ViT/audio/o_proj bf16
     JANG_4M  routed experts: 4-bit affine, everything else 8-bit affine, ViT/audio/o_proj bf16
     JANG_2K  routed experts: gate/up 2-bit, down 4-bit, everything else as above
@@ -45,14 +60,14 @@ import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from safetensors.torch import save_file as sf_save_torch
 
+from .affine_codec import quantize_minmax_affine
 from .weight_loader import MiMoShardIndex
 
 
@@ -65,6 +80,13 @@ _EXPERT_PAT = re.compile(r"\.mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.w
 _EXPERT_RUNTIME_PAT = re.compile(
     r"^(model\.layers\.(?P<layer>\d+)\.mlp)\.experts\.(?P<expert>\d+)\."
     r"(?P<proj>gate_proj|up_proj|down_proj)\.weight$"
+)
+_EXPERT_ANY_PAT = re.compile(
+    r"^(model\.layers\.(?P<layer>\d+)\.mlp)\.experts\.(?P<expert>\d+)\."
+    r"(?P<proj>gate_proj|up_proj|down_proj)\.(?P<suffix>weight|scales|biases)$"
+)
+_ROUTER_ROW_PAT = re.compile(
+    r"^model\.layers\.(?P<layer>\d+)\.mlp\.gate\.(weight|e_score_correction_bias)$"
 )
 _PASSTHROUGH_NAME_TAILS = (
     "norm.weight",
@@ -84,14 +106,331 @@ def is_routed_expert_weight(name: str) -> bool:
 
 
 @dataclass(frozen=True)
+class ExpertKeepMap:
+    layers: dict[int, list[int]]
+
+    def __post_init__(self) -> None:
+        if not self.layers:
+            raise ValueError("expert keep map must contain at least one layer")
+        counts = {len(v) for v in self.layers.values()}
+        if len(counts) != 1:
+            raise ValueError(f"expert keep map must use one global keep count, got {sorted(counts)}")
+        for layer, experts in self.layers.items():
+            if len(set(experts)) != len(experts):
+                raise ValueError(f"layer {layer}: duplicate experts in keep map")
+            bad = [expert for expert in experts if expert < 0]
+            if bad:
+                raise ValueError(f"layer {layer}: negative expert ids {bad}")
+
+    @property
+    def keep_experts(self) -> int:
+        return len(next(iter(self.layers.values())))
+
+    def indices_for_layer(self, layer: int) -> list[int]:
+        try:
+            return self.layers[int(layer)]
+        except KeyError as exc:
+            raise KeyError(f"expert keep map missing layer {layer}") from exc
+
+    def remap(self, layer: int, expert: int) -> int | None:
+        experts = self.indices_for_layer(layer)
+        try:
+            return experts.index(int(expert))
+        except ValueError:
+            return None
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "schema": "mimo-v2-expert-keep-map-v1",
+            "keep_experts": self.keep_experts,
+            "layers": {str(layer): experts for layer, experts in sorted(self.layers.items())},
+        }
+
+
+def remap_expert_tensor_name(name: str, expert_keep_map: ExpertKeepMap | None) -> str | None:
+    if expert_keep_map is None:
+        return name
+    m = _EXPERT_ANY_PAT.match(name)
+    if not m:
+        return name
+    layer = int(m.group("layer"))
+    new_expert = expert_keep_map.remap(layer, int(m.group("expert")))
+    if new_expert is None:
+        return None
+    return (
+        f"{m.group(1)}.experts.{new_expert}."
+        f"{m.group('proj')}.{m.group('suffix')}"
+    )
+
+
+def slice_router_tensor(name: str, tensor: torch.Tensor, expert_keep_map: ExpertKeepMap | None) -> torch.Tensor:
+    if expert_keep_map is None:
+        return tensor
+    m = _ROUTER_ROW_PAT.match(name)
+    if not m:
+        return tensor
+    keep = torch.tensor(expert_keep_map.indices_for_layer(int(m.group("layer"))), dtype=torch.long)
+    return tensor.index_select(0, keep)
+
+
+def load_expert_keep_map(
+    path: Path,
+    *,
+    keep_experts: int,
+    num_layers: int = 48,
+    num_experts: int = 256,
+) -> ExpertKeepMap:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    layers_data = data.get("layers")
+    if not isinstance(layers_data, dict):
+        raise ValueError(f"expert keep map missing layers dict: {path}")
+
+    layers: dict[int, list[int]] = {}
+    for layer_idx in range(1, num_layers):
+        raw = layers_data.get(str(layer_idx))
+        if not isinstance(raw, dict):
+            raise ValueError(f"expert keep map missing layer {layer_idx}")
+        if isinstance(raw.get("keep"), list):
+            ranked = raw["keep"]
+        elif isinstance(raw.get("prob_rank"), list):
+            ranked = raw["prob_rank"]
+        elif isinstance(raw.get("experts"), list):
+            ranked = raw["experts"]
+        else:
+            raise ValueError(f"expert keep map layer {layer_idx} has no keep/prob_rank/experts list")
+        selected: list[int] = []
+        seen: set[int] = set()
+        for value in ranked:
+            expert = int(value)
+            if expert < 0 or expert >= num_experts:
+                raise ValueError(f"expert keep map layer {layer_idx}: expert id {expert} outside 0..{num_experts - 1}")
+            if expert not in seen:
+                selected.append(expert)
+                seen.add(expert)
+            if len(selected) >= keep_experts:
+                break
+        for expert in range(num_experts):
+            if len(selected) >= keep_experts:
+                break
+            if expert not in seen:
+                selected.append(expert)
+                seen.add(expert)
+        if len(selected) != keep_experts:
+            raise ValueError(f"expert keep map layer {layer_idx} produced {len(selected)} experts; need {keep_experts}")
+        layers[layer_idx] = selected
+    return ExpertKeepMap(layers)
+
+
+@dataclass(frozen=True)
 class QuantProfile:
     name: str
     routed_expert_bits: int | dict[str, int]
     expert_proj_bits: dict[str, int]
+    bookend_bits: int = 8
+    qkv_bits: int = 8
+    layer0_dense_bits: int = 8
+    o_proj_bits: int | None = None
+    token_io_bf16: bool = False
+    non_expert_text_bf16: bool = False
+    expert_group_size: int = 64
+    expert_layer_bits: dict[int, dict[str, int]] = field(default_factory=dict)
 
     @classmethod
     def parse(cls, raw: str | int) -> "QuantProfile":
         key = str(raw).strip().lower().replace("_", "").replace("-", "").replace("/", "")
+        if key in {"1", "1l", "jang1l", "2s", "jang2s"}:
+            bits = {"gate_proj": 4, "up_proj": 2, "down_proj": 3}
+            return cls(
+                "JANG_2S",
+                bits,
+                bits,
+                qkv_bits=6,
+                layer0_dense_bits=6,
+                o_proj_bits=8,
+                token_io_bf16=True,
+            )
+        if key in {"2c", "jang2c", "coh", "coherence"}:
+            bits = {"gate_proj": 4, "up_proj": 3, "down_proj": 3}
+            return cls(
+                "JANG_2C",
+                bits,
+                bits,
+                qkv_bits=6,
+                layer0_dense_bits=6,
+                o_proj_bits=8,
+                token_io_bf16=True,
+            )
+        if key in {"2x", "jang2x", "xs", "tight"}:
+            bits = {"gate_proj": 3, "up_proj": 2, "down_proj": 3}
+            return cls(
+                "JANG_2X",
+                bits,
+                bits,
+                qkv_bits=5,
+                layer0_dense_bits=6,
+                o_proj_bits=8,
+                token_io_bf16=True,
+            )
+        if key in {"2f", "jang2f", "floor", "comfortable"}:
+            bits = {"gate_proj": 2, "up_proj": 2, "down_proj": 2}
+            return cls(
+                "JANG_2F",
+                bits,
+                bits,
+                bookend_bits=4,
+                qkv_bits=4,
+                layer0_dense_bits=4,
+                o_proj_bits=4,
+            )
+        if key in {"2q", "jang2q", "quality"}:
+            bits = {"gate_proj": 2, "up_proj": 2, "down_proj": 2}
+            return cls(
+                "JANG_2Q",
+                bits,
+                bits,
+                bookend_bits=4,
+                qkv_bits=6,
+                layer0_dense_bits=6,
+                o_proj_bits=4,
+            )
+        m = re.fullmatch(
+            r"([2348][2348][2348])g(32|64|128)l([1-9]|1[0-6])x8"
+            r"(?:b([568]))?(?:q([4568]))?(t16|n16)?",
+            key,
+        )
+        if m:
+            digits = m.group(1)
+            group_size = int(m.group(2))
+            late_count = int(m.group(3))
+            bookend_bits = int(m.group(4) or 8)
+            qkv_bits = int(m.group(5) or bookend_bits)
+            bf16_suffix = m.group(6)
+            token_io_bf16 = bf16_suffix == "t16"
+            non_expert_text_bf16 = bf16_suffix == "n16"
+            bits = {
+                "gate_proj": int(digits[0]),
+                "up_proj": int(digits[1]),
+                "down_proj": int(digits[2]),
+            }
+            late = {"gate_proj": 8, "up_proj": 8, "down_proj": 8}
+            return cls(
+                f"JANG_{digits.upper()}G{group_size}L{late_count}X8B{bookend_bits}Q{qkv_bits}"
+                + ("T16" if token_io_bf16 else "")
+                + ("N16" if non_expert_text_bf16 else ""),
+                bits,
+                bits,
+                bookend_bits=bookend_bits,
+                qkv_bits=qkv_bits,
+                layer0_dense_bits=bookend_bits,
+                o_proj_bits=None,
+                token_io_bf16=token_io_bf16,
+                non_expert_text_bf16=non_expert_text_bf16,
+                expert_group_size=group_size,
+                expert_layer_bits={layer: late for layer in range(48 - late_count, 48)},
+            )
+        m = re.fullmatch(
+            r"([2348][2348][2348])g(32|64|128)e([1-9]|1[0-6])x8"
+            r"(?:b([568]))?(?:q([4568]))?(t16|n16)?",
+            key,
+        )
+        if m:
+            digits = m.group(1)
+            group_size = int(m.group(2))
+            early_count = int(m.group(3))
+            bookend_bits = int(m.group(4) or 8)
+            qkv_bits = int(m.group(5) or bookend_bits)
+            bf16_suffix = m.group(6)
+            token_io_bf16 = bf16_suffix == "t16"
+            non_expert_text_bf16 = bf16_suffix == "n16"
+            bits = {
+                "gate_proj": int(digits[0]),
+                "up_proj": int(digits[1]),
+                "down_proj": int(digits[2]),
+            }
+            early = {"gate_proj": 8, "up_proj": 8, "down_proj": 8}
+            return cls(
+                f"JANG_{digits.upper()}G{group_size}E{early_count}X8B{bookend_bits}Q{qkv_bits}"
+                + ("T16" if token_io_bf16 else "")
+                + ("N16" if non_expert_text_bf16 else ""),
+                bits,
+                bits,
+                bookend_bits=bookend_bits,
+                qkv_bits=qkv_bits,
+                layer0_dense_bits=bookend_bits,
+                o_proj_bits=None,
+                token_io_bf16=token_io_bf16,
+                non_expert_text_bf16=non_expert_text_bf16,
+                expert_group_size=group_size,
+                expert_layer_bits={layer: early for layer in range(1, early_count + 1)},
+            )
+        m = re.fullmatch(r"([2348][2348][2348])(?:g(32|64|128))?(?:b([568]))?(?:q([4568]))?(t16|n16)?", key)
+        if m:
+            digits = m.group(1)
+            group_size = int(m.group(2) or 128)
+            bookend_bits = int(m.group(3) or 8)
+            qkv_bits = int(m.group(4) or bookend_bits)
+            bf16_suffix = m.group(5)
+            token_io_bf16 = bf16_suffix == "t16"
+            non_expert_text_bf16 = bf16_suffix == "n16"
+            bits = {
+                "gate_proj": int(digits[0]),
+                "up_proj": int(digits[1]),
+                "down_proj": int(digits[2]),
+            }
+            return cls(
+                f"JANG_{digits.upper()}G{group_size}B{bookend_bits}Q{qkv_bits}"
+                + ("T16" if token_io_bf16 else "")
+                + ("N16" if non_expert_text_bf16 else ""),
+                bits,
+                bits,
+                bookend_bits=bookend_bits,
+                qkv_bits=qkv_bits,
+                layer0_dense_bits=bookend_bits,
+                o_proj_bits=None,
+                token_io_bf16=token_io_bf16,
+                non_expert_text_bf16=non_expert_text_bf16,
+                expert_group_size=group_size,
+            )
+        m = re.fullmatch(r"(?:slim)?322d3e([1-9]|1[0-6])(?:b([568]))?(?:q([4568]))?", key)
+        if m:
+            end_layer = int(m.group(1))
+            bookend_bits = int(m.group(2) or 4)
+            qkv_bits = int(m.group(3) or 6)
+            base = {"gate_proj": 3, "up_proj": 2, "down_proj": 2}
+            early = {"gate_proj": 3, "up_proj": 2, "down_proj": 3}
+            return cls(
+                f"JANG_2R_322D3E{end_layer}"
+                + (f"B{bookend_bits}" if bookend_bits != 4 else "")
+                + (f"Q{qkv_bits}" if qkv_bits != 6 else ""),
+                base,
+                base,
+                bookend_bits=bookend_bits,
+                qkv_bits=qkv_bits,
+                layer0_dense_bits=6,
+                o_proj_bits=4,
+                expert_group_size=128,
+                expert_layer_bits={layer: early for layer in range(1, end_layer + 1)},
+            )
+        m = re.fullmatch(r"(?:slim)?333e([1-9]|1[0-6])(?:b([568]))?(?:q([4568]))?", key)
+        if m:
+            end_layer = int(m.group(1))
+            bookend_bits = int(m.group(2) or 4)
+            qkv_bits = int(m.group(3) or 6)
+            base = {"gate_proj": 3, "up_proj": 2, "down_proj": 2}
+            early = {"gate_proj": 3, "up_proj": 3, "down_proj": 3}
+            return cls(
+                f"JANG_2R_333E{end_layer}"
+                + (f"B{bookend_bits}" if bookend_bits != 4 else "")
+                + (f"Q{qkv_bits}" if qkv_bits != 6 else ""),
+                base,
+                base,
+                bookend_bits=bookend_bits,
+                qkv_bits=qkv_bits,
+                layer0_dense_bits=6,
+                o_proj_bits=4,
+                expert_group_size=128,
+                expert_layer_bits={layer: early for layer in range(1, end_layer + 1)},
+            )
         if key in {"2", "2l", "jang2l"}:
             return cls("JANG_2L", 2, {"gate_proj": 2, "up_proj": 2, "down_proj": 2})
         if key in {"4", "4m", "jang4m"}:
@@ -99,17 +438,35 @@ class QuantProfile:
         if key in {"k", "2k", "422", "242", "jang2k"}:
             bits = {"gate_proj": 2, "up_proj": 2, "down_proj": 4}
             return cls("JANG_2K", bits, bits)
-        raise ValueError(f"unknown MiMo quant profile {raw!r}; use 2, 4, or 2k")
+        raise ValueError(
+            f"unknown MiMo quant profile {raw!r}; use 2s, 2c, 2x, 2q, 2f, "
+            "projection profiles like 444g128/448g128 with optional t16/n16, "
+            "slim322d3eN, 2, 4, or 2k"
+        )
 
     @property
     def default_bits(self) -> int:
-        return 8
+        return self.bookend_bits
 
     def bits_for_expert_name(self, name: str) -> int:
+        runtime_match = _EXPERT_RUNTIME_PAT.match(name)
+        if runtime_match:
+            layer = int(runtime_match.group("layer"))
+            proj = runtime_match.group("proj")
+            return self.expert_layer_bits.get(layer, self.expert_proj_bits)[proj]
         m = _EXPERT_PAT.search(name)
         if not m:
             raise ValueError(f"not a routed expert weight: {name}")
         return self.expert_proj_bits[m.group(1)]
+
+    def routed_expert_bit_plan(self) -> dict[str, Any]:
+        return {
+            "default": self.expert_proj_bits,
+            "group_size": self.expert_group_size,
+            "layer_overrides": {
+                str(layer): bits for layer, bits in sorted(self.expert_layer_bits.items())
+            },
+        }
 
 
 def runtime_quant_base_for_weight(name: str) -> str:
@@ -118,6 +475,60 @@ def runtime_quant_base_for_weight(name: str) -> str:
     if m:
         return f"{m.group(1)}.switch_mlp.{m.group('proj')}"
     return name[: -len(".weight")] if name.endswith(".weight") else name
+
+
+
+_AWQ_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.(post_attention_layernorm\.weight|mlp\.gate\.weight|mlp\.experts\.\d+\.(?:gate_proj|up_proj)\.weight)$")
+
+
+def load_awq_scales(path: Path) -> dict[int, torch.Tensor]:
+    """Load per-layer AWQ MoE input scales saved by awq_source_probe.py."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    layers_data = data.get("layers")
+    if not isinstance(layers_data, dict) or not layers_data:
+        raise ValueError(f"awq scales file missing layers dict: {path}")
+    scales: dict[int, torch.Tensor] = {}
+    for key, values in layers_data.items():
+        s = torch.tensor(values, dtype=torch.float32)
+        if s.ndim != 1 or not torch.isfinite(s).all() or (s <= 0).any():
+            raise ValueError(f"awq scales layer {key}: must be a finite positive 1-D vector")
+        scales[int(key)] = s
+    return scales
+
+
+def apply_awq_fold(name: str, t: torch.Tensor, awq_scales: dict[int, torch.Tensor] | None) -> torch.Tensor:
+    """Fold AWQ input scales so the bundle needs no runtime changes.
+
+    MoE input x is produced by post_attention_layernorm and consumed by the
+    router and expert gate/up projections. Folding 1/s into the norm weight
+    and s into the consumer columns keeps the full-precision function
+    identical while shaping quantization error on gate/up:
+      norm.weight /= s ; router.weight[:, c] *= s ; gate/up[:, c] *= s.
+    down_proj input lives in a different space and is untouched.
+    """
+    if not awq_scales:
+        return t
+    m = _AWQ_LAYER_RE.match(name)
+    if m is None:
+        return t
+    layer_idx = int(m.group(1))
+    s = awq_scales.get(layer_idx)
+    if s is None:
+        return t
+    if name.endswith("post_attention_layernorm.weight"):
+        if t.shape[-1] != s.numel():
+            raise ValueError(f"{name}: norm dim {tuple(t.shape)} vs awq scale {s.numel()}")
+        return (t.float() / s).to(t.dtype)
+    if t.shape[-1] != s.numel():
+        raise ValueError(f"{name}: weight cols {tuple(t.shape)} vs awq scale {s.numel()}")
+    return (t.float() * s.view(1, -1)).to(t.dtype)
+
+
+def read_bf16_storage_tensor(idx: MiMoShardIndex, name: str) -> torch.Tensor:
+    """Read a tensor for bf16 storage, dequantizing FP8 source weights first."""
+    if idx.is_fp8_weight(name):
+        return idx.read_tensor(name, out_dtype=torch.bfloat16)
+    return idx.read_passthrough(name).to(torch.bfloat16)
 
 
 def classify(name: str, profile_bits: QuantProfile | int | str) -> tuple[int, str, int]:
@@ -143,17 +554,33 @@ def classify(name: str, profile_bits: QuantProfile | int | str) -> tuple[int, st
     if name.startswith("visual.") or name.startswith("audio_encoder.") or name.startswith("speech_embeddings."):
         return 16, "passthrough_bf16", 0
 
+    if profile_bits.token_io_bf16 and name in {"model.embed_tokens.weight", "lm_head.weight"}:
+        return 16, "passthrough_bf16", 0
+
+    if profile_bits.non_expert_text_bf16 and name.endswith(".weight") and not is_routed_expert_weight(name):
+        return 16, "passthrough_bf16", 0
+
+    if profile_bits.qkv_bits != profile_bits.default_bits and name.endswith(".self_attn.qkv_proj.weight"):
+        return profile_bits.qkv_bits, "affine", 64
+
+    if profile_bits.layer0_dense_bits != profile_bits.default_bits and name.startswith("model.layers.0.mlp.") and name.endswith("_proj.weight"):
+        return profile_bits.layer0_dense_bits, "affine", 64
+
+    if profile_bits.o_proj_bits is not None and name.endswith(".o_proj.weight"):
+        return profile_bits.o_proj_bits, "affine", 64
+
     # bf16 passthrough: all o_proj.weight (in source `ignored_layers`) + MTP eh_proj (bf16 in source).
     if name.endswith(".o_proj.weight") or name.endswith(".eh_proj.weight"):
         return 16, "passthrough_bf16", 0
 
     # Routed experts → profile_bits affine.
     if is_routed_expert_weight(name):
-        return profile_bits.bits_for_expert_name(name), "affine", 64
+        return profile_bits.bits_for_expert_name(name), "affine", profile_bits.expert_group_size
 
-    # Everything else (qkv_proj, layer-0 dense MLP, embed, lm_head, MTP qkv/mlp) → 8-bit affine.
+    # Everything else (qkv_proj, layer-0 dense MLP, embed, lm_head, MTP qkv/mlp)
+    # uses the profile default affine bit width.
     if name.endswith(".weight"):
-        return 8, "affine", 64
+        return profile_bits.default_bits, "affine", 64
 
     # Unknown — passthrough bf16 to be safe.
     return 16, "passthrough_bf16", 0
@@ -189,6 +616,8 @@ def _write_config_json(
     routed_group_size: int,
     quant_overrides: dict[str, dict],
     include_mtp: bool = True,
+    expert_keep_map: ExpertKeepMap | None = None,
+    awq_scales: dict[int, torch.Tensor] | None = None,
 ) -> None:
     cfg = json.loads((src / "config.json").read_text())
     cfg.pop("quantization_config", None)
@@ -213,6 +642,13 @@ def _write_config_json(
     cfg["routed_expert_bits"] = profile.routed_expert_bits
     cfg["jang_profile"] = profile.name
     cfg["jang_version"] = "v2"
+    if expert_keep_map is not None:
+        cfg["n_routed_experts"] = expert_keep_map.keep_experts
+        text_config = cfg.get("text_config")
+        if isinstance(text_config, dict):
+            text_config["n_routed_experts"] = expert_keep_map.keep_experts
+            if "num_experts" in text_config:
+                text_config["num_experts"] = expert_keep_map.keep_experts
     cfg["capabilities"] = {
         "family": "mimo_v2",
         # The released mlx runtime is text-only today. Vision/audio tensors are
@@ -246,7 +682,10 @@ def _write_config_json(
         "bundle_has_mtp": include_mtp,
         "multimodal_mode": "weights_preserved_text_runtime",
         "quantization_profile": profile.name,
+        "routed_expert_bit_plan": profile.routed_expert_bit_plan(),
     }
+    if expert_keep_map is not None:
+        cfg["runtime"]["expert_keep_map"] = expert_keep_map.metadata()
     (dst / "config.json").write_text(json.dumps(cfg, indent=2))
 
 
@@ -290,9 +729,9 @@ def convert(
     profile_bits: str | int,
     max_shard_bytes: int = 1_000_000_000,
     include_mtp: bool = True,
+    expert_keep_map: ExpertKeepMap | None = None,
+    awq_scales: dict[int, torch.Tensor] | None = None,
 ) -> None:
-    import mlx.core as mx
-
     profile = QuantProfile.parse(profile_bits)
     dst.mkdir(parents=True, exist_ok=True)
     idx = MiMoShardIndex(src)
@@ -300,9 +739,13 @@ def convert(
 
     print(f"[convert] source: {src}")
     print(f"[convert] target: {dst}")
-    print(f"[convert] profile: {profile.name} (routed_experts={profile.routed_expert_bits}, "
-          f"bookend=8-bit, group_size=64)")
+    print(f"[convert] profile: {profile.name} (routed_experts={profile.routed_expert_bit_plan()}, "
+          f"bookend={profile.default_bits}-bit, group_size=64)")
+    if expert_keep_map is not None:
+        print(f"[convert] expert keep map: {expert_keep_map.keep_experts} experts/layer", flush=True)
     print(f"[convert] MTP tensors: {'preserve' if include_mtp else 'drop'}")
+    if awq_scales:
+        print(f"[convert] AWQ fold: {len(awq_scales)} layers of MoE input scales")
     print(f"[convert] {len(weight_keys)} logical tensors", flush=True)
 
     shard_idx = 1
@@ -342,37 +785,36 @@ def convert(
     DEFAULT_BITS = profile.default_bits
     DEFAULT_GROUP = 64
 
-    def _mx_to_torch(arr_mx, dtype: torch.dtype | None = None) -> torch.Tensor:
-        """Convert mx.array → torch.Tensor without going through numpy when possible."""
-        t = torch.from_numpy(np.array(arr_mx))
-        if dtype is not None:
-            t = t.to(dtype)
-        return t
-
     for i, name in enumerate(weight_keys):
         if not include_mtp and name.startswith("model.mtp."):
+            continue
+        out_name = remap_expert_tensor_name(name, expert_keep_map)
+        if out_name is None:
             continue
         bits, method, group_size = classify(name, profile)
 
         if method == "skip":
             continue
         if method == "passthrough_bf16":
-            t = idx.read_passthrough(name).to(torch.bfloat16)
-            add_tensor(name, t)
+            t = read_bf16_storage_tensor(idx, name)
+            t = apply_awq_fold(name, t, awq_scales)
+            t = slice_router_tensor(name, t, expert_keep_map)
+            add_tensor(out_name, t)
             method_totals["passthrough_bf16"] += 1
         elif method == "passthrough_fp32":
             t = idx.read_passthrough(name, out_dtype=torch.float32)
-            add_tensor(name, t)
+            t = apply_awq_fold(name, t, awq_scales)
+            t = slice_router_tensor(name, t, expert_keep_map)
+            add_tensor(out_name, t)
             method_totals["passthrough_fp32"] += 1
         elif method == "affine":
             t = idx.read_tensor(name, out_dtype=torch.float32)
-            w = mx.array(t.numpy())
-            qw, qs, qb = mx.quantize(w, group_size=group_size, bits=bits)
-            base = name[: -len(".weight")] if name.endswith(".weight") else name
-            # mx.quantize returns: qw=uint32 packed, qs=fp16/fp32 scales, qb=fp16/fp32 biases
-            add_tensor(f"{base}.weight", _mx_to_torch(qw))
-            add_tensor(f"{base}.scales", _mx_to_torch(qs, torch.bfloat16))
-            add_tensor(f"{base}.biases", _mx_to_torch(qb, torch.bfloat16))
+            t = apply_awq_fold(name, t, awq_scales)
+            qw, qs, qb = quantize_minmax_affine(t, group_size=group_size, bits=bits)
+            base = out_name[: -len(".weight")] if out_name.endswith(".weight") else out_name
+            add_tensor(f"{base}.weight", qw)
+            add_tensor(f"{base}.scales", qs)
+            add_tensor(f"{base}.biases", qb)
             if bits != DEFAULT_BITS or group_size != DEFAULT_GROUP:
                 runtime_base = runtime_quant_base_for_weight(name)
                 quant_overrides[runtime_base] = {"bits": bits, "group_size": group_size, "mode": "affine"}
@@ -409,7 +851,15 @@ def convert(
         json.dumps({"metadata": {"total_size": total_bytes}, "weight_map": final_map}, indent=2)
     )
 
-    _write_config_json(src, dst, profile, DEFAULT_GROUP, quant_overrides, include_mtp=include_mtp)
+    _write_config_json(
+        src,
+        dst,
+        profile,
+        DEFAULT_GROUP,
+        quant_overrides,
+        include_mtp=include_mtp,
+        expert_keep_map=expert_keep_map,
+    )
     _copy_aux_files(src, dst)
 
     elapsed = time.time() - t_start
@@ -429,12 +879,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--src", required=True, type=Path, help="Source HF checkpoint dir.")
     p.add_argument("--dst", required=True, type=Path, help="Output JANG bundle dir.")
     p.add_argument("--profile", required=True,
-                   help="Quant profile: 2/JANG_2L, 4/JANG_4M, or 2k/422/JANG_2K.")
+                   help="Quant profile: 2s/JANG_2S, grouped forms like 444g64[n16|t16], 2/4, or 2k/422.")
     p.add_argument("--max-shard-bytes", type=int, default=1_000_000_000,
                    help="Max bytes per output shard (default 1 GB).")
     p.add_argument("--drop-mtp", action="store_true",
                    help="Do not include model.mtp.* speculative decoding tensors.")
+    p.add_argument("--expert-keep-map", type=Path,
+                   help="Router trace or keep-map JSON used to prune routed experts.")
+    p.add_argument("--awq-scales", type=Path, default=None,
+                   help="JSON of per-layer AWQ MoE input scales; folded into norm/router/gate/up.")
+    p.add_argument("--keep-experts", type=int,
+                   help="Number of ranked experts to keep per MoE layer when --expert-keep-map is set.")
     args = p.parse_args(argv)
+
+    expert_keep_map = None
+    if args.expert_keep_map is not None:
+        if args.keep_experts is None:
+            p.error("--keep-experts is required with --expert-keep-map")
+        expert_keep_map = load_expert_keep_map(
+            args.expert_keep_map.expanduser(),
+            keep_experts=args.keep_experts,
+        )
 
     convert(
         args.src.expanduser(),
@@ -442,6 +907,8 @@ def main(argv: list[str] | None = None) -> int:
         args.profile,
         args.max_shard_bytes,
         include_mtp=not args.drop_mtp,
+        expert_keep_map=expert_keep_map,
+        awq_scales=load_awq_scales(args.awq_scales.expanduser()) if args.awq_scales else None,
     )
     return 0
 

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -27,6 +29,41 @@ def _check_file(path: Path, label: str, failures: list[str]) -> bool:
         failures.append(f"missing {label}: {path}")
         return False
     return True
+
+
+@dataclass(frozen=True)
+class StoragePolicy:
+    prestacked_jangtq: bool
+    bundle_has_mtp: bool
+    token_io_passthrough_bf16: bool
+    o_proj_quantized: bool
+    default_bits: int
+
+
+def _storage_policy_for_config(cfg: dict) -> StoragePolicy:
+    q = cfg.get("quantization", {})
+    runtime = cfg.get("runtime", {})
+    tq_layout = runtime.get("tq_layout")
+    profile_name = str(cfg.get("jang_profile") or "")
+    prestacked_jangtq = (
+        tq_layout == "prestacked_switch_mlp"
+        or q.get("routed_experts") == "tq_prestacked_switch_mlp"
+        or profile_name.startswith("JANGTQ")
+    )
+    bundle_has_mtp = bool(runtime.get("bundle_has_mtp", True))
+    bf16_token_profiles = {"JANG_2S", "JANG_2C", "JANG_2X"}
+    quantized_oproj_profiles = {"JANG_2S", "JANG_2C", "JANG_2X", "JANG_2Q", "JANG_2F"}
+    default_bits = 8
+    if profile_name in {"JANG_2Q", "JANG_2F"} or profile_name.startswith("JANG_2R_"):
+        m = re.search(r"B([568])$", profile_name)
+        default_bits = int(m.group(1)) if m else 4
+    return StoragePolicy(
+        prestacked_jangtq=prestacked_jangtq,
+        bundle_has_mtp=bundle_has_mtp,
+        token_io_passthrough_bf16=profile_name in bf16_token_profiles,
+        o_proj_quantized=prestacked_jangtq or profile_name in quantized_oproj_profiles or profile_name.startswith("JANG_2R_"),
+        default_bits=default_bits,
+    )
 
 
 def verify_bundle(bundle: Path, src: Path | None = None) -> int:
@@ -49,16 +86,16 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
     q = cfg.get("quantization", {})
     runtime = cfg.get("runtime", {})
     tq_layout = runtime.get("tq_layout")
-    is_prestacked_jangtq = (
-        tq_layout == "prestacked_switch_mlp"
-        or q.get("routed_experts") == "tq_prestacked_switch_mlp"
-        or str(cfg.get("jang_profile") or "").startswith("JANGTQ")
-    )
+    storage_policy = _storage_policy_for_config(cfg)
+    is_prestacked_jangtq = storage_policy.prestacked_jangtq
     if q.get("quant_method") != "affine":
         failures.append(f"quantization.quant_method = {q.get('quant_method')} (want 'affine')")
     bits = q.get("bits")
-    if bits != 8:
-        failures.append(f"quantization.bits = {bits} (want 8 bookend default; routed experts use overrides)")
+    if bits != storage_policy.default_bits:
+        failures.append(
+            f"quantization.bits = {bits} "
+            f"(want {storage_policy.default_bits} profile default; routed experts use overrides)"
+        )
     if q.get("group_size") != 64:
         failures.append(f"quantization.group_size = {q.get('group_size')} (want 64)")
     for k in ("capabilities", "runtime"):
@@ -107,7 +144,7 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
             failures.append(
                 f"runtime.cache_topology.{key} = {actual!r} (want {expected!r})"
             )
-    bundle_has_mtp = bool(runtime.get("bundle_has_mtp", True))
+    bundle_has_mtp = storage_policy.bundle_has_mtp
     expected_mtp_mode = "preserved_disabled" if bundle_has_mtp else "absent"
     if runtime.get("mtp_mode") != expected_mtp_mode:
         failures.append(
@@ -169,10 +206,13 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
     # Pick a few expected tensor groups.
     spot_groups = {
         "attn_qkv":      "model.layers.0.self_attn.qkv_proj",
-        "embed":         "model.embed_tokens",
-        "lm_head":       "lm_head",
         "layer0_dense":  "model.layers.0.mlp.gate_proj",
     }
+    if not storage_policy.token_io_passthrough_bf16:
+        spot_groups.update({
+            "embed":         "model.embed_tokens",
+            "lm_head":       "lm_head",
+        })
     if is_prestacked_jangtq:
         tq_spot_groups = {
             "routed_gate_tq": "model.layers.1.mlp.switch_mlp.gate_proj",
@@ -232,7 +272,12 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
         "audio_encoder.input_local_transformer.layers.0.input_layernorm.weight": ("bf16", "audio norm"),
         "speech_embeddings.0.weight":                          ("bf16", "speech emb"),
     }
-    if not is_prestacked_jangtq:
+    if storage_policy.token_io_passthrough_bf16:
+        passthrough_spot.update({
+            "model.embed_tokens.weight": ("bf16", "embed"),
+            "lm_head.weight": ("bf16", "lm_head"),
+        })
+    if not storage_policy.o_proj_quantized:
         passthrough_spot["model.layers.0.self_attn.o_proj.weight"] = ("bf16", "o_proj")
     else:
         spot_groups_for_oproj = {
@@ -282,9 +327,14 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
             )
     else:
         expert_weights = [k for k in weight_map if ".mlp.experts." in k and k.endswith(".weight")]
-        if len(expert_weights) != 47 * 256 * 3:
+        expected_experts = int(
+            runtime.get("expert_keep_map", {}).get("keep_experts")
+            or cfg.get("n_routed_experts")
+            or 256
+        )
+        if len(expert_weights) != 47 * expected_experts * 3:
             failures.append(
-                f"routed expert .weight count = {len(expert_weights)}, expected {47*256*3}"
+                f"routed expert .weight count = {len(expert_weights)}, expected {47 * expected_experts * 3}"
             )
         else:
             print(f"[verify] routed expert .weight count = {len(expert_weights)} ✓")
