@@ -676,7 +676,7 @@ def _write_config_json(
             "prefix_cache": True,
             "l2_disk_cache": True,
             "turboquant_kv": "full_attention_layers_only",
-            "swa_layers": "rotating_kv_native",
+            "swa_layers": "masked_window_kv",
         },
         "mtp_mode": "preserved_disabled" if include_mtp else "absent",
         "bundle_has_mtp": include_mtp,

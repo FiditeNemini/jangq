@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from jang_tools.convert import _is_n2_expert_down
 
 
@@ -7,7 +9,7 @@ def test_n2_expert_down_override_matches_source_tensor_name():
 
 
 def test_n2_down_override_recompute_marker_is_present():
-    source = "jang-tools/jang_tools/convert.py"
-    text = open(source, encoding="utf-8").read()
+    source = Path(__file__).resolve().parent.parent / "jang_tools" / "convert.py"
+    text = source.read_text(encoding="utf-8")
     assert "alloc_summary = summarize_allocation_compact(_tensor_bits, tensor_info, num_experts)" in text
     assert "actual_bits = alloc_summary[\"average_bits\"]" in text

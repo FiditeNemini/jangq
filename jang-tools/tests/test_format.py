@@ -8,7 +8,9 @@ import numpy as np
 import pytest
 
 from jang_tools.quantize import quantize_tensor
-from jang_tools.format.writer import write_jang_model
+from safetensors.numpy import save_file
+
+from jang_tools.format.writer import write_jang_model, write_jang_v2_model
 from jang_tools.format.reader import load_jang_model, is_jang_model
 
 
@@ -107,6 +109,48 @@ class TestFormatRoundtrip:
         """Non-JANG directory should be detected."""
         with tempfile.TemporaryDirectory() as tmpdir:
             assert not is_jang_model(tmpdir)
+
+    def test_v2_writer_counts_preflushed_shards_in_index_total(self):
+        """Large-model v2 conversion preflushes shards before the final writer.
+        The index byte total must include those already-written shard files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_dir = Path(tmpdir) / "test-model-JANG-v2"
+            model_dir.mkdir()
+            pre_name = "model-00001-of-NNNNN.safetensors"
+            save_file(
+                {
+                    "layers.0.mlp.switch_mlp.gate_proj.weight": np.ones((2, 2), dtype=np.uint32),
+                    "layers.0.mlp.switch_mlp.gate_proj.scales": np.ones((2, 1), dtype=np.float16),
+                },
+                str(model_dir / pre_name),
+                metadata={"format": "mlx"},
+            )
+            tensors = {
+                "layers.0.mlp.switch_mlp.up_proj.weight": np.ones((2, 2), dtype=np.uint32),
+                "layers.0.mlp.switch_mlp.up_proj.scales": np.ones((2, 1), dtype=np.float16),
+            }
+            write_jang_v2_model(
+                output_dir=model_dir,
+                tensors=tensors,
+                model_config={"hidden_size": 2},
+                jang_config={
+                    "quantization": {
+                        "method": "jang-importance",
+                        "block_size": 32,
+                        "bit_widths_used": [2],
+                    }
+                },
+                preflushed_map={
+                    "layers.0.mlp.switch_mlp.gate_proj.weight": pre_name,
+                    "layers.0.mlp.switch_mlp.gate_proj.scales": pre_name,
+                },
+            )
+
+            index = json.loads((model_dir / "model.safetensors.index.json").read_text())
+            shard_names = set(index["weight_map"].values())
+            expected_total = sum((model_dir / name).stat().st_size for name in shard_names)
+            assert index["metadata"]["total_size"] == expected_total
+            assert all("NNNNN" not in name for name in shard_names)
 
     def test_invalid_format_rejected(self):
         """Model with wrong format field should be rejected."""

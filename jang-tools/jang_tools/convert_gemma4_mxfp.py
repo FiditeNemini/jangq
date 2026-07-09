@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import re
 import shutil
 import struct
 from dataclasses import dataclass
@@ -237,6 +238,24 @@ _TOOL_CHOICE_PATCH = """        {%- endfor %}
     {%- endif -%}"""
 
 
+# Gemma 4's stock template opens an EMPTY thought channel when thinking is
+# disabled: `{%- if not enable_thinking -%}{{- '<|channel>thought\n<channel|>' -}}`.
+# A bundle carrying that tail forces every reasoning-off turn to begin inside an
+# unterminated thought channel. Strip the block; an explicit `thinking_text`
+# emit (reasoning-on) has a different body and is preserved.
+_EMPTY_THOUGHT_BLOCK = re.compile(
+    r"\n?[ \t]*\{%-\s*if not enable_thinking \| default\(false\)\s*-%\}\s*"
+    r"\{\{-\s*'<\|channel>thought\\n<channel\|>'\s*-\}\}\s*"
+    r"\{%-\s*endif\s*-%\}",
+    re.S,
+)
+
+
+def _patch_chat_template(text: str) -> str:
+    """Strip the reasoning-off empty-thought tail, then inject tool_choice. Idempotent."""
+    return _patch_chat_template_tool_choice(_EMPTY_THOUGHT_BLOCK.sub("", text))
+
+
 def _patch_chat_template_tool_choice(text: str) -> str:
     """Inject the conditional tool_choice==required stanza (idempotent)."""
     if "Tool use is REQUIRED" in text:
@@ -257,7 +276,7 @@ def _copy_sidecars(src: Path, out: Path) -> None:
     tok_cfg = out / "tokenizer_config.json"
     template = out / "chat_template.jinja"
     if template.exists():
-        patched = _patch_chat_template_tool_choice(template.read_text(encoding="utf-8"))
+        patched = _patch_chat_template(template.read_text(encoding="utf-8"))
         template.write_text(patched, encoding="utf-8")
         if tok_cfg.exists():
             cfg = json.loads(tok_cfg.read_text(encoding="utf-8"))

@@ -209,9 +209,9 @@ def get_bits_and_method(name: str) -> tuple[int, str]:
     if ".router.gate.weight" in n and "mlp." in n:
         return (16, "passthrough")
 
-    # MTP is preserved for future speculative decode but disabled in the first
-    # runtime path. Keep its 2D matmuls at 8-bit affine even if the namespace
-    # contains `experts.*`; draft quality affects future acceptance rate.
+    # MTP is preserved AND ENABLED (2026-05-15 directive). Keep its 2D
+    # matmuls at 8-bit affine even if the namespace contains `experts.*`;
+    # draft quality affects speculative decode acceptance rate.
     if is_mtp_tensor:
         return (8, "affine")
 
@@ -476,11 +476,12 @@ config_out["capabilities"] = {
 config_out["runtime"] = {
     "bundle_has_mtp": bool(n_mtp_layers),
     "mtp_layers": n_mtp_layers,
-    "mtp_mode": "preserved_disabled",
+    "mtp_mode": "preserved_enabled",
     "mtp_status": (
-        "MTP tensors are preserved in the bundle, but the first JANG runtime "
-        "path must use normal autoregressive decode until an accept/reject "
-        "speculative loop is implemented and tested."
+        "MTP tensors are preserved AND enabled "
+        "(num_nextn_predict_layers retained from source config). Runtimes "
+        "that don't yet wire an accept/reject speculative loop should fall "
+        "back to autoregressive decode but must NOT zero this field."
     ),
 }
 with open(OUT / "config.json", "w") as f:

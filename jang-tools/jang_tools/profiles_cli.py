@@ -31,6 +31,7 @@ _PROFILE_DESCRIPTIONS = {
     "JANG_2S": "Tightest 2-bit — 6-bit critical, 4-bit important",
     "JANG_2M": "Balanced 2-bit — 8-bit critical, 4-bit important",
     "JANG_2L": "Best-quality 2-bit — 8-bit critical, 6-bit important (proven 73% MMLU on 122B)",
+    "JANG_2K": "K-style 2-bit routed expert lane — protects critical tensors while routed experts stay 2-bit",
     "JANG_3S": "Small boost on attention only — 6-bit critical, 3-bit rest",
     "JANG_3M": "Full attention at 8-bit, everything else 3-bit",
     "JANG_3L": "Attention 8-bit, embeddings 4-bit",

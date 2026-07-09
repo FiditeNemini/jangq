@@ -198,6 +198,8 @@ def _resolve_modality(jang: dict, config: dict, model_path: Path | None = None) 
     if active_modal:
         return active_modal[0]
 
+    if "has_vision" in jang:
+        return "vision" if jang["has_vision"] else "text"
     arch_dict = jang.get("architecture")
     if isinstance(arch_dict, dict) and "has_vision" in arch_dict:
         return "vision" if arch_dict["has_vision"] else "text"

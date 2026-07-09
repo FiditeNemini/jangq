@@ -69,14 +69,17 @@ def _count_except_exception_sites() -> int:
 
 
 def test_except_exception_site_count_within_threshold():
-    """Coarse count invariant. Today's count is 171; threshold is 179 (8
+    """Coarse count invariant. Today's count is 191; threshold is 199 (8
     headroom for routine additions). Bulk additions trigger review per
     the taxonomy in the module docstring above. ZAYA runtime port +
     Hy3/ZAYA1-VL converters added best-effort-parse and optional-import
-    sites that fit the taxonomy."""
+    sites that fit the taxonomy. The MXTQ/MXRQ lane modules (convert_mxtq,
+    convert_mxrq, convert_mxtq_to_jang, calibrate_fp8) and the dsv4 probes
+    contributed 13 further sites when they were finally tracked; all are
+    optional-import or tensor-conversion-retry."""
     total = _count_except_exception_sites()
-    assert total <= 179, (
-        f"except Exception site count ({total}) exceeds threshold of 179 — "
+    assert total <= 199, (
+        f"except Exception site count ({total}) exceeds threshold of 199 — "
         f"audit new additions per the 5-category taxonomy in this module's "
         f"docstring (M113 iter 105). If all additions fit one of: optional-"
         f"import / tensor-conversion-retry / best-effort-parse / error-"

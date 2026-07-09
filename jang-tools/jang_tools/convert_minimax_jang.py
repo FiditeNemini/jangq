@@ -80,19 +80,27 @@ def _load_one(src: Path, weight_map: dict, tname: str) -> np.ndarray:
         shape = list(f.get_slice(tname).get_shape())
         scale_key = tname + "_scale_inv"
         scale = f.get_tensor(scale_key) if scale_key in keys else None
+    attempts: list[str] = []
     try:
         return load_fp8_tensor(sf_path, tname, shape, scale).astype(np.float32)
-    except Exception:
-        pass
+    except Exception as exc:
+        attempts.append(f"fp8: {type(exc).__name__}: {exc}")
     try:
         with safe_open(str(sf_path), framework="numpy") as f:
             t = f.get_tensor(tname)
             if not isinstance(t, np.ndarray):
                 t = np.asarray(t)
             return t.astype(np.float32)
-    except Exception:
-        pass
-    return _load_bf16_tensor(sf_path, tname, shape).astype(np.float32)
+    except Exception as exc:
+        attempts.append(f"raw: {type(exc).__name__}: {exc}")
+    try:
+        return _load_bf16_tensor(sf_path, tname, shape).astype(np.float32)
+    except Exception as exc:
+        attempts.append(f"bf16: {type(exc).__name__}: {exc}")
+        raise RuntimeError(
+            f"could not load tensor {tname!r} from {sf_path}; "
+            f"tried: {'; '.join(attempts)}"
+        ) from exc
 
 
 def _quantize(w_np: np.ndarray, bits: int):

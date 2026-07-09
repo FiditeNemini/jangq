@@ -6,27 +6,32 @@ Profiles (--profile sets ROUTED-EXPERT bits):
   JANGTQ2 (default): V3 runtime-candidate lane. Routed experts use 2-bit
                      MXTQ with V3 mixed-bit overrides, attention + embed +
                      lm_head + shared experts stay 8-bit affine, norms +
-                     router + mHC params are passthrough, and MTP is dropped.
+                     router + mHC params are passthrough.
   JANGTQ4: routed experts 4-bit MXTQ (bigger bundle, better fidelity)
 
-Variants (--variant tweaks NON-routed bits + drops MTP):
+Variants (--variant tweaks NON-routed bits):
   std               : legacy baseline/repro mode (8-bit affine on
-                      attention/shared/embed/head; MTP layers shipped). This
-                      is not the current DSV4 runtime candidate.
-  K (JANG_DSV4_K)   : MAX-QUALITY 70-80 GB profile. Drops MTP head
-                      (~6.5B params unused at decode-time sanitize) and
-                      keeps EVERY non-routed module at 8-bit affine
-                      gsz=32 — attention (wq_a/wq_b/wkv/wo_a/wo_b),
-                      shared experts, Compressor, Indexer, embed, head.
+                      attention/shared/embed/head). This is not the
+                      current DSV4 runtime candidate.
+  K (JANG_DSV4_K)   : MAX-QUALITY 70-80 GB profile. Keeps EVERY
+                      non-routed module at 8-bit affine gsz=32 —
+                      attention (wq_a/wq_b/wkv/wo_a/wo_b), shared
+                      experts, Compressor, Indexer, embed, head.
                       Router (gate.weight), mHC fn matrices, all
                       RMSNorms, attn_sink, ape stay fp16 passthrough.
                       Source FP4 routed → 2-bit MXTQ; source FP8
                       non-routed → 8-bit affine (≤0.5% RMS, lossless
                       vs FP8). Use --profile 2 for 70-80 GB bundle.
-  V3 (default)      : runtime-candidate lane. Drops MTP, uses 2/4-bit MXTQ
-                      routed experts, and accepts DSV4_V3_PLAN_PATH for the
+  V3 (default)      : runtime-candidate lane. Uses 2/4-bit MXTQ routed
+                      experts, and accepts DSV4_V3_PLAN_PATH for the
                       exact proven/rebuilt bit plan. A production candidate
                       needs DSV4_V3_PLAN_PATH; no-plan V3 is a fallback.
+
+MTP head (2026-05-15 directive): KEEP and ENABLE across all variants.
+The MTP tensors are preserved in the bundle and num_nextn_predict_layers
+is retained from source. Runtimes that don't yet implement an
+accept/reject speculative loop should fall back to autoregressive decode
+without zeroing this field — never silently drop MTP.
 
 Usage:
   python -m jang_tools.dsv4.convert_dsv4_jangtq \\
@@ -452,9 +457,11 @@ def convert(
     else:
         profile_name = f"JANGTQ{profile_bits}"
     print(f"[convert] profile: {profile_name} (format={FORMAT}, variant={VARIANT})")
-    drop_mtp = (VARIANT in ("K", "V3"))
-    if drop_mtp:
-        print(f"[convert] MTP head: DROP (variant={VARIANT}, ~6.5B params unused at decode)")
+    # 2026-05-15 directive: keep+enable MTP across every variant. The MTP
+    # head ships with the bundle so future runtimes (Swift / vMLX speculative
+    # decode) can use it; no converter is allowed to silently drop MTP layers.
+    drop_mtp = False
+    print(f"[convert] MTP head: KEEP (variant={VARIANT}, all MTP tensors preserved)")
     if VARIANT == "V3" and not os.environ.get("DSV4_V3_PLAN_PATH", "").strip():
         print(
             "[convert] WARN: V3 without DSV4_V3_PLAN_PATH uses the built-in "

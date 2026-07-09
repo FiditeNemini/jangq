@@ -93,6 +93,42 @@ Current autoregressive runtime filters `mtp.*` tensors while loading because
 today's `mlx-vlm` Qwen3.6 class does not expose MTP modules. The tensors remain
 in the bundle for an MTP-aware speculative runtime.
 
+## Qwen3.6 35B JANG/MXFP Build Lanes
+
+The Qwen3.6 35B A3B source has real MoE MTP tensors and vision tensors:
+
+```sh
+python3 jang-tools/examples/mtp/inspect_mtp_bundle.py \
+  /Users/eric/models/JANGQ/Qwen3.6-35B-A3B
+```
+
+The two local build targets are deliberately JANG/MXFP, not JANGTQ:
+
+```sh
+python3 -m jang_tools --progress json convert \
+  /Users/eric/models/JANGQ/Qwen3.6-35B-A3B \
+  -o /Users/eric/models/JANGQ/Qwen3.6-35B-A3B-JANG_2K-MTP \
+  -p JANG_2K \
+  -b 128 \
+  --force-dtype bf16
+```
+
+`JANG_2K` is the 2-bit routed-expert lane. Routed expert MLP tensors, including
+`mtp.layers.0.mlp.experts.*`, stay at 2-bit. Attention, shared experts, and
+other high-impact control tensors may be protected above 2-bit. The output is
+the standard JANG affine `weight/scales/biases` shape produced by `mx.quantize`,
+so vMLX should route it through MLX affine quantized matmul.
+
+```sh
+jang-convert-qwen35-mxfp4 \
+  /Users/eric/models/JANGQ/Qwen3.6-35B-A3B \
+  /Users/eric/models/JANGQ/Qwen3.6-35B-A3B-MXFP4-MTP \
+  --progress json
+```
+
+The MXFP4 lane emits `weight_format=mxfp4`, quantizes language and MTP matmuls
+as 4-bit affine tensors, and keeps the vision tower in fp16 passthrough form.
+
 ## Estimate Hy3 Fit
 
 ```sh

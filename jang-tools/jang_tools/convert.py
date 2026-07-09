@@ -188,6 +188,67 @@ def _build_mtp_runtime_metadata(config: dict, tensor_names: set[str]) -> dict:
     }
 
 
+_MTP_RUNTIME_ENABLED_FAMILIES = {
+    "qwen3_5",
+    "qwen3_5_text",
+    "qwen3_5_moe",
+    "qwen3_5_moe_text",
+}
+
+
+def _family_candidates(jang_config: dict, model_config: dict) -> list[str]:
+    """Collect every family/arch string that could identify the bundle."""
+    out: list[str] = []
+    source_model = jang_config.get("source_model")
+    if isinstance(source_model, dict) and isinstance(source_model.get("architecture"), str):
+        out.append(source_model["architecture"])
+    architecture = jang_config.get("architecture")
+    if isinstance(architecture, dict) and isinstance(architecture.get("type"), str):
+        out.append(architecture["type"])
+    text_cfg = model_config.get("text_config")
+    if isinstance(text_cfg, dict) and isinstance(text_cfg.get("model_type"), str):
+        out.append(text_cfg["model_type"])
+    if isinstance(model_config.get("model_type"), str):
+        out.append(model_config["model_type"])
+    return [item.lower() for item in out if item]
+
+
+def _stamp_mtp_runtime_metadata(
+    jang_config: dict,
+    model_config: dict,
+    output_weight_keys,
+) -> None:
+    """Stamp explicit MTP state onto ``jang_config`` in place.
+
+    Metadata-only. Weights are always preserved; ``mtp_mode`` is only
+    ``preserved_enabled`` for families the engine has a native accept/reject
+    path for, so a bundle can never ask a runtime to speculate with a decoder
+    it does not implement.
+    """
+    keys = {str(key) for key in output_weight_keys}
+    mtp_keys = sorted(key for key in keys if _is_mtp_tensor_name(key))
+    mtp_layers = _configured_mtp_layers_from_config(model_config)
+    if not mtp_keys and mtp_layers <= 0:
+        return
+
+    runtime = jang_config.setdefault("runtime", {})
+    runtime["bundle_has_mtp"] = bool(mtp_keys)
+    runtime["mtp_layers"] = mtp_layers
+
+    family_supported = any(
+        candidate in _MTP_RUNTIME_ENABLED_FAMILIES
+        for candidate in _family_candidates(jang_config, model_config)
+    )
+    enabled = bool(mtp_keys and mtp_layers > 0 and family_supported)
+    runtime["mtp_mode"] = "preserved_enabled" if enabled else "preserved_disabled"
+    jang_config["mtp"] = {
+        "kept": bool(mtp_keys),
+        "enabled": enabled,
+        "num_layers": mtp_layers,
+        "tensor_count": len(mtp_keys),
+    }
+
+
 def _indexed_shard_file_bytes(model_dir: Path) -> int:
     """Return the byte size of all shards referenced by the v2 index."""
     index_path = model_dir / "model.safetensors.index.json"

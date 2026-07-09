@@ -30,14 +30,18 @@ def _tiny_mimo_args() -> ModelArgs:
     )
 
 
-def test_mimo_v2_make_cache_uses_rotating_cache_for_swa_layers():
+def test_mimo_v2_make_cache_uses_plain_kv_cache_for_swa_layers():
+    """SWA layers use a plain KVCache; the window is enforced by the attention
+    mask, not by cache rotation. RotatingKVCache(max_size=window) desyncs the
+    rope'd key positions from the rotated buffer once prefill exceeds the
+    window, degenerating into newline/im_end loops."""
     model = Model(_tiny_mimo_args())
 
     cache = model.make_cache()
 
     assert isinstance(cache[0], KVCache)
-    assert isinstance(cache[1], RotatingKVCache)
-    assert cache[1].max_size == 3
+    assert isinstance(cache[1], KVCache)
+    assert not isinstance(cache[1], RotatingKVCache)
 
 
 def test_mimo_v2_backbone_builds_per_layer_sliding_mask(monkeypatch):

@@ -312,6 +312,25 @@ def _is_routed_expert_mlp(name_lower: str, component: str) -> bool:
     return component in name_lower and "shared_expert" not in name_lower
 
 
+def _is_any_routed_expert_mlp(name: str) -> bool:
+    """Check if a tensor is any routed expert MLP projection."""
+    name_lower = name.lower()
+    if "shared_expert" in name_lower or "expert" not in name_lower:
+        return False
+    return any(
+        component in name_lower
+        for component in (
+            "gate_up_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+            "w1",
+            "w2",
+            "w3",
+        )
+    )
+
+
 # ── MLP asymmetry bit floors for 256+ expert models ──────────
 # Applied as post-classification floors in allocator functions.
 # gate_proj: SiLU amplifier → 4-bit minimum (prevents 45x error on hidden=4096)
@@ -435,9 +454,20 @@ BIT_TO_PROFILE = {
     8: "JANG_6M",   # Near-lossless
 }
 
-# K-quant targets: budget-neutral allocation at these bit levels
+# K-quant targets: budget-neutral allocation at these bit levels.
+#
+# JANG_2K is the explicit Qwen3.6 35B "2-bit routed expert" lane. Because
+# 2-bit is the minimum supported MLX affine width, boosted critical tensors
+# cannot be compensated below 2-bit; the result is a K-style mixed profile
+# with routed experts staying at the 2-bit base and critical tensors protected.
 # Uses allocate_bits_budget() instead of allocate_bits_profile()
-JANG_K_TARGETS = {"JANG_3K": 3.0, "JANG_4K": 4.0, "JANG_5K": 5.0, "JANG_6K": 6.0}
+JANG_K_TARGETS = {
+    "JANG_2K": 2.0,
+    "JANG_3K": 3.0,
+    "JANG_4K": 4.0,
+    "JANG_5K": 5.0,
+    "JANG_6K": 6.0,
+}
 
 
 def profile_for_bits(target_bits: int) -> str:
@@ -639,6 +669,8 @@ def allocate_bits_budget(
     n_layers = max(all_layer_ids) + 1 if all_layer_ids else 1
 
     for name, layer_idx in tensor_layer_idx.items():
+        if base_bits == 2 and _is_any_routed_expert_mlp(name):
+            continue
         if layer_idx < first_last_bonus or layer_idx >= n_layers - first_last_bonus:
             current = tensor_bits[name]
             next_bw = _next_bit_width(current)
@@ -1060,6 +1092,8 @@ def allocate_bits_budget_compact(
     n_layers = max(all_layer_ids) + 1 if all_layer_ids else 1
 
     for name, layer_idx in tensor_layer_idx.items():
+        if base_bits == 2 and _is_any_routed_expert_mlp(name):
+            continue
         if layer_idx < 2 or layer_idx >= n_layers - 2:
             current = tensor_bits[name]
             nxt = _next_bit_width(current)
