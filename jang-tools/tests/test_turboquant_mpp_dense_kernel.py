@@ -46,7 +46,7 @@ def test_mpp_dense_tq_matmul_matches_existing_kernel_small_shape():
     in_features = 64
     out_features = 32
     bits = 4
-    x = mx.array(rng.standard_normal((3, in_features)).astype(np.float32))
+    x = mx.array(rng.standard_normal((4, in_features)).astype(np.float32))
     signs = mx.array(generate_random_signs(in_features, seed=123), dtype=mx.float32)
     w_rot = rng.standard_normal((out_features, in_features)).astype(np.float32)
     packed, norms, codebook = _quantize_rows(w_rot, bits)

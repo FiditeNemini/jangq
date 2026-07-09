@@ -6,7 +6,7 @@ import XCTest
 /// through preflight, CLIArgsBuilder, and PostConvertVerifier.
 @MainActor
 final class CoverageMatrixTests: XCTestCase {
-    private var tmp: URL!
+    nonisolated(unsafe) private var tmp: URL!
 
     override func setUpWithError() throws {
         tmp = URL(fileURLWithPath: NSTemporaryDirectory())

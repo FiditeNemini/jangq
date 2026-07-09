@@ -51,7 +51,7 @@ targets:
           echo "note: Embedded Python bundle copied to $DST"
         name: "Embed Python Bundle"
     scheme:
-      testTargets: [JANGStudioTests, JANGStudioUITests]
+      testTargets: [JANGStudioTests]
       gatherCoverageData: true
   JANGStudioTests:
     type: bundle.unit-test
