@@ -114,6 +114,39 @@ def load(src: str):
         stacked = mx.stack([per_expert[i] for i in range(n_exp)], axis=0)
         new_weights[f"{prefix}.switch_mlp.{proj}.weight"] = stacked
     weights = new_weights
+
+    # Laguna's affine converters (JANG_*, MXFP4) do NOT ship experts unpacked.
+    # They pre-stack the routed experts and fuse gate+up into one tensor, the
+    # same layout the JANGTQ block below splits:
+    #   layers.L.mlp.experts.gate_up_proj.{weight,scales,biases} (n_exp, 2*inter, ...)
+    #   layers.L.mlp.experts.down_proj.{weight,scales,biases}    (n_exp, hidden, ...)
+    # The `_expert_pat` pass above only matches the unpacked `.experts.<E>.` form,
+    # so for these formats the `experts.` keys survived to `model.update` and hit
+    #   ValueError: Module does not have parameter named "experts".
+    # Split gate_up at the axis=-2 midpoint (the 2*inter output-row dim) and
+    # rename under `switch_mlp`. The affine sidecars carry that same row dim, so
+    # they split on the same axis; quantized `.weight` packs along the LAST axis
+    # (input dim), which the split leaves untouched. Renaming also makes the
+    # `nn.quantize` predicate below see `switch_mlp.<proj>.scales`, so each
+    # SwitchLinear is converted before the update instead of staying float.
+    if fmt in ("jang", "mxfp4"):
+        _fused_affine_pat = _re_pack.compile(
+            r"^(layers\.\d+\.mlp)\.experts\.(gate_up_proj|down_proj)\.(weight|scales|biases)$"
+        )
+        fused_weights: dict = {}
+        for k, v in weights.items():
+            m = _fused_affine_pat.match(k)
+            if not m:
+                fused_weights[k] = v
+                continue
+            prefix, proj, suffix = m.group(1), m.group(2), m.group(3)
+            if proj == "down_proj":
+                fused_weights[f"{prefix}.switch_mlp.down_proj.{suffix}"] = v
+                continue
+            mid = v.shape[-2] // 2
+            fused_weights[f"{prefix}.switch_mlp.gate_proj.{suffix}"] = v[..., :mid, :]
+            fused_weights[f"{prefix}.switch_mlp.up_proj.{suffix}"] = v[..., mid:, :]
+        weights = fused_weights
     # JANGTQ-specific TQ-replacement core: swap nn.Linear / SwitchLinear
     # modules whose `.tq_packed` keys live in the weight dict over to
     # TurboQuant{Linear,SwitchLinear} BEFORE the affine `nn.quantize` +
