@@ -76,6 +76,12 @@ class TurboQuantKVCache:
         self._joined_k: Optional[mx.array] = None
         self._joined_v: Optional[mx.array] = None
 
+        # TurboQuant's decode pipeline computes in float32. Preserve the model's
+        # attention dtype so compressed caches do not silently promote every
+        # subsequent SDPA operation to float32.
+        self._vmlx_tq_key_dtype = None
+        self._vmlx_tq_value_dtype = None
+
         # BatchGenerator compatibility. In single-sequence mode `offset` is an
         # int. After extend()/prepare() it becomes a per-row mx.array and
         # `_idx` is the shared right edge, matching mlx-lm BatchKVCache.
@@ -108,6 +114,10 @@ class TurboQuantKVCache:
         self, keys: mx.array, values: mx.array
     ) -> tuple[mx.array, mx.array]:
         """Append new K/V. Returns full cache for attention at baseline speed."""
+        if self._vmlx_tq_key_dtype is None:
+            self._vmlx_tq_key_dtype = keys.dtype
+        if self._vmlx_tq_value_dtype is None:
+            self._vmlx_tq_value_dtype = values.dtype
         if self._is_batched:
             return self._update_and_fetch_batched(keys, values)
 
@@ -435,6 +445,8 @@ class TurboQuantKVCache:
         # Region to compress: [sink..n)
         k_region = self.keys[..., sink:n, :]
         v_region = self.values[..., sink:n, :]
+        self._vmlx_tq_key_dtype = k_region.dtype
+        self._vmlx_tq_value_dtype = v_region.dtype
 
         self._compressed_keys = encode_keys(k_region, self._key_encoder)
         self._compressed_values = encode_values(v_region, self._value_encoder)
@@ -443,6 +455,10 @@ class TurboQuantKVCache:
         # Decode compressed region ONCE into persistent buffer
         decoded_k = decode_keys(self._compressed_keys, self._key_encoder)
         decoded_v = decode_values(self._compressed_values, self._value_encoder)
+        if decoded_k.dtype != self._vmlx_tq_key_dtype:
+            decoded_k = decoded_k.astype(self._vmlx_tq_key_dtype)
+        if decoded_v.dtype != self._vmlx_tq_value_dtype:
+            decoded_v = decoded_v.astype(self._vmlx_tq_value_dtype)
 
         # Build decoded buffer: [sink_float, decoded_compressed]
         if sink > 0:
@@ -529,6 +545,8 @@ class TurboQuantKVCache:
         if v is not None and len(v) == 2:
             self.keys, self.values = v
             if self.keys is not None:
+                self._vmlx_tq_key_dtype = self.keys.dtype
+                self._vmlx_tq_value_dtype = self.values.dtype
                 self.offset = self.keys.shape[-2]
                 self.left_padding = None
                 self._right_padding = None

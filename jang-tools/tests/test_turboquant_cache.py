@@ -159,6 +159,30 @@ class TestPostCompressGeneration:
         assert cache._compressed_tokens == 50
         assert k_out.shape == (1, 4, 60, 128)
 
+    @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+    def test_compress_preserves_attention_dtype(self, dtype):
+        """TQ decode must not promote a model's KV/SDPA path to float32."""
+        cache = TurboQuantKVCache(
+            key_dim=64,
+            value_dim=64,
+            key_bits=8,
+            value_bits=8,
+        )
+        keys = mx.random.normal(shape=(1, 2, 16, 64)).astype(dtype)
+        values = mx.random.normal(shape=(1, 2, 16, 64)).astype(dtype)
+        cache.update_and_fetch(keys, values)
+
+        cache.compress()
+        restored_keys, restored_values = cache.state
+        mx.eval(restored_keys, restored_values)
+
+        assert restored_keys.dtype == dtype
+        assert restored_values.dtype == dtype
+        assert cache._decoded_k_buffer.dtype == dtype
+        assert cache._decoded_v_buffer.dtype == dtype
+        assert cache._joined_k.dtype == dtype
+        assert cache._joined_v.dtype == dtype
+
 
 class TestBatchApi:
     """BatchGenerator compatibility: real filter/extract/extend semantics."""
