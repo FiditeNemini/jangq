@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Optional, Sequence, Union
+from typing import Callable, List, Optional, Sequence, Union
 
 import mlx.core as mx
 import numpy as np
@@ -289,6 +289,7 @@ class NemotronHOmni:
         enable_thinking: bool = True,
         video_target_frames: int = 32,
         video_apply_evs: bool = True,
+        token_callback: Optional[Callable[[Optional[int], str], None]] = None,
     ) -> str:
         self._ensure_cache()
 
@@ -333,6 +334,7 @@ class NemotronHOmni:
             enable_thinking=enable_thinking,
         )
         input_ids = self.tokenizer(prompt, return_tensors="np")["input_ids"]
+        self._last_prompt_tokens = int(input_ids.shape[-1])
 
         # Embed text + inject multimodal
         ids_mx = mx.array(input_ids)
@@ -408,8 +410,27 @@ class NemotronHOmni:
             return mx.take_along_axis(sorted_idx, tok_in_sorted, axis=-1)
 
         tokens: List[int] = []
+        detokenizer = None
+        if token_callback is not None:
+            from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+            detokenizer = TokenizerWrapper(
+                self.tokenizer,
+                eos_token_ids=self._eos_ids,
+            ).detokenizer
+
+        def record_token(token) -> None:
+            token_id = int(token.item())
+            tokens.append(token_id)
+            segment = ""
+            if detokenizer is not None and token_id not in self._eos_ids:
+                detokenizer.add_token(token_id)
+                segment = detokenizer.last_segment
+            if token_callback is not None:
+                token_callback(token_id, segment)
+
         tok = sample(next_logit, temperature, top_p)
-        tokens.append(int(tok.item()))
+        record_token(tok)
         for _ in range(max_tokens - 1):
             if tokens[-1] in self._eos_ids:
                 break
@@ -427,5 +448,16 @@ class NemotronHOmni:
             h = backbone.norm_f(h)
             logits = self.llm.lm_head(h)
             tok = sample(logits[:, -1, :], temperature, top_p)
-            tokens.append(int(tok.item()))
+            record_token(tok)
+
+        if detokenizer is not None:
+            detokenizer.finalize()
+            final_segment = detokenizer.last_segment
+            if final_segment and token_callback is not None:
+                token_callback(None, final_segment)
+
+        self._last_completion_tokens = len(tokens)
+        self._last_finish_reason = (
+            "stop" if tokens and tokens[-1] in self._eos_ids else "length"
+        )
         return self.tokenizer.decode(tokens, skip_special_tokens=True)
