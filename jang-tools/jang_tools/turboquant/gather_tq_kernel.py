@@ -571,7 +571,7 @@ def gather_tq_matmul(
     ):
         try:
             out_raw = _gather_tq_mpp_nax_grouped_from_rot(
-                x_rot,
+                x_rot.astype(x.dtype),
                 packed,
                 norms,
                 codebook,

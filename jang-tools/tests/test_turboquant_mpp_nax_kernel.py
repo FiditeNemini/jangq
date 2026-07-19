@@ -68,6 +68,45 @@ def test_nax_tq_matmul_matches_existing_kernel(bits, batch):
     np.testing.assert_allclose(np.array(nax), np.array(current), rtol=3e-2, atol=5e-2)
 
 
+@pytest.mark.parametrize("bits", [2, 4])
+def test_nax_tq_matmul_preserves_bfloat_activation_range(bits):
+    from jang_tools.turboquant.mpp_nax_kernel import (
+        mpp_nax_tensorops_available,
+        tq_matmul_mpp_nax,
+    )
+
+    if not mpp_nax_tensorops_available():
+        pytest.skip("MPP NAX tensor_ops unavailable")
+
+    rng = np.random.default_rng(2029 + bits)
+    in_features = 64
+    out_features = 32
+    # This is finite in BF16 but not FP16. The old unconditional FP16 cast
+    # produced inf/NaN before the cooperative matmul even started.
+    x = mx.full((17, in_features), 100_000.0, dtype=mx.bfloat16)
+    signs = mx.array(generate_random_signs(in_features, seed=321), dtype=mx.float32)
+    packed, norms, codebook = _quantize_rows(
+        rng.standard_normal((out_features, in_features)).astype(np.float32), bits
+    )
+
+    current = tq_matmul(x, packed, norms, codebook, signs, in_features, bits)
+    nax = tq_matmul_mpp_nax(x, packed, norms, codebook, signs, in_features, bits)
+
+    mx.eval(current, nax)
+    current_f = np.array(current.astype(mx.float32))
+    nax_f = np.array(nax.astype(mx.float32))
+    assert np.isfinite(nax_f).all()
+    cosine = float(
+        np.sum(nax_f * current_f)
+        / (np.linalg.norm(nax_f) * np.linalg.norm(current_f))
+    )
+    assert cosine > 0.999
+    # Near-cancelled outputs can have a larger relative error at this
+    # deliberately extreme magnitude; the contract here is finite BF16-range
+    # execution with the same overall result direction as the FP32 fallback.
+    np.testing.assert_allclose(nax_f, current_f, rtol=1.5e-1, atol=2048.0)
+
+
 def test_tq_matmul_opt_in_uses_nax_path(monkeypatch):
     from jang_tools.turboquant import tq_kernel
     from jang_tools.turboquant.mpp_nax_kernel import mpp_nax_tensorops_available
@@ -287,11 +326,12 @@ def test_gather_sorted_opt_in_uses_grouped_nax(monkeypatch):
     norms = mx.stack(norm_rows, axis=0)
     indices = mx.array(np.array([0] * 6 + [1] * 6 + [2] * 6, dtype=np.uint32))
 
-    called = {"grouped": 0}
+    called = {"grouped": 0, "dtype": None}
     real = gather_kernel._gather_tq_mpp_nax_grouped_from_rot
 
     def wrapped(*args, **kwargs):
         called["grouped"] += 1
+        called["dtype"] = args[0].dtype
         return real(*args, **kwargs)
 
     monkeypatch.setenv("JANGTQ_MPP_NAX", "1")
@@ -339,11 +379,12 @@ def test_gather_sorted_auto_uses_grouped_nax_only_for_measured_win_shapes(monkey
     packed = mx.stack(packed_rows, axis=0)
     norms = mx.stack(norm_rows, axis=0)
 
-    called = {"grouped": 0}
+    called = {"grouped": 0, "dtype": None}
     real = gather_kernel._gather_tq_mpp_nax_grouped_from_rot
 
     def wrapped(*args, **kwargs):
         called["grouped"] += 1
+        called["dtype"] = args[0].dtype
         return real(*args, **kwargs)
 
     monkeypatch.setenv("JANGTQ_MPP_NAX", "auto")
@@ -364,7 +405,9 @@ def test_gather_sorted_auto_uses_grouped_nax_only_for_measured_win_shapes(monkey
     mx.eval(small)
     assert called["grouped"] == 0
 
-    large_x = mx.array(rng.standard_normal((512, 1, in_features)).astype(np.float32))
+    large_x = mx.array(
+        rng.standard_normal((512, 1, in_features)).astype(np.float32)
+    ).astype(mx.bfloat16)
     large_indices = mx.array(np.array([0] * 512, dtype=np.uint32))
     large = gather_tq_matmul(
         large_x,
@@ -378,6 +421,7 @@ def test_gather_sorted_auto_uses_grouped_nax_only_for_measured_win_shapes(monkey
     )
     mx.eval(large)
     assert called["grouped"] == 1
+    assert called["dtype"] == mx.bfloat16
 
 
 def test_sorted_group_tile_metadata_reused_for_same_indices(monkeypatch):
@@ -652,7 +696,7 @@ def test_fused_gate_up_swiglu_sorted_opt_in_routes_through_grouped_nax(monkeypat
     norms = mx.stack(norm_rows, axis=0)
     indices = mx.array(np.array([0] * 6 + [1] * 6 + [2] * 6, dtype=np.uint32))
 
-    called = {"grouped": 0}
+    called = {"grouped": 0, "dtype": None}
 
     def fake_grouped(
         x_rot,
@@ -741,6 +785,7 @@ def test_fused_gate_up_swiglu_auto_uses_grouped_nax_only_for_measured_win_shapes
         swiglu_limit=0.0,
     ):
         called["grouped"] += 1
+        called["dtype"] = x_rot.dtype
         return mx.ones((idx_flat.size, out_features), dtype=mx.float32)
 
     monkeypatch.setenv("JANGTQ_MPP_NAX", "auto")
@@ -759,13 +804,16 @@ def test_fused_gate_up_swiglu_auto_uses_grouped_nax_only_for_measured_win_shapes
     mx.eval(small)
     assert called["grouped"] == 0
 
-    large_x = mx.array(rng.standard_normal((512, 1, in_features)).astype(np.float32))
+    large_x = mx.array(
+        rng.standard_normal((512, 1, in_features)).astype(np.float32)
+    ).astype(mx.bfloat16)
     large_indices = mx.array(np.array([0] * 512, dtype=np.uint32))
     large = fused_kernel.fused_gate_up_swiglu_matmul(
         large_x, packed, norms, packed, norms, codebook, signs, large_indices, bits
     )
     mx.eval(large)
     assert called["grouped"] == 1
+    assert called["dtype"] == mx.bfloat16
 
 
 @pytest.mark.parametrize("swiglu_limit", [0.0, 10.0])

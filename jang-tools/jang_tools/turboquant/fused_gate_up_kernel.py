@@ -460,7 +460,7 @@ def fused_gate_up_swiglu_matmul(
         try:
             if out_shape_kind == "sorted":
                 out_raw = _fused_gate_up_swiglu_mpp_nax_grouped_from_rot(
-                    x_rot,
+                    x_rot.astype(x.dtype),
                     packed_gate,
                     norms_gate,
                     packed_up,
@@ -474,7 +474,7 @@ def fused_gate_up_swiglu_matmul(
                 )
             else:
                 gate = _fused_gate_up_swiglu_mpp_nax_from_rot(
-                    x_rot,
+                    x_rot.astype(x.dtype),
                     packed_gate,
                     norms_gate,
                     codebook,
@@ -484,7 +484,7 @@ def fused_gate_up_swiglu_matmul(
                     bits,
                 )
                 up = _fused_gate_up_swiglu_mpp_nax_from_rot(
-                    x_rot,
+                    x_rot.astype(x.dtype),
                     packed_up,
                     norms_up,
                     codebook,

@@ -107,9 +107,9 @@ struct JangTQFrag16 {
     }
   }
 
-  template <typename PackedPtr, typename NormPtr, typename CodebookPtr>
+  template <typename T, typename PackedPtr, typename NormPtr, typename CodebookPtr>
   static void fill_b(
-      thread vec8<half>& dst,
+      thread vec8<T>& dst,
       PackedPtr packed,
       NormPtr norms,
       CodebookPtr codebook,
@@ -133,17 +133,17 @@ struct JangTQFrag16 {
           uint pv = packed[out_col * packed_cols + pack_idx];
           uint cb_idx = (pv >> bit_offset) & mask;
           float w = codebook[cb_idx] * static_cast<float>(norms[out_col]);
-          dst[i * 4 + j] = static_cast<half>(w);
+          dst[i * 4 + j] = static_cast<T>(w);
         } else {
-          dst[i * 4 + j] = half(0);
+          dst[i * 4 + j] = T(0);
         }
       }
     }
   }
 
-  template <typename PackedPtr, typename NormPtr, typename CodebookPtr>
+  template <typename T, typename PackedPtr, typename NormPtr, typename CodebookPtr>
   static void fill_b_expert(
-      thread vec8<half>& dst,
+      thread vec8<T>& dst,
       PackedPtr packed,
       NormPtr norms,
       CodebookPtr codebook,
@@ -170,9 +170,9 @@ struct JangTQFrag16 {
           uint pv = packed[expert_base + out_col * packed_cols + pack_idx];
           uint cb_idx = (pv >> bit_offset) & mask;
           float w = codebook[cb_idx] * static_cast<float>(norms[norm_base + out_col]);
-          dst[i * 4 + j] = static_cast<half>(w);
+          dst[i * 4 + j] = static_cast<T>(w);
         } else {
-          dst[i * 4 + j] = half(0);
+          dst[i * 4 + j] = T(0);
         }
       }
     }
@@ -328,12 +328,29 @@ def mpp_nax_tensorops_available() -> bool:
     return bool(getattr(getattr(mx, "fast", None), "metal_kernel", None))
 
 
+def _nax_compute_types(dtype) -> tuple[str, object, str]:
+    """Select cooperative TensorOps types without narrowing wide activations.
+
+    Model activations commonly use BF16 for its exponent range.  The original
+    NAX lane always converted them to FP16, which can perturb or overflow a
+    long residual stack. M5 TensorOps natively accept FP32 fragments, so BF16
+    and FP32 callers keep the legacy kernel's FP32 rotated activations and
+    dequantized weights. FP16 callers retain the faster half/half lane.
+    """
+
+    if dtype in (mx.bfloat16, mx.float32):
+        return "float", mx.float32, "float"
+    return "half", mx.float16, "half"
+
+
 @lru_cache(maxsize=64)
 def _make_tq_mpp_nax_kernel(
     batch_size: int,
     in_features: int,
     out_features: int,
     bits: int,
+    activation_type: str,
+    weight_type: str,
 ):
     source = f"""
 uint tile_n = threadgroup_position_in_grid.x;
@@ -345,21 +362,21 @@ constexpr auto desc = tensor_ops::matmul2d_descriptor(
     16, 32, 16, false, false, true,
     tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
 tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
-auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
-auto ct_b = op.template get_right_input_cooperative_tensor<half, half, float>();
+auto ct_a = op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
+auto ct_b = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_c = op.template get_destination_cooperative_tensor<
     decltype(ct_a), decltype(ct_b), float>();
 
 for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
 
 for (uint k0 = 0u; k0 < {in_features}u; k0 += 16u) {{
-  JangTQFrag16::vec8<half> fa;
+  JangTQFrag16::vec8<{activation_type}> fa;
   JangTQFrag16::fill_a(
       fa, x_rot, {batch_size}u, {in_features}u, m0, k0);
   for (short i = 0; i < 8; i++) ct_a[i] = fa[i];
 
   for (short nn = 0; nn < 2; nn++) {{
-    JangTQFrag16::vec8<half> fb;
+    JangTQFrag16::vec8<{weight_type}> fb;
     JangTQFrag16::fill_b(
         fb,
         packed,
@@ -386,7 +403,10 @@ for (short nn = 0; nn < 2; nn++) {{
 }}
 """
     return mx.fast.metal_kernel(
-        name=f"jangtq_mpp_nax_b{batch_size}_i{in_features}_o{out_features}_q{bits}",
+        name=(
+            f"jangtq_mpp_nax_b{batch_size}_i{in_features}_o{out_features}_"
+            f"q{bits}_a{activation_type}_w{weight_type}"
+        ),
         input_names=["x_rot", "packed", "norms", "codebook"],
         output_names=["out"],
         header=_MPP_NAX_HEADER,
@@ -422,9 +442,17 @@ def tq_matmul_mpp_nax(
 
     batch_size = int(x_flat.shape[0])
     out_features = int(packed.shape[0])
-    x_rot = hadamard_rotate_metal(x_flat.astype(mx.float32), signs).astype(mx.float16)
+    activation_type, activation_dtype, weight_type = _nax_compute_types(x.dtype)
+    x_rot = hadamard_rotate_metal(x_flat.astype(mx.float32), signs).astype(
+        activation_dtype
+    )
     kernel = _make_tq_mpp_nax_kernel(
-        batch_size, in_features, out_features, int(bits)
+        batch_size,
+        in_features,
+        out_features,
+        int(bits),
+        activation_type,
+        weight_type,
     )
     n_tiles = (out_features + 31) // 32
     m_tiles = (batch_size + 15) // 16
@@ -450,6 +478,8 @@ def _make_gather_tq_mpp_nax_kernel(
     in_features: int,
     out_features: int,
     bits: int,
+    activation_type: str,
+    weight_type: str,
 ):
     packed_cols = (in_features + (32 // bits) - 1) // (32 // bits)
     source = f"""
@@ -462,21 +492,21 @@ constexpr auto desc = tensor_ops::matmul2d_descriptor(
     16, 32, 16, false, false, true,
     tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
 tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
-auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
-auto ct_b = op.template get_right_input_cooperative_tensor<half, half, float>();
+auto ct_a = op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
+auto ct_b = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_c = op.template get_destination_cooperative_tensor<
     decltype(ct_a), decltype(ct_b), float>();
 
 for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
 
 for (uint k0 = 0u; k0 < {in_features}u; k0 += 16u) {{
-  JangTQFrag16::vec8<half> fa;
+  JangTQFrag16::vec8<{activation_type}> fa;
   JangTQFrag16::fill_a_single_row(
       fa, x_rot, {in_features}u, dispatch_idx, k0);
   for (short i = 0; i < 8; i++) ct_a[i] = fa[i];
 
   for (short nn = 0; nn < 2; nn++) {{
-    JangTQFrag16::vec8<half> fb;
+    JangTQFrag16::vec8<{weight_type}> fb;
     JangTQFrag16::fill_b_expert(
         fb,
         packed,
@@ -504,7 +534,10 @@ for (short nn = 0; nn < 2; nn++) {{
 }}
 """
     return mx.fast.metal_kernel(
-        name=f"jangtq_gather_mpp_nax_i{in_features}_o{out_features}_q{bits}",
+        name=(
+            f"jangtq_gather_mpp_nax_i{in_features}_o{out_features}_"
+            f"q{bits}_a{activation_type}_w{weight_type}"
+        ),
         input_names=["x_rot", "packed", "norms", "codebook", "rhs_indices"],
         output_names=["out"],
         header=_MPP_NAX_HEADER,
@@ -534,10 +567,19 @@ def gather_tq_matmul_mpp_nax_from_rot(
         raise RuntimeError("MPP NAX tensor_ops unavailable for MLX custom kernels")
 
     n_dispatches = int(x_rot.shape[0])
-    kernel = _make_gather_tq_mpp_nax_kernel(in_features, out_features, int(bits))
+    activation_type, activation_dtype, weight_type = _nax_compute_types(x_rot.dtype)
+    kernel = _make_gather_tq_mpp_nax_kernel(
+        in_features, out_features, int(bits), activation_type, weight_type
+    )
     n_tiles = (out_features + 31) // 32
     out = kernel(
-        inputs=[x_rot.astype(mx.float16), packed, norms, codebook, rhs_indices.astype(mx.uint32)],
+        inputs=[
+            x_rot.astype(activation_dtype),
+            packed,
+            norms,
+            codebook,
+            rhs_indices.astype(mx.uint32),
+        ],
         output_shapes=[(n_dispatches, out_features)],
         output_dtypes=[mx.float32],
         grid=(n_tiles * 32, n_dispatches, 1),
@@ -551,6 +593,8 @@ def _make_grouped_gather_tq_mpp_nax_kernel(
     in_features: int,
     out_features: int,
     bits: int,
+    activation_type: str,
+    weight_type: str,
 ):
     packed_cols = (in_features + (32 // bits) - 1) // (32 // bits)
     source = f"""
@@ -565,21 +609,21 @@ constexpr auto desc = tensor_ops::matmul2d_descriptor(
     16, 32, 16, false, false, true,
     tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
 tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
-auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
-auto ct_b = op.template get_right_input_cooperative_tensor<half, half, float>();
+auto ct_a = op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
+auto ct_b = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_c = op.template get_destination_cooperative_tensor<
     decltype(ct_a), decltype(ct_b), float>();
 
 for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
 
 for (uint k0 = 0u; k0 < {in_features}u; k0 += 16u) {{
-  JangTQFrag16::vec8<half> fa;
+  JangTQFrag16::vec8<{activation_type}> fa;
   JangTQFrag16::fill_a_group(
       fa, x_rot, {in_features}u, tile_start, tile_count, k0);
   for (short i = 0; i < 8; i++) ct_a[i] = fa[i];
 
   for (short nn = 0; nn < 2; nn++) {{
-    JangTQFrag16::vec8<half> fb;
+    JangTQFrag16::vec8<{weight_type}> fb;
     JangTQFrag16::fill_b_expert(
         fb,
         packed,
@@ -607,7 +651,10 @@ for (short nn = 0; nn < 2; nn++) {{
 }}
 """
     return mx.fast.metal_kernel(
-        name=f"jangtq_grouped_gather_mpp_nax_i{in_features}_o{out_features}_q{bits}",
+        name=(
+            f"jangtq_grouped_gather_mpp_nax_i{in_features}_o{out_features}_"
+            f"q{bits}_a{activation_type}_w{weight_type}"
+        ),
         input_names=[
             "x_rot",
             "packed",
@@ -692,14 +739,15 @@ def gather_tq_matmul_mpp_nax_grouped_from_rot_with_tiles(
         raise RuntimeError("MPP NAX tensor_ops unavailable for MLX custom kernels")
 
     n_dispatches = int(x_rot.shape[0])
+    activation_type, activation_dtype, weight_type = _nax_compute_types(x_rot.dtype)
     kernel = _make_grouped_gather_tq_mpp_nax_kernel(
-        in_features, out_features, int(bits)
+        in_features, out_features, int(bits), activation_type, weight_type
     )
     n_tiles = int(tile_starts.shape[0])
     n_output_tiles = (out_features + 31) // 32
     out = kernel(
         inputs=[
-            x_rot.astype(mx.float16),
+            x_rot.astype(activation_dtype),
             packed,
             norms,
             codebook,
@@ -754,6 +802,8 @@ def _make_grouped_fused_gate_up_swiglu_mpp_nax_kernel(
     in_features: int,
     out_features: int,
     bits: int,
+    activation_type: str,
+    weight_type: str,
 ):
     packed_cols = (in_features + (32 // bits) - 1) // (32 // bits)
     source = f"""
@@ -769,9 +819,9 @@ constexpr auto desc = tensor_ops::matmul2d_descriptor(
     16, 32, 16, false, false, true,
     tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
 tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
-auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
-auto ct_bg = op.template get_right_input_cooperative_tensor<half, half, float>();
-auto ct_bu = op.template get_right_input_cooperative_tensor<half, half, float>();
+auto ct_a = op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
+auto ct_bg = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
+auto ct_bu = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_cg = op.template get_destination_cooperative_tensor<
     decltype(ct_a), decltype(ct_bg), float>();
 auto ct_cu = op.template get_destination_cooperative_tensor<
@@ -783,14 +833,14 @@ for (short i = 0; i < ct_cg.get_capacity(); i++) {{
 }}
 
 for (uint k0 = 0u; k0 < {in_features}u; k0 += 16u) {{
-  JangTQFrag16::vec8<half> fa;
+  JangTQFrag16::vec8<{activation_type}> fa;
   JangTQFrag16::fill_a_group(
       fa, x_rot, {in_features}u, tile_start, tile_count, k0);
   for (short i = 0; i < 8; i++) ct_a[i] = fa[i];
 
   for (short nn = 0; nn < 2; nn++) {{
-    JangTQFrag16::vec8<half> fbg;
-    JangTQFrag16::vec8<half> fbu;
+    JangTQFrag16::vec8<{weight_type}> fbg;
+    JangTQFrag16::vec8<{weight_type}> fbu;
     JangTQFrag16::fill_b_expert(
         fbg,
         packed_gate,
@@ -849,7 +899,10 @@ for (short nn = 0; nn < 2; nn++) {{
 }}
 """
     return mx.fast.metal_kernel(
-        name=f"jangtq_grouped_fused_gate_up_swiglu_mpp_nax_i{in_features}_o{out_features}_q{bits}",
+        name=(
+            f"jangtq_grouped_fused_gate_up_swiglu_mpp_nax_i{in_features}_"
+            f"o{out_features}_q{bits}_a{activation_type}_w{weight_type}"
+        ),
         input_names=[
             "x_rot",
             "packed_gate",
@@ -889,15 +942,16 @@ def fused_gate_up_swiglu_mpp_nax_grouped_from_rot_with_tiles(
         raise RuntimeError("MPP NAX tensor_ops unavailable for MLX custom kernels")
 
     n_dispatches = int(x_rot.shape[0])
+    activation_type, activation_dtype, weight_type = _nax_compute_types(x_rot.dtype)
     kernel = _make_grouped_fused_gate_up_swiglu_mpp_nax_kernel(
-        in_features, out_features, int(bits)
+        in_features, out_features, int(bits), activation_type, weight_type
     )
     n_tiles = int(tile_starts.shape[0])
     n_output_tiles = (out_features + 31) // 32
     meta = mx.array([max(0, int(round(float(swiglu_limit or 0.0) * 1000.0)))], dtype=mx.uint32)
     out = kernel(
         inputs=[
-            x_rot.astype(mx.float16),
+            x_rot.astype(activation_dtype),
             packed_gate,
             norms_gate,
             packed_up,
