@@ -15,6 +15,8 @@ DSV4-Flash bundles.
 from __future__ import annotations
 
 import math
+import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, List
 
@@ -27,6 +29,35 @@ from mlx_lm.models.base import (
 from mlx_lm.models.cache import KVCache
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.switch_layers import SwitchGLU
+
+
+logger = logging.getLogger(__name__)
+
+
+def _layerwise_prefill_materialization_enabled(input_ids) -> bool:
+    """Bound DSV4's lazy cross-layer graph during multi-token prefill.
+
+    CSA layers create a query-by-compressed-pool attention graph.  Leaving all
+    43 decoder layers lazy until final logits makes those graphs coexist and
+    can exceed Metal's working set even when the persistent SWA/CSA/HCA cache
+    itself fits.  Evaluating the hidden state at layer boundaries preserves
+    the exact graph math while releasing prior-layer attention temporaries.
+    """
+
+    raw_enabled = os.environ.get("DSV4_LAYERWISE_PREFILL", "1").strip().lower()
+    if raw_enabled in {"0", "false", "no", "off"}:
+        return False
+    try:
+        min_tokens = max(
+            2,
+            int(os.environ.get("DSV4_LAYERWISE_PREFILL_MIN_TOKENS", "256")),
+        )
+    except (TypeError, ValueError):
+        min_tokens = 256
+    try:
+        return int(input_ids.shape[-1]) >= min_tokens
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return False
 
 
 @dataclass
@@ -1386,6 +1417,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_head_fn = mx.zeros((args.hc_mult, args.hc_mult * args.hidden_size))
         self.hc_head_base = mx.zeros((args.hc_mult,))
         self.hc_head_scale = mx.zeros((1,))
+        self._layerwise_prefill_logged = False
 
     def _hc_head_reduce(self, x):
         # x: (B, L, hc_mult, D) → (B, L, D) via sigmoid-weighted sum
@@ -1398,6 +1430,15 @@ class DeepseekV4Model(nn.Module):
         return y.astype(x.dtype)
 
     def __call__(self, input_ids, cache=None, mask=None):
+        layerwise_prefill = _layerwise_prefill_materialization_enabled(input_ids)
+        if layerwise_prefill and not self._layerwise_prefill_logged:
+            logger.info(
+                "DSV4 layerwise prefill materialization enabled: tokens=%d "
+                "layers=%d (bounds lazy CSA/HCA attention graph lifetime)",
+                int(input_ids.shape[-1]),
+                len(self.layers),
+            )
+            self._layerwise_prefill_logged = True
         h = self.embed(input_ids)
         # Expand to hc_mult copies for mHC. Must be materialized (not a broadcast
         # view) — matches torch reference `h.unsqueeze(2).repeat(1, 1, hc_mult, 1)`.
@@ -1418,6 +1459,8 @@ class DeepseekV4Model(nn.Module):
             )
         for layer, c in zip(self.layers, cache):
             h = layer(h, mask=mask, cache=c, input_ids=input_ids)
+            if layerwise_prefill:
+                mx.eval(h)
         h = self._hc_head_reduce(h)
         return self.norm(h)
 

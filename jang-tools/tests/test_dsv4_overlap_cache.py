@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import inspect
 from types import SimpleNamespace
 
 
@@ -13,6 +14,30 @@ def _tokens(start: int, length: int, width: int = 4):
 
 def _np(x):
     return np.array(x, copy=False)
+
+
+def test_dsv4_long_prefill_materializes_each_decoder_layer(monkeypatch):
+    from jang_tools.dsv4 import mlx_model
+
+    monkeypatch.delenv("DSV4_LAYERWISE_PREFILL", raising=False)
+    monkeypatch.delenv("DSV4_LAYERWISE_PREFILL_MIN_TOKENS", raising=False)
+
+    assert not mlx_model._layerwise_prefill_materialization_enabled(
+        SimpleNamespace(shape=(1, 255))
+    )
+    assert mlx_model._layerwise_prefill_materialization_enabled(
+        SimpleNamespace(shape=(1, 256))
+    )
+
+    monkeypatch.setenv("DSV4_LAYERWISE_PREFILL", "0")
+    assert not mlx_model._layerwise_prefill_materialization_enabled(
+        SimpleNamespace(shape=(1, 2048))
+    )
+
+    source = inspect.getsource(mlx_model.DeepseekV4Model.__call__)
+    loop = source[source.index("for layer, c in zip"):source.index("h = self._hc_head_reduce")]
+    assert "if layerwise_prefill:" in loop
+    assert "mx.eval(h)" in loop
 
 
 def test_dsv4_overlap_cache_prefill_keeps_last_full_window():
