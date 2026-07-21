@@ -134,12 +134,17 @@ def encode_with_image(tok, prompt: str, image_path: str | None,
         we splice [image_token_id] * N at the position of the first '<image>'
         marker in the prompt (or appended at start)
     """
-    from PIL import Image
-    from ..vl.pixtral import PixtralImageProcessor, encode_image_pixtral
-
     ids = tok.encode(prompt)
     if image_path is None:
         return ids, None
+
+    # Keep the text-only reference CLI independent of the optional Pixtral
+    # processor. Importing it before this guard made every text invocation
+    # fail at startup when the unreleased ``jang_tools.vl`` package was not
+    # installed, so the runtime could never reach its advertised text path.
+    from PIL import Image
+    from ..vl.pixtral import PixtralImageProcessor, encode_image_pixtral
+
     img = np.array(Image.open(image_path).convert("RGB"))
     proc = PixtralImageProcessor()
     chw, placeholders = encode_image_pixtral(img, proc, image_token_id)
