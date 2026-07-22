@@ -7,8 +7,11 @@ into repetition loops when all three expert MLP tensor classes were at pure
 caught it. These tests pin the invariant so future drift fails loudly.
 """
 from jang_tools.allocate import (
+    BIT_UPGRADE_PATH,
     _MLP_ASYMMETRY_MIN_EXPERTS,
     _apply_mlp_asymmetry_floor,
+    allocate_bits_budget,
+    allocate_bits_budget_compact,
     MLP_ASYMMETRY_FLOORS,
 )
 
@@ -97,3 +100,22 @@ def test_mixtral_naming_also_covered():
         "layers.0.block_sparse_moe.experts.0.w1.weight", 2, 256) == 4
     assert _apply_mlp_asymmetry_floor(
         "layers.0.block_sparse_moe.experts.0.w2.weight", 2, 256) == 3
+
+
+def test_generic_allocators_never_emit_storage_only_one_bit():
+    """A 2-bit budget may protect sensitive tensors but cannot fall to 1-bit."""
+    assert BIT_UPGRADE_PATH == [2, 3, 4, 5, 6, 8]
+
+    compress = "model.layers.5.mlp.up_proj.weight"
+    critical = "model.layers.5.self_attn.q_proj.weight"
+    names = [compress] * 100 + [critical] * 10
+    expanded = allocate_bits_budget(names, target_bits=2.0)
+    assert int(expanded.min()) >= 2
+    assert 1 not in set(int(bits) for bits in expanded)
+
+    compact = allocate_bits_budget_compact(
+        [(compress, 100), (critical, 10)],
+        target_bits=2.0,
+    )
+    assert min(compact.values()) >= 2
+    assert 1 not in compact.values()

@@ -7,7 +7,12 @@ FORMAT_NAME = "jang"
 FORMAT_VERSION = "2.0"
 FORMAT_VERSION_V1 = "1.1"
 DEFAULT_BLOCK_SIZE = 64
-ALLOWED_BIT_WIDTHS = frozenset({1, 2, 3, 4, 5, 6, 8})
+# Semantic quantization widths used by allocators and quantizers. One-bit
+# affine bundles still execute through the native two-bit runtime path; their
+# one-bit value describes packed storage only and must never become a generic
+# allocation target.
+ALLOWED_BIT_WIDTHS = frozenset({2, 3, 4, 5, 6, 8})
+ALLOWED_STORAGE_BIT_WIDTHS = frozenset({1, *ALLOWED_BIT_WIDTHS})
 JANG_CONFIG_FILENAME = "jang_config.json"
 JANG_IMATRIX_FILENAME = "jang_imatrix.safetensors"
 JANG_INDEX_FILENAME = "model.jang.index.json"          # v1
@@ -43,8 +48,11 @@ JANG_SUFFIXES = (QWEIGHT_SUFFIX, SCALES_SUFFIX, ZEROS_SUFFIX, BIASES_SUFFIX, BIT
 
 def bytes_per_block(bits: int, block_size: int = DEFAULT_BLOCK_SIZE) -> int:
     """Calculate bytes needed to store one block at the given bit width."""
-    if bits not in ALLOWED_BIT_WIDTHS:
-        raise ValueError(f"Bit width {bits} not in {sorted(ALLOWED_BIT_WIDTHS)}")
+    if bits not in ALLOWED_STORAGE_BIT_WIDTHS:
+        raise ValueError(
+            f"Storage bit width {bits} not in "
+            f"{sorted(ALLOWED_STORAGE_BIT_WIDTHS)}"
+        )
     # Ceiling division: (block_size * bits + 7) // 8
     return (block_size * bits + 7) // 8
 
@@ -64,7 +72,12 @@ def effective_bits(nominal_bits: float, block_size: int = DEFAULT_BLOCK_SIZE) ->
 
 
 def validate_bit_width(bits: int) -> None:
-    """Raise ValueError if bit width is not allowed."""
+    """Reject unsupported semantic quantization widths.
+
+    One-bit affine packing is a storage representation. It expands to the
+    native two-bit runtime and is intentionally not accepted by quantizers or
+    generic allocation policy.
+    """
     if bits not in ALLOWED_BIT_WIDTHS:
         raise ValueError(
             f"Invalid bit width {bits}. Allowed: {sorted(ALLOWED_BIT_WIDTHS)}"

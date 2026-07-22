@@ -10,7 +10,6 @@ import numpy as np
 from typing import NamedTuple
 
 from .format.spec import (
-    ALLOWED_BIT_WIDTHS,
     DEFAULT_BLOCK_SIZE,
     validate_bit_width,
     compute_block_offsets,
@@ -267,6 +266,7 @@ def quantize_tensor(
             f"got {unique_bits}. Use profile-based allocation."
         )
     bits = unique_bits.pop()
+    validate_bit_width(bits)
 
     # Quantize all blocks at once (vectorized)
     all_q, scales, zeros = _quantize_blocks_vectorized(

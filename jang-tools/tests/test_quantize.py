@@ -9,6 +9,7 @@ from jang_tools.quantize import (
     dequantize_tensor,
 )
 from jang_tools.allocate import allocate_bits_greedy
+from jang_tools.format.spec import bytes_per_block, validate_bit_width
 
 
 class TestBlockQuantize:
@@ -48,6 +49,20 @@ class TestBlockQuantize:
         weights = np.full(64, 3.14, dtype=np.float32)
         q, s, z = quantize_block_rtn(weights, 4)
         # Should not crash; constant block is a valid edge case
+
+    def test_one_bit_is_storage_only(self):
+        """Affine 1-bit is a packed representation, not a semantic target."""
+        assert bytes_per_block(1, block_size=64) == 8
+        with pytest.raises(ValueError, match="Invalid bit width 1"):
+            validate_bit_width(1)
+
+        weights = np.zeros((8, 8), dtype=np.float32)
+        with pytest.raises(ValueError, match="Invalid bit width 1"):
+            quantize_tensor(
+                weights,
+                np.ones(1, dtype=np.uint8),
+                block_size=64,
+            )
 
 
 class TestTensorQuantize:
