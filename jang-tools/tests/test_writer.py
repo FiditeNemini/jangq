@@ -55,6 +55,7 @@ def test_jang_v2_writer_emits_manifest_quantization_overrides(tmp_path):
                     "layers.0.mlp.switch_mlp.down_proj": {
                         "bits": 2,
                         "group_size": 64,
+                        "storage_bits": 1,
                     },
                 },
             }
@@ -76,4 +77,5 @@ def test_jang_v2_writer_emits_manifest_quantization_overrides(tmp_path):
         "bits": 2,
         "group_size": 64,
         "mode": "affine",
+        "storage_bits": 1,
     }

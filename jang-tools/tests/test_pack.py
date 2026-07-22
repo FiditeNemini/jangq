@@ -8,7 +8,7 @@ from jang_tools.pack import pack_bits, unpack_bits, pack_block, unpack_block
 class TestPackUnpack:
     """Verify pack/unpack roundtrip for all supported bit widths."""
 
-    @pytest.mark.parametrize("bits", [2, 3, 4, 5, 6, 8])
+    @pytest.mark.parametrize("bits", [1, 2, 3, 4, 5, 6, 8])
     def test_roundtrip(self, bits):
         """Pack then unpack should recover original values."""
         n = 64  # one block
@@ -21,7 +21,7 @@ class TestPackUnpack:
 
         np.testing.assert_array_equal(unpacked, values)
 
-    @pytest.mark.parametrize("bits", [2, 3, 4, 5, 6, 8])
+    @pytest.mark.parametrize("bits", [1, 2, 3, 4, 5, 6, 8])
     def test_packed_size(self, bits):
         """Packed array should have the expected number of bytes."""
         n = 64
@@ -43,6 +43,14 @@ class TestPackUnpack:
         unpacked = unpack_bits(packed, 2, 8)
         np.testing.assert_array_equal(unpacked, values)
 
+    def test_1bit_specific(self):
+        """One-bit storage is LSB-first and round-trips exact Bonsai rows."""
+        values = np.array([0, 1, 0, 1, 1, 0, 1, 0], dtype=np.uint8)
+        packed = pack_bits(values, 1)
+
+        assert packed.tolist() == [0b01011010]
+        np.testing.assert_array_equal(unpack_bits(packed, 1, 8), values)
+
     def test_4bit_specific(self):
         """Test 4-bit packing with known values."""
         values = np.array([5, 10, 3, 15], dtype=np.uint8)
@@ -52,7 +60,7 @@ class TestPackUnpack:
         assert packed[0] == 0xA5
         assert packed[1] == 0xF3
 
-    @pytest.mark.parametrize("bits", [2, 3, 4, 5, 6, 8])
+    @pytest.mark.parametrize("bits", [1, 2, 3, 4, 5, 6, 8])
     def test_block_roundtrip(self, bits):
         """Test pack_block/unpack_block convenience functions."""
         block_size = 64
@@ -65,7 +73,7 @@ class TestPackUnpack:
 
         np.testing.assert_array_equal(unpacked, values)
 
-    @pytest.mark.parametrize("bits", [2, 3, 4, 5, 6, 8])
+    @pytest.mark.parametrize("bits", [1, 2, 3, 4, 5, 6, 8])
     def test_large_roundtrip(self, bits):
         """Test with many blocks worth of data."""
         n = 64 * 100  # 100 blocks
@@ -80,7 +88,7 @@ class TestPackUnpack:
 
     def test_max_values(self):
         """Test that maximum values at each bit width pack correctly."""
-        for bits in [2, 3, 4, 5, 6, 8]:
+        for bits in [1, 2, 3, 4, 5, 6, 8]:
             max_val = (1 << bits) - 1
             values = np.full(64, max_val, dtype=np.uint8)
             packed = pack_bits(values, bits)
@@ -89,8 +97,14 @@ class TestPackUnpack:
 
     def test_zero_values(self):
         """Test that all-zero arrays pack correctly."""
-        for bits in [2, 3, 4, 5, 6, 8]:
+        for bits in [1, 2, 3, 4, 5, 6, 8]:
             values = np.zeros(64, dtype=np.uint8)
             packed = pack_bits(values, bits)
             unpacked = unpack_bits(packed, bits, 64)
             np.testing.assert_array_equal(unpacked, values)
+
+    def test_unpack_flattens_packed_matrix_view(self):
+        values = np.array([0, 1] * 32, dtype=np.uint8)
+        packed_matrix = pack_bits(values, 1).reshape(2, 4)
+
+        np.testing.assert_array_equal(unpack_bits(packed_matrix, 1, 64), values)
