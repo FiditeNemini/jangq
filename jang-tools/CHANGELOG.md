@@ -22,6 +22,17 @@
   range safety), `validate_dequant.py` (dequant round-trip vs source). Runtime
   contract: `docs/runtime/2026-06-03-gemma4-12b-unified-runtime-spec.md`.
 
+## 2.5.33 — 2026-07-22
+
+- Laguna JANG-affine loading derives each module's true 2/3/4/5/6/8-bit width
+  from its packed weight and scale shapes instead of applying the top-level
+  8-bit default uniformly. This fixes S-2.1 failures such as a 3072-wide
+  6-bit embedding stored as 576 packed columns with 48 scale groups being
+  dequantized as 8-bit.
+- The Laguna runtime exports `LAGUNA_MIXED_AFFINE_RUNTIME_VERSION=1` so
+  consumers can reject stale wheels before model execution instead of
+  surfacing a late MLX dequantization shape error.
+
 ## 2.5.30 — 2026-05-15
 
 - JANGTQ MPP/NAX availability checks no longer run a smoke Metal dispatch.

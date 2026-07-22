@@ -21,6 +21,41 @@ from .config import LagunaConfig
 from .model import LagunaForCausalLM
 
 
+# Increment this only when the public package contains the mixed-affine loader
+# contract below. vMLX checks the marker before loading a mixed-bit Laguna
+# artifact so an old wheel fails with an actionable version error instead of a
+# late, misleading MLX dequantization shape exception.
+LAGUNA_MIXED_AFFINE_RUNTIME_VERSION = 1
+
+
+def infer_affine_bits_from_shapes(
+    weight_shape: tuple[int, ...],
+    scales_shape: tuple[int, ...],
+    *,
+    group_size: int,
+    fallback_bits: int,
+) -> int:
+    """Infer a packed affine module's bit width from artifact tensor shapes.
+
+    ``scales[-1]`` is the number of input groups and ``weight[-1]`` is the
+    uint32-packed input width. For example, Laguna S-2.1's 3072-wide 6-bit
+    embedding is stored as 576 uint32 columns with 48 scale groups:
+    ``576 * 32 / (48 * 64) == 6``.
+    """
+    if not weight_shape or not scales_shape or group_size <= 0:
+        return fallback_bits
+    scales_last = int(scales_shape[-1])
+    packed_last = int(weight_shape[-1])
+    if scales_last <= 0 or packed_last <= 0:
+        return fallback_bits
+    in_features = scales_last * group_size
+    numerator = packed_last * 32
+    if numerator % in_features:
+        return fallback_bits
+    derived = numerator // in_features
+    return derived if derived in (2, 3, 4, 5, 6, 8) else fallback_bits
+
+
 def _force_eval(*xs):
     getattr(mx, "ev" + "al")(*xs)
 
@@ -279,13 +314,12 @@ def load(src: str):
             w = weights.get(f"{name}.weight")
             if sc is None or w is None:
                 return bits
-            scales_last = int(sc.shape[-1])
-            packed_last = int(w.shape[-1])
-            if scales_last <= 0:
-                return bits
-            in_features = scales_last * group_size
-            derived = round(packed_last * 32 / in_features)
-            return derived if derived in (2, 3, 4, 5, 6, 8) else bits
+            return infer_affine_bits_from_shapes(
+                tuple(w.shape),
+                tuple(sc.shape),
+                group_size=group_size,
+                fallback_bits=bits,
+            )
 
         def _predicate(name, module):
             if f"{name}.scales" not in scale_keys:

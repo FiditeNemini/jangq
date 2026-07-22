@@ -15,6 +15,33 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_laguna_runtime_infers_mixed_affine_bits_from_packed_shapes():
+    from jang_tools.laguna.runtime import (
+        LAGUNA_MIXED_AFFINE_RUNTIME_VERSION,
+        infer_affine_bits_from_shapes,
+    )
+
+    assert LAGUNA_MIXED_AFFINE_RUNTIME_VERSION == 1
+    # S-2.1 embed_tokens: hidden 3072, group size 64, packed at 6 bits.
+    assert infer_affine_bits_from_shapes(
+        (100352, 576), (100352, 48), group_size=64, fallback_bits=8
+    ) == 6
+    # M.1 4096-wide 6-bit projection from the original failure class.
+    assert infer_affine_bits_from_shapes(
+        (8192, 768), (8192, 64), group_size=64, fallback_bits=8
+    ) == 6
+    assert infer_affine_bits_from_shapes(
+        (8192, 512), (8192, 64), group_size=64, fallback_bits=8
+    ) == 4
+    assert infer_affine_bits_from_shapes(
+        (8192, 1024), (8192, 64), group_size=64, fallback_bits=4
+    ) == 8
+    # Reject non-integral or unsupported artifact layouts instead of guessing.
+    assert infer_affine_bits_from_shapes(
+        (100352, 575), (100352, 48), group_size=64, fallback_bits=8
+    ) == 8
+
+
 def test_laguna_jang_converter_exists():
     path = ROOT / "jang_tools" / "convert_laguna_jang.py"
 
