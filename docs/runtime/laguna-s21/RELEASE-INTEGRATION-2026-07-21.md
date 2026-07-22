@@ -15,7 +15,7 @@ the live Electron application.
 - Repository: `/Users/eric/jang-release-prep-20260721`
 - Integration branch: `codex/laguna-release-sync-20260721`
 - Base: `ca75f0c` (`origin/main` when this worktree was created)
-- Integration head: `f5d4077`
+- Source integration head: `dd220b8`
 - Remote branch: `origin/codex/laguna-release-sync-20260721`
 - Fast-forward relationship: `ca75f0c` is an ancestor of `994b811`
 - Dirty `/Users/eric/jang` checkout was not reset or overwritten.
@@ -30,6 +30,7 @@ Integrated commits, oldest first:
 6. `d2b4541` — runtime notes, example, and Swift port checklist
 7. `994b811` — 1-bit affine storage metadata and pack/unpack coverage
 8. `f5d4077` — keep 1-bit storage out of semantic quantization/allocation
+9. `dd220b8` — validate storage widths and correct Laguna AWQ provenance
 
 The 1-bit work is required for affine 1-bit bundles such as Bonsai. It does
 not convert JANGTQ/MXTQ Hadamard-codebook bundles into affine JANG, and it does
@@ -41,14 +42,14 @@ The complete clean-worktree suite was rerun after independent review and the
 storage-width correction:
 
 ```text
-572 passed, 37 skipped, 2 warnings in 15.02s
+573 passed, 37 skipped, 2 warnings in 12.87s
 ```
 
 The final focused allocator/quantizer/format run completed before the full
 suite:
 
 ```text
-75 passed
+76 passed
 ```
 
 The two warnings were test-environment warnings, not failed assertions. No
@@ -61,6 +62,8 @@ therefore assign 1-bit to ordinary dense tensors. The corrected contract keeps
 semantic allocation/quantization at `{2,3,4,5,6,8}`, exposes 1-bit only to the
 packed-storage helpers, and makes generic tensor quantization reject semantic
 1-bit. Regression coverage pins both expanded and compact allocators.
+The writer now also rejects unsupported `storage_bits` metadata rather than
+copying arbitrary integers into `config.json`.
 
 The Python package build also completed from the clean worktree:
 
@@ -71,6 +74,13 @@ Successfully built jang-2.5.31.tar.gz and jang-2.5.31-py3-none-any.whl
 Setuptools emitted a future deprecation warning for the table form of
 `project.license`; it did not fail this build and remains a follow-up before
 the February 2027 enforcement date.
+
+The published Laguna bundle sidecars report AWQ enabled, but the scale files
+named by the historical notes were not present on the build Mac or external
+drive during this audit. The conversion examples now require an explicit AWQ
+path and label it as a placeholder. Exact published-bundle reproduction stays
+blocked until those scales are recovered or regenerated and revalidated; the
+docs no longer imply that omitting AWQ is equivalent.
 
 ## Real-bundle source facts inspected
 
