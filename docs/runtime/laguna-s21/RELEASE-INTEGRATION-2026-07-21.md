@@ -51,6 +51,16 @@ The focused Laguna/format run completed before the full suite:
 The two warnings were test-environment warnings, not failed assertions. No
 real model generation or vMLX UI/API result is inferred from these tests.
 
+The Python package build also completed from the clean worktree:
+
+```text
+Successfully built jang-2.5.31.tar.gz and jang-2.5.31-py3-none-any.whl
+```
+
+Setuptools emitted a future deprecation warning for the table form of
+`project.license`; it did not fail this build and remains a follow-up before
+the February 2027 enforcement date.
+
 ## Real-bundle source facts inspected
 
 Bundles on the original M5 external drive:
