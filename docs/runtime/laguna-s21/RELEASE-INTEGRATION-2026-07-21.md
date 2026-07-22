@@ -15,7 +15,7 @@ the live Electron application.
 - Repository: `/Users/eric/jang-release-prep-20260721`
 - Integration branch: `codex/laguna-release-sync-20260721`
 - Base: `ca75f0c` (`origin/main` when this worktree was created)
-- Integration head: `994b811`
+- Integration head: `f5d4077`
 - Remote branch: `origin/codex/laguna-release-sync-20260721`
 - Fast-forward relationship: `ca75f0c` is an ancestor of `994b811`
 - Dirty `/Users/eric/jang` checkout was not reset or overwritten.
@@ -29,6 +29,7 @@ Integrated commits, oldest first:
 5. `f8127a2` — AWQ capture/search correction
 6. `d2b4541` — runtime notes, example, and Swift port checklist
 7. `994b811` — 1-bit affine storage metadata and pack/unpack coverage
+8. `f5d4077` — keep 1-bit storage out of semantic quantization/allocation
 
 The 1-bit work is required for affine 1-bit bundles such as Bonsai. It does
 not convert JANGTQ/MXTQ Hadamard-codebook bundles into affine JANG, and it does
@@ -36,20 +37,30 @@ not change base MLX MXFP routing. Those formats remain distinct.
 
 ## Source tests
 
-The complete clean-worktree suite was run from `jang-tools` at `994b811`:
+The complete clean-worktree suite was rerun after independent review and the
+storage-width correction:
 
 ```text
-570 passed, 37 skipped, 2 warnings in 14.11s
+572 passed, 37 skipped, 2 warnings in 15.02s
 ```
 
-The focused Laguna/format run completed before the full suite:
+The final focused allocator/quantizer/format run completed before the full
+suite:
 
 ```text
-60 passed, 2 warnings
+75 passed
 ```
 
 The two warnings were test-environment warnings, not failed assertions. No
 real model generation or vMLX UI/API result is inferred from these tests.
+
+Independent review caught and blocked a cross-family regression before main:
+temporarily adding 1 to global semantic `ALLOWED_BIT_WIDTHS` also inserted it
+into the generic allocator downgrade path. A deterministic 2-bit budget could
+therefore assign 1-bit to ordinary dense tensors. The corrected contract keeps
+semantic allocation/quantization at `{2,3,4,5,6,8}`, exposes 1-bit only to the
+packed-storage helpers, and makes generic tensor quantization reject semantic
+1-bit. Regression coverage pins both expanded and compact allocators.
 
 The Python package build also completed from the clean worktree:
 
