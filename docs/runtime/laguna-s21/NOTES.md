@@ -45,8 +45,13 @@
 | Tests: policy + chat block | `tests/test_laguna_jang_affine_policy.py` | 7 tests |
 | Tests: attention/cache proofs | `tests/test_laguna_hybrid_attention_cache.py` | 5 tests, negative-control-verified |
 
-AWQ artifacts (keep — rebuilds reuse them): `~/models/poolside/
-Laguna-S-2.1-awq-{stats,scales,scales-4bit}.safetensors` (+ meta.json).
+AWQ artifacts used for the published bundles were historically recorded as
+`~/models/poolside/Laguna-S-2.1-awq-{stats,scales,scales-4bit}.safetensors`
+(+ meta.json). A 2026-07-21 filesystem audit did **not** find those files on
+the build Mac or external model drive. Both published bundle sidecars say AWQ
+was enabled, so an exact rebuild is blocked until the original scales are
+recovered or regenerated and revalidated. Do not silently omit `--awq` and
+call the result equivalent.
 Source pinned: `~/models/poolside/Laguna-S-2.1/.jang_source_pin.json`
 (sha a50e85e). Winners: absmean α=0.25 at BOTH 2-bit (+2.4%) and 4-bit
 (+2.9%), 0 inert channels.
@@ -194,11 +199,18 @@ Nuances when interpreting results:
 # JANG_2L (~44 GB), then JANG_4M (~68 GB) — SEQUENTIALLY, never concurrent MLX
 python -m jang_tools.convert_laguna_jang \
     --src ~/models/poolside/Laguna-S-2.1 \
-    --out ~/.mlxstudio/models/JANGQ-AI/Laguna-S-2.1-JANG_2L --profile JANG_2L
+    --out ~/.mlxstudio/models/JANGQ-AI/Laguna-S-2.1-JANG_2L --profile JANG_2L \
+    --awq /path/to/Laguna-S-2.1-awq-scales.safetensors
 python -m jang_tools.convert_laguna_jang \
     --src ~/models/poolside/Laguna-S-2.1 \
-    --out ~/.mlxstudio/models/JANGQ-AI/Laguna-S-2.1-JANG_4M --profile JANG_4M
+    --out ~/.mlxstudio/models/JANGQ-AI/Laguna-S-2.1-JANG_4M --profile JANG_4M \
+    --awq /path/to/Laguna-S-2.1-awq-scales-4bit.safetensors
 ```
+
+The `/path/to/...` values are deliberate placeholders: the exact published
+scale artifacts were not present during the audit. Regenerate with the AWQ
+capture/search workflow and re-run the full converter/runtime gates before
+replacing them with canonical paths.
 
 Profiles: 2L = routed 2/2/3, attn+g_proj 8, shared/dense/embed 6, lm_head 8,
 gs 64 (exact shipped M.1 recipe). 4M = routed 4/4/4, shared/dense 8.

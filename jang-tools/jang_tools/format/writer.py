@@ -22,6 +22,7 @@ from .spec import (
     JANG_IMATRIX_FILENAME,
     JANG_INDEX_FILENAME,
     JANG_V2_INDEX_FILENAME,
+    validate_storage_bit_width,
 )
 from ..quantize import QuantizedTensor
 
@@ -90,6 +91,7 @@ def write_jang_v2_model(
                 }
                 storage_bits = spec.get("storage_bits")
                 if isinstance(storage_bits, int):
+                    validate_storage_bit_width(storage_bits)
                     module_quantization["storage_bits"] = storage_bits
                 quantization[module_path] = module_quantization
     model_config_out["quantization"] = quantization

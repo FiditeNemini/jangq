@@ -84,6 +84,15 @@ def validate_bit_width(bits: int) -> None:
         )
 
 
+def validate_storage_bit_width(bits: int) -> None:
+    """Reject packed storage widths that the format cannot represent."""
+    if isinstance(bits, bool) or bits not in ALLOWED_STORAGE_BIT_WIDTHS:
+        raise ValueError(
+            f"Invalid storage bit width {bits}. Allowed: "
+            f"{sorted(ALLOWED_STORAGE_BIT_WIDTHS)}"
+        )
+
+
 def compute_block_offsets(bit_map: list[int], block_size: int = DEFAULT_BLOCK_SIZE) -> list[int]:
     """Compute byte offsets for each block given their bit widths."""
     offsets = []

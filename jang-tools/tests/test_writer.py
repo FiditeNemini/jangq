@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import pytest
 from safetensors.numpy import save_file
 
 from jang_tools.format.writer import write_jang_v2_model
@@ -79,3 +80,25 @@ def test_jang_v2_writer_emits_manifest_quantization_overrides(tmp_path):
         "mode": "affine",
         "storage_bits": 1,
     }
+
+
+def test_jang_v2_writer_rejects_invalid_storage_bits(tmp_path):
+    with pytest.raises(ValueError, match="Invalid storage bit width 7"):
+        write_jang_v2_model(
+            output_dir=tmp_path,
+            tensors={"layers.0.mlp.up_proj.weight": np.zeros((4,), dtype=np.uint32)},
+            model_config={},
+            jang_config={
+                "quantization": {
+                    "bit_widths_used": [2],
+                    "block_size": 64,
+                    "tensor_quantization_manifest": {
+                        "layers.0.mlp.up_proj": {
+                            "bits": 2,
+                            "group_size": 64,
+                            "storage_bits": 7,
+                        }
+                    },
+                }
+            },
+        )
