@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.33"
-description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.33: Laguna mixed-affine loaders derive each module's packed bit width and expose a runtime capability marker so vMLX can reject stale wheels before inference."
+version = "2.5.34"
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.34: DSV4 pool cache keeps short compressed pools hot and promotes long pools to bounded q8 segmented residency."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]
