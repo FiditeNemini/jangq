@@ -6,6 +6,12 @@ def test_pool_quant_cache_appends_new_rows_without_requantizing_old_pool(monkeyp
     import jang_tools.dsv4.pool_quant_cache as pq
     from jang_tools.dsv4.pool_quant_cache import PoolQuantizedV4Cache
 
+    # v2.5.34 intentionally keeps small pools in the BF16 hot tier. Force an
+    # immediate promotion here so this legacy contract continues to exercise
+    # the segmented quantized append path rather than duplicating the separate
+    # short-pool residency test.
+    monkeypatch.setattr(pq, "_POOL_BF16_MAX_BYTES", 0)
+
     quant_shapes = []
     original_quant = pq._quant_pool
 
