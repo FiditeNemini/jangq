@@ -24,9 +24,17 @@ research/
 docs/superpowers/notes/
 
 # Internal docs
+/docs/internal/
+/notes/
+/botes/
 JANG-ISSUES.md
 JANG-PLAN.md
 gemma4_*.md
+
+# Live proof artifacts stay local and must never be published.
+/screenshots/
+/screen-recordings/
+/proof-artifacts/
 
 # Scripts (private experiments) — root scripts/ ignored, scripts/jangpress/ allowed through
 /scripts/*
