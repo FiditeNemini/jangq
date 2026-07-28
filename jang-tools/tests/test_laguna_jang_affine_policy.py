@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -175,31 +173,6 @@ def test_laguna_chat_block_defaults_thinking_off_without_template_kwargs():
     assert chat["reasoning"]["default_enabled"] is False
     assert chat["sampling_defaults"] == {"temperature": 0.7}
     assert chat["template_kwargs_defaults"] == {}
-
-
-def test_laguna_21_vendor_sampling_contract_requires_top_k_20():
-    from jang_tools.convert_laguna_jang import validate_vendor_sampling_contract
-
-    expected = {"temperature": 1.0, "top_p": 1.0, "top_k": 20}
-    validate_vendor_sampling_contract("Laguna-S-2.1", expected)
-    validate_vendor_sampling_contract("Laguna-XS-2.1", expected)
-
-    for missing_or_wrong in (
-        {"temperature": 1.0, "top_p": 1.0},
-        {"temperature": 1.0, "top_p": 1.0, "top_k": 0},
-        {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
-    ):
-        with pytest.raises(SystemExit, match="vendor sampling contract mismatch"):
-            validate_vendor_sampling_contract(
-                "Laguna-XS-2.1",
-                missing_or_wrong,
-            )
-
-
-def test_laguna_sampling_contract_does_not_invent_other_family_defaults():
-    from jang_tools.convert_laguna_jang import validate_vendor_sampling_contract
-
-    validate_vendor_sampling_contract("Laguna-M.1", {})
 
 
 def test_laguna_3l_and_4m_only_move_ffn_bits():

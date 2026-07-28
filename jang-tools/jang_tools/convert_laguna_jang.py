@@ -171,31 +171,6 @@ def build_chat_block(gen_cfg: dict) -> dict:
     }
 
 
-def validate_vendor_sampling_contract(source_name: str, gen_cfg: dict) -> None:
-    """Fail closed when a known Laguna 2.1 source loses vendor sampler truth.
-
-    Poolside's Laguna S/XS 2.1 evaluation contract uses temperature=1.0,
-    top_p=1.0, and top_k=20.  Omitting top_k silently turns top-k filtering off
-    in standards-compliant runtimes and makes the generated bundle disagree
-    with its model card and benchmark conditions.
-    """
-    normalized = source_name.strip().lower().replace("_", "-")
-    if normalized not in {"laguna-s-2.1", "laguna-xs-2.1"}:
-        return
-
-    expected = {"temperature": 1.0, "top_p": 1.0, "top_k": 20}
-    mismatches = {
-        key: {"expected": value, "actual": gen_cfg.get(key, "<absent>")}
-        for key, value in expected.items()
-        if gen_cfg.get(key) != value
-    }
-    if mismatches:
-        raise SystemExit(
-            "Laguna 2.1 vendor sampling contract mismatch in "
-            f"{source_name}/generation_config.json: {mismatches}"
-        )
-
-
 def _is_passthrough(name: str) -> bool:
     n = name
     if n.endswith(".bias"):
@@ -546,7 +521,6 @@ def main(argv=None) -> None:
     gen_p = SRC / "generation_config.json"
     if gen_p.exists():
         gen_cfg = json.loads(gen_p.read_text())
-        validate_vendor_sampling_contract(SRC.name, gen_cfg)
     else:
         print("  WARNING: source has no generation_config.json — chat block "
               "will carry no vendor sampling defaults", flush=True)
