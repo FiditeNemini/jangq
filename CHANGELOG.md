@@ -2,6 +2,14 @@
 
 All notable changes to JANG Studio.
 
+## JANG Tools 2.5.35
+
+### Added
+
+- Nanbeige 4.x looped-transformer runtime registration with the required
+  `num_hidden_layers * num_loops` cache-slot contract.
+- Dense-safe Nanbeige MXFP8, JANG_6M, and JANG_4M conversion support.
+
 ## [1.0.1] — Advanced overrides wired through + public JANGTQ runtime
 
 ### Fixed
