@@ -1499,17 +1499,21 @@ class Model(nn.Module):
         return h_f @ w_f.T
 
     def make_cache(self):
-        """Build per-layer cache objects.
-        SHORT-PROMPT-SAFE default: use plain KVCache for all layers. Compressor
-        + Indexer fast-path is taken in DeepseekV4Attention (cache is None for
-        v4-state, so pooled is empty and skipped). This makes prompts up to
-        sliding_window=128 tokens behave identically to the pre-make_cache path.
-        For >128 tokens, attention falls back to local-only sliding-window context
-        (still coherent, but loses pooled-global benefit). To enable full
-        long-context behavior with Compressor + Indexer, set the env var
-        DSV4_LONG_CTX=1 — then compress_ratio>0 layers get DeepseekV4Cache.
+        """Build the per-layer native DSV4 cache topology.
+
+        With ``DSV4_LONG_CTX=1``, every attention layer owns a bounded local
+        SWA ring.  Compressed layers wrap that ring in ``DeepseekV4Cache`` so
+        their CSA/HCA compressor and sparse-indexer state survives across
+        chunks; zero-compression layers use a plain ``RotatingKVCache``.  The
+        latter is important: the reference DSV4 attention path still applies
+        the 128-token local window when ``compress_ratio == 0``.  An unbounded
+        ``KVCache`` preserves masked logits but retains the entire prompt and
+        defeats the architecture's long-context memory contract.
+
+        ``DSV4_LONG_CTX=0`` retains the legacy short-prompt cache for explicit
+        diagnostics only.  vMLX production enables native long-context mode.
         """
-        from mlx_lm.models.cache import KVCache
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
         import os
         long_ctx = os.environ.get("DSV4_LONG_CTX", "0") == "1"
         pool_quant = os.environ.get("DSV4_POOL_QUANT", "0") == "1"
@@ -1522,7 +1526,12 @@ class Model(nn.Module):
                 pool_cache_cls = DeepseekV4Cache
         caches = []
         for layer in self.model.layers:
-            if long_ctx and layer.self_attn.compress_ratio:
+            if not long_ctx:
+                caches.append(KVCache())
+                continue
+
+            compress_ratio = layer.self_attn.compress_ratio
+            if compress_ratio:
                 # Pass per-layer `compress_ratio` so `DeepseekV4Cache.trim()`
                 # can do proportional pool-row truncation instead of the
                 # v2.5.14 full reset (better long-context multi-turn perf:
@@ -1530,10 +1539,13 @@ class Model(nn.Module):
                 # trim, the kept-prefix pool survives).
                 caches.append(pool_cache_cls(
                     self.args.sliding_window,
-                    compress_ratio=layer.self_attn.compress_ratio,
+                    compress_ratio=compress_ratio,
                 ))
             else:
-                caches.append(KVCache())
+                caches.append(RotatingKVCache(
+                    max_size=self.args.sliding_window,
+                    keep=0,
+                ))
         return caches
 
     @property

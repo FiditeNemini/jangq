@@ -22,6 +22,8 @@ from .mlx_model import DeepseekV4Cache
 
 _STATE_KEYS = ("buffer_kv", "buffer_gate", "pooled")
 _POOL_SEGMENT_ROWS = 64
+POOL_STORAGE_SCHEMA = "dsv4_pool_q8_segmented_v2"
+_BRANCH_STORAGE_SCHEMA = "dsv4_pool_q8_branch_v2"
 # Quantization has a fixed conversion cost and codes are stored in uint8
 # containers. Keep small pools in their attention-ready BF16
 # form until one state would retain more than 2 MiB. At ratio 4, the wide
@@ -36,6 +38,7 @@ def _quant_pool(pool: mx.array, group_size: int = 32, bits: int = 8):
     """Quantize a pool tensor along its last dimension with affine groups."""
     if pool is None:
         return None
+    original_dtype = str(pool.dtype)
     x = pool.astype(mx.float32)
     shape = tuple(x.shape)
     last = shape[-1]
@@ -53,16 +56,22 @@ def _quant_pool(pool: mx.array, group_size: int = 32, bits: int = 8):
     scale = scale.astype(mx.float16)
     mn = mn.astype(mx.float16)
     mx.eval(q, scale, mn)
-    return (q, scale, mn, shape, group_size, bits)
+    return (q, scale, mn, shape, group_size, bits, original_dtype)
 
 
 def _dequant_pool(qpool):
     """Dequantize a tuple produced by ``_quant_pool``."""
     if qpool is None:
         return None
-    q, scale, mn, shape, group_size, _bits = qpool
+    if len(qpool) == 7:
+        q, scale, mn, shape, group_size, _bits, original_dtype = qpool
+        target_dtype = _dtype_from_storage_name(original_dtype)
+    else:
+        # Backward compatibility for pre-storage-schema in-process states.
+        q, scale, mn, shape, group_size, _bits = qpool
+        target_dtype = mx.bfloat16
     x = q.astype(mx.float32) * scale.astype(mx.float32) + mn.astype(mx.float32)
-    return x.reshape(shape).astype(mx.bfloat16)
+    return x.reshape(shape).astype(target_dtype)
 
 
 def _qpool_rows(qpool) -> int:
@@ -76,7 +85,7 @@ def _slice_qpool_rows(qpool, stop: int):
     Affine groups span only the final feature dimension, so slicing the pool
     row axis preserves the original quantization parameters exactly.
     """
-    q, scale, mn, shape, group_size, bits = qpool
+    q, scale, mn, shape, group_size, bits, *dtype_tail = qpool
     stop = max(0, min(int(stop), int(shape[1])))
 
     def _row_slice(value):
@@ -89,7 +98,57 @@ def _slice_qpool_rows(qpool, stop: int):
     mn = _row_slice(mn)
     shape = tuple(stop if axis == 1 else dim for axis, dim in enumerate(shape))
     mx.eval(q, scale, mn)
-    return (q, scale, mn, shape, group_size, bits)
+    return (q, scale, mn, shape, group_size, bits, *dtype_tail)
+
+
+def _dtype_from_storage_name(name: str):
+    """Resolve an MLX dtype serialized as a stable string."""
+    dtype = getattr(mx, str(name).replace("mlx.core.", ""), None)
+    if dtype is None:
+        raise ValueError(f"unsupported MLX dtype in DSV4 pool state: {name!r}")
+    return dtype
+
+
+def _validated_qpool(qpool):
+    """Validate and normalize one encoded pool segment without decoding it."""
+    if not isinstance(qpool, (tuple, list)) or len(qpool) not in (6, 7):
+        raise ValueError("invalid DSV4 q8 pool segment")
+    q, scale, mn, raw_shape, raw_group_size, raw_bits, *dtype_tail = qpool
+    if not all(hasattr(part, "shape") for part in (q, scale, mn)):
+        raise ValueError("DSV4 q8 pool segment is missing tensor leaves")
+    try:
+        shape = tuple(int(dim) for dim in raw_shape)
+        group_size = int(raw_group_size)
+        bits = int(raw_bits)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("DSV4 q8 pool segment metadata is not integral") from exc
+    if len(shape) < 2 or group_size <= 0 or shape[-1] % group_size:
+        raise ValueError(
+            "invalid DSV4 q8 pool geometry: "
+            f"shape={shape} group_size={group_size}"
+        )
+    if bits != 8 or not str(q.dtype).endswith("uint8"):
+        raise ValueError(
+            f"invalid DSV4 pool codec: bits={bits} q_dtype={q.dtype}"
+        )
+    groups = shape[-1] // group_size
+    expected_q = (*shape[:-1], groups, group_size)
+    expected_params = (*shape[:-1], groups, 1)
+    if tuple(q.shape) != expected_q:
+        raise ValueError(
+            f"invalid DSV4 q8 code shape: got={tuple(q.shape)} expected={expected_q}"
+        )
+    if tuple(scale.shape) != expected_params or tuple(mn.shape) != expected_params:
+        raise ValueError(
+            "invalid DSV4 q8 affine metadata shape: "
+            f"scale={tuple(scale.shape)} min={tuple(mn.shape)} "
+            f"expected={expected_params}"
+        )
+    original_dtype = (
+        str(dtype_tail[0]) if dtype_tail else str(mx.bfloat16)
+    )
+    _dtype_from_storage_name(original_dtype)
+    return (q, scale, mn, shape, group_size, bits, original_dtype)
 
 
 class _StateProxy(MutableMapping[str, Any]):
@@ -256,6 +315,74 @@ class _StateProxy(MutableMapping[str, Any]):
     def values(self):
         return [self[key] for key in _STATE_KEYS]
 
+    def export_storage_state(self):
+        """Return the retained pool representation without dequantizing it.
+
+        ``MutableMapping.values()`` and ``self["pooled"]`` intentionally expose
+        an attention-ready BF16 view.  Cache snapshot/L2 code must not use that
+        view: assigning it back would perform a second lossy q8 encode.  This
+        tagged tree contains the actual q codes and affine metadata instead.
+        """
+        empty_shape = None
+        empty_dtype = None
+        if self._pooled_empty_spec is not None:
+            shape, dtype = self._pooled_empty_spec
+            empty_shape = tuple(int(dim) for dim in shape)
+            empty_dtype = str(dtype)
+        return (
+            _BRANCH_STORAGE_SCHEMA,
+            self._data.get("buffer_kv"),
+            self._data.get("buffer_gate"),
+            self._pooled_bf16,
+            tuple(self._pooled_q_segments),
+            empty_shape,
+            empty_dtype,
+        )
+
+    def import_storage_state(self, value) -> None:
+        """Install a lossless state tree produced by ``export_storage_state``."""
+        if (
+            not isinstance(value, (tuple, list))
+            or len(value) != 7
+            or value[0] != _BRANCH_STORAGE_SCHEMA
+        ):
+            raise ValueError("unsupported DSV4 pool branch storage state")
+        (
+            _schema,
+            buffer_kv,
+            buffer_gate,
+            pooled_bf16,
+            raw_segments,
+            raw_empty_shape,
+            raw_empty_dtype,
+        ) = value
+        if raw_segments is None:
+            raw_segments = ()
+        if not isinstance(raw_segments, (tuple, list)):
+            raise ValueError("DSV4 q8 pool segments must be a sequence")
+        segments = [_validated_qpool(segment) for segment in raw_segments]
+        if pooled_bf16 is not None and segments:
+            raise ValueError("DSV4 pool state cannot contain BF16 and q8 tiers together")
+
+        empty_spec = None
+        if raw_empty_shape is not None or raw_empty_dtype is not None:
+            if raw_empty_shape is None or raw_empty_dtype is None:
+                raise ValueError("incomplete DSV4 empty-pool storage metadata")
+            try:
+                empty_shape = tuple(int(dim) for dim in raw_empty_shape)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("invalid DSV4 empty-pool shape") from exc
+            if len(empty_shape) < 2 or empty_shape[1] != 0:
+                raise ValueError(f"invalid DSV4 empty-pool shape: {empty_shape}")
+            empty_spec = (empty_shape, _dtype_from_storage_name(raw_empty_dtype))
+        if empty_spec is not None and (pooled_bf16 is not None or segments):
+            raise ValueError("DSV4 empty-pool metadata conflicts with retained pool data")
+
+        self._data = {"buffer_kv": buffer_kv, "buffer_gate": buffer_gate}
+        self._pooled_bf16 = pooled_bf16
+        self._pooled_q_segments = segments
+        self._pooled_empty_spec = empty_spec
+
     def quant_nbytes(self) -> int:
         total = 0
         for key in ("buffer_kv", "buffer_gate"):
@@ -319,6 +446,38 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
             self.local.state = local_state
         self.compressor_state = dict(zip(_STATE_KEYS, compressor_state))
         self.indexer_state = dict(zip(_STATE_KEYS, indexer_state))
+
+    @property
+    def storage_state(self):
+        """Lossless prompt/L2 state preserving native q8 pool segments."""
+        local_state = None if self.local.empty() else self.local.state
+        return (
+            POOL_STORAGE_SCHEMA,
+            local_state,
+            self.compressor_state.export_storage_state(),
+            self.indexer_state.export_storage_state(),
+        )
+
+    @storage_state.setter
+    def storage_state(self, value):
+        if (
+            not isinstance(value, (tuple, list))
+            or len(value) != 4
+            or value[0] != POOL_STORAGE_SCHEMA
+        ):
+            raise ValueError("unsupported DSV4 pool cache storage state")
+        _schema, local_state, compressor_state, indexer_state = value
+        if local_state is None:
+            self.local.keys = None
+            self.local.values = None
+        else:
+            self.local.state = local_state
+        compressor = _StateProxy()
+        compressor.import_storage_state(compressor_state)
+        indexer = _StateProxy()
+        indexer.import_storage_state(indexer_state)
+        self._compressor_state = compressor
+        self._indexer_state = indexer
 
     def update_pool(self, new_pooled, state_key):
         state = self._branch_state(state_key)

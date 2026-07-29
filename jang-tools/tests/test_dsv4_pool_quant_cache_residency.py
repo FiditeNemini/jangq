@@ -191,3 +191,57 @@ def test_state_save_load_preserves_quality_and_empty_state_semantics():
     assert empty_back.shape == empty.shape
     restored.compressor_state["pooled"] = None
     assert restored.compressor_state["pooled"] is None
+
+
+def test_storage_state_preserves_q8_codes_without_requantization(monkeypatch):
+    """Prompt/L2 snapshots retain encoded segments byte-for-byte."""
+    monkeypatch.setattr(pool_quant_cache, "_POOL_BF16_MAX_BYTES", 1)
+    cache = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    raw = mx.random.normal((1, 129, 64), dtype=mx.bfloat16)
+    cache.update_pool(raw, "compressor_state")
+    before = cache.compressor_state._pooled_q_segments
+    assert before
+
+    storage_state = cache.storage_state
+
+    def _unexpected_conversion(_value):
+        raise AssertionError("lossless storage restore must not quantize or dequantize")
+
+    restored = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    with (
+        mock.patch.object(pool_quant_cache, "_quant_pool", _unexpected_conversion),
+        mock.patch.object(pool_quant_cache, "_dequant_pool", _unexpected_conversion),
+    ):
+        restored.storage_state = storage_state
+
+    after = restored.compressor_state._pooled_q_segments
+    assert len(after) == len(before)
+    for source, target in zip(before, after):
+        for source_leaf, target_leaf in zip(source[:3], target[:3]):
+            assert mx.array_equal(source_leaf, target_leaf).item()
+        assert source[3:] == target[3:]
+
+
+def test_storage_state_preserves_empty_pool_dtype_and_shape():
+    cache = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    empty = mx.zeros((1, 0, 512), dtype=mx.bfloat16)
+    cache.compressor_state["pooled"] = empty
+
+    restored = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    restored.storage_state = cache.storage_state
+    restored_empty = restored.compressor_state["pooled"]
+
+    assert restored_empty.shape == empty.shape
+    assert restored_empty.dtype == empty.dtype
+
+
+def test_quantized_pool_restores_original_float16_dtype():
+    """Mixing float16 SWA with BF16 pools promotes DSV4 attention to float32."""
+    raw = mx.random.normal((1, 65, 64), dtype=mx.float16)
+    state = _StateProxy()
+    state._replace_quantized(raw)
+
+    restored = state["pooled"]
+
+    assert restored.dtype == mx.float16
+    assert all(segment[6] == str(mx.float16) for segment in state._pooled_q_segments)
