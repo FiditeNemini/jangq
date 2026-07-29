@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.35"
-description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.35 adds the Nanbeige 4.x looped-transformer runtime and converter."
+version = "2.5.36"
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.36 preserves DeepSeek-V4 native SWA topology and lossless dtype-aware q8 pool cache transport."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]
