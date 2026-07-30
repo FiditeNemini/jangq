@@ -25,7 +25,7 @@ from .model import LagunaForCausalLM
 # contract below. vMLX checks the marker before loading a mixed-bit Laguna
 # artifact so an old wheel fails with an actionable version error instead of a
 # late, misleading MLX dequantization shape exception.
-LAGUNA_MIXED_AFFINE_RUNTIME_VERSION = 1
+LAGUNA_MIXED_AFFINE_RUNTIME_VERSION = 2
 
 
 def infer_affine_bits_from_shapes(
@@ -54,6 +54,60 @@ def infer_affine_bits_from_shapes(
         return fallback_bits
     derived = numerator // in_features
     return derived if derived in (2, 3, 4, 5, 6, 8) else fallback_bits
+
+
+def normalize_affine_quantization_overrides(qcfg: dict) -> dict:
+    """Return affine config aliases for Laguna's post-sanitize module paths.
+
+    Hugging Face bundle metadata names decoder modules below ``model.*`` while
+    :class:`LagunaForCausalLM` attaches them directly at the wrapper root.  The
+    weight loader already removes that prefix before ``nn.quantize`` runs, so
+    the per-module quantization map must undergo the same normalization.  Keep
+    the original keys as well so this helper is safe for callers that inspect
+    pre-sanitize names.
+    """
+    if not isinstance(qcfg, dict):
+        return {}
+    normalized = dict(qcfg)
+    for name, spec in qcfg.items():
+        if not isinstance(name, str) or not isinstance(spec, dict):
+            continue
+        if name.startswith("model."):
+            normalized.setdefault(name[len("model.") :], dict(spec))
+    return normalized
+
+
+def resolve_affine_quantization_for_module(
+    name: str,
+    qcfg: dict,
+    weight_shape: tuple[int, ...],
+    scales_shape: tuple[int, ...],
+) -> dict:
+    """Resolve one module's coupled ``bits`` and ``group_size`` contract.
+
+    Packed affine shapes identify only the product of bit width and group
+    size.  A mixed-group bundle therefore cannot derive bits using the global
+    group size and then return the global group size to ``nn.quantize``.  The
+    explicit per-module group size selects the physical layout; bits are then
+    verified/derived against that same value.
+    """
+    normalized = normalize_affine_quantization_overrides(qcfg)
+    default_group_size = int(normalized.get("group_size", 64))
+    default_bits = int(normalized.get("bits", 4))
+    default_mode = str(normalized.get("mode", "affine"))
+    spec = normalized.get(name)
+    if not isinstance(spec, dict):
+        spec = {}
+    group_size = int(spec.get("group_size", default_group_size))
+    fallback_bits = int(spec.get("bits", default_bits))
+    mode = str(spec.get("mode", default_mode))
+    bits = infer_affine_bits_from_shapes(
+        weight_shape,
+        scales_shape,
+        group_size=group_size,
+        fallback_bits=fallback_bits,
+    )
+    return {"group_size": group_size, "bits": bits, "mode": mode}
 
 
 def _force_eval(*xs):
@@ -289,11 +343,11 @@ def load(src: str):
         import mlx.nn as nn
         cfg_json = _json.loads((Path(src) / "config.json").read_text())
         qcfg = cfg_json.get("quantization") or {}
-        group_size = qcfg.get("group_size", 64)
-        bits = qcfg.get("bits", 4)
+        group_size = int(qcfg.get("group_size", 64))
+        bits = int(qcfg.get("bits", 4))
         scale_keys = {k for k in weights.keys() if k.endswith(".scales")}
 
-        def _module_bits(name: str) -> int:
+        def _module_quantization(name: str) -> dict:
             # JANG affine bundles are MIXED-precision: config.json's
             # top-level quantization.bits is only the DEFAULT, and
             # per-module entries (e.g. Laguna-M.1-JANG_2L: attention 8-bit,
@@ -313,12 +367,12 @@ def load(src: str):
             sc = weights.get(f"{name}.scales")
             w = weights.get(f"{name}.weight")
             if sc is None or w is None:
-                return bits
-            return infer_affine_bits_from_shapes(
+                return {"group_size": group_size, "bits": bits, "mode": "affine"}
+            return resolve_affine_quantization_for_module(
+                name,
+                qcfg,
                 tuple(w.shape),
                 tuple(sc.shape),
-                group_size=group_size,
-                fallback_bits=bits,
             )
 
         def _predicate(name, module):
@@ -330,11 +384,7 @@ def load(src: str):
             # so keep those on the original uniform predicate to avoid any
             # behavioural change.
             if fmt == "jang":
-                return {
-                    "group_size": group_size,
-                    "bits": _module_bits(name),
-                    "mode": "affine",
-                }
+                return _module_quantization(name)
             return True
 
         nn.quantize(model, group_size=group_size, bits=bits, class_predicate=_predicate)

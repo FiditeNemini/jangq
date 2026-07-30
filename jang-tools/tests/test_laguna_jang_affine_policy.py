@@ -21,7 +21,7 @@ def test_laguna_runtime_infers_mixed_affine_bits_from_packed_shapes():
         infer_affine_bits_from_shapes,
     )
 
-    assert LAGUNA_MIXED_AFFINE_RUNTIME_VERSION == 1
+    assert LAGUNA_MIXED_AFFINE_RUNTIME_VERSION == 2
     # S-2.1 embed_tokens: hidden 3072, group size 64, packed at 6 bits.
     assert infer_affine_bits_from_shapes(
         (100352, 576), (100352, 48), group_size=64, fallback_bits=8
@@ -40,6 +40,60 @@ def test_laguna_runtime_infers_mixed_affine_bits_from_packed_shapes():
     assert infer_affine_bits_from_shapes(
         (100352, 575), (100352, 48), group_size=64, fallback_bits=8
     ) == 8
+
+
+def test_laguna_runtime_resolves_mixed_group_sizes_after_model_prefix_remap():
+    from jang_tools.laguna.runtime import (
+        normalize_affine_quantization_overrides,
+        resolve_affine_quantization_for_module,
+    )
+
+    qcfg = {
+        "bits": 8,
+        "group_size": 64,
+        "mode": "affine",
+        "model.layers.1.mlp.switch_mlp.gate_proj": {
+            "bits": 4,
+            "group_size": 128,
+            "mode": "affine",
+        },
+        "model.layers.1.self_attn.q_proj": {
+            "bits": 8,
+            "group_size": 64,
+            "mode": "affine",
+        },
+        "model.embed_tokens": {
+            "bits": 6,
+            "group_size": 64,
+            "mode": "affine",
+        },
+    }
+    normalized = normalize_affine_quantization_overrides(qcfg)
+    assert normalized["layers.1.mlp.switch_mlp.gate_proj"]["group_size"] == 128
+    assert normalized["layers.1.self_attn.q_proj"]["group_size"] == 64
+    assert normalized["embed_tokens"]["group_size"] == 64
+
+    # Exact L12c artifact layouts: the expert shape is 4b/gs128 but would be
+    # misread as 8b/gs64 if the top-level group size won. Attention and embed
+    # keep their independent 8b/gs64 and 6b/gs64 contracts.
+    assert resolve_affine_quantization_for_module(
+        "layers.1.mlp.switch_mlp.gate_proj",
+        qcfg,
+        (128, 512, 256),
+        (128, 512, 16),
+    ) == {"group_size": 128, "bits": 4, "mode": "affine"}
+    assert resolve_affine_quantization_for_module(
+        "layers.1.self_attn.q_proj",
+        qcfg,
+        (8192, 512),
+        (8192, 32),
+    ) == {"group_size": 64, "bits": 8, "mode": "affine"}
+    assert resolve_affine_quantization_for_module(
+        "embed_tokens",
+        qcfg,
+        (100352, 384),
+        (100352, 32),
+    ) == {"group_size": 64, "bits": 6, "mode": "affine"}
 
 
 def test_laguna_jang_converter_exists():
