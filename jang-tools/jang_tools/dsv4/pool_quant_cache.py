@@ -16,12 +16,14 @@ from collections.abc import Iterator, MutableMapping
 from typing import Any
 
 import mlx.core as mx
+import numpy as np
 
 from .mlx_model import DeepseekV4Cache
 
 
 _STATE_KEYS = ("buffer_kv", "buffer_gate", "pooled")
 _POOL_SEGMENT_ROWS = 64
+_POOL_ATTENTION_TILE_ROWS = 16 * 1024
 POOL_STORAGE_SCHEMA = "dsv4_pool_q8_segmented_v2"
 _BRANCH_STORAGE_SCHEMA = "dsv4_pool_q8_branch_v2"
 # Quantization has a fixed conversion cost and codes are stored in uint8
@@ -74,6 +76,29 @@ def _dequant_pool(qpool):
     return x.reshape(shape).astype(target_dtype)
 
 
+def _dequant_qpool_selected(qpool, batch_indices, row_indices):
+    """Decode only selected batch/row occurrences from one q8 segment.
+
+    DSV4's affine metadata is independent for every pool row.  Gathering the
+    code, scale, and minimum leaves before dequantization is therefore exactly
+    equivalent to dequantizing the segment first and then gathering, while the
+    temporary geometry is bounded by the selected CSA top-k rather than the
+    historical pool length.
+    """
+    q, scale, mn, shape, group_size, _bits, original_dtype = _validated_qpool(
+        qpool
+    )
+    batch_indices = batch_indices.astype(mx.int32)
+    row_indices = row_indices.astype(mx.int32)
+    q = q[batch_indices, row_indices]
+    scale = scale[batch_indices, row_indices]
+    mn = mn[batch_indices, row_indices]
+    x = q.astype(mx.float32) * scale.astype(mx.float32) + mn.astype(mx.float32)
+    return x.reshape(int(row_indices.size), int(shape[-1])).astype(
+        _dtype_from_storage_name(original_dtype)
+    )
+
+
 def _qpool_rows(qpool) -> int:
     """Return the number of pool rows represented by a quantized segment."""
     return 0 if qpool is None else int(qpool[3][1])
@@ -85,18 +110,25 @@ def _slice_qpool_rows(qpool, stop: int):
     Affine groups span only the final feature dimension, so slicing the pool
     row axis preserves the original quantization parameters exactly.
     """
+    return _slice_qpool_row_range(qpool, 0, stop)
+
+
+def _slice_qpool_row_range(qpool, start: int, stop: int):
+    """Keep ``[start:stop]`` pool rows without dequantizing the segment."""
     q, scale, mn, shape, group_size, bits, *dtype_tail = qpool
-    stop = max(0, min(int(stop), int(shape[1])))
+    start = max(0, min(int(start), int(shape[1])))
+    stop = max(start, min(int(stop), int(shape[1])))
 
     def _row_slice(value):
         slices = [slice(None)] * value.ndim
-        slices[1] = slice(0, stop)
+        slices[1] = slice(start, stop)
         return value[tuple(slices)]
 
     q = _row_slice(q)
     scale = _row_slice(scale)
     mn = _row_slice(mn)
-    shape = tuple(stop if axis == 1 else dim for axis, dim in enumerate(shape))
+    rows = stop - start
+    shape = tuple(rows if axis == 1 else dim for axis, dim in enumerate(shape))
     mx.eval(q, scale, mn)
     return (q, scale, mn, shape, group_size, bits, *dtype_tail)
 
@@ -151,6 +183,74 @@ def _validated_qpool(qpool):
     return (q, scale, mn, shape, group_size, bits, original_dtype)
 
 
+def _concat_qpools(qpools):
+    """Join adjacent encoded rows without decoding or requantizing them.
+
+    Pool affine parameters are per row and per final-dimension group.  The row
+    axis is therefore a lossless concatenation boundary: codes, scales, and
+    minima can be joined directly while retaining their original codec values.
+    """
+    normalized = [_validated_qpool(qpool) for qpool in qpools]
+    if not normalized:
+        raise ValueError("cannot concatenate an empty DSV4 q8 pool sequence")
+    first = normalized[0]
+    batch_shape = first[3][:1]
+    tail_shape = first[3][2:]
+    group_size = first[4]
+    bits = first[5]
+    original_dtype = first[6]
+    for qpool in normalized[1:]:
+        if (
+            qpool[3][:1] != batch_shape
+            or qpool[3][2:] != tail_shape
+            or qpool[4] != group_size
+            or qpool[5] != bits
+            or qpool[6] != original_dtype
+        ):
+            raise ValueError("incompatible DSV4 q8 pool segments")
+    rows = sum(_qpool_rows(qpool) for qpool in normalized)
+    q = mx.concatenate([qpool[0] for qpool in normalized], axis=1)
+    scale = mx.concatenate([qpool[1] for qpool in normalized], axis=1)
+    mn = mx.concatenate([qpool[2] for qpool in normalized], axis=1)
+    shape = (*batch_shape, rows, *tail_shape)
+    mx.eval(q, scale, mn)
+    return (q, scale, mn, shape, group_size, bits, original_dtype)
+
+
+class _QuantizedPoolView:
+    """Attention-facing view over bounded BF16 or segmented native-q8 rows.
+
+    This object deliberately is not an ``mx.array``.  Consumers must iterate
+    bounded tiles, making a full historical BF16 pool an explicit compatibility
+    operation rather than an accidental decode-time side effect.
+    """
+
+    is_dsv4_quantized_pool_view = True
+
+    def __init__(self, state: "_StateProxy", empty_like=None):
+        self._state = state
+        self._empty_like = empty_like
+
+    @property
+    def shape(self):
+        shape, _dtype = self._state.pool_shape_dtype(self._empty_like)
+        return shape
+
+    @property
+    def dtype(self):
+        _shape, dtype = self._state.pool_shape_dtype(self._empty_like)
+        return dtype
+
+    def iter_dequantized_tiles(self, max_rows: int = _POOL_ATTENTION_TILE_ROWS):
+        yield from self._state.iter_dequantized_tiles(max_rows=max_rows)
+
+    def gather_dequantized_rows(self, indices):
+        return self._state.gather_dequantized_rows(indices)
+
+    def materialize(self):
+        return self._state.materialize_pooled(self._empty_like)
+
+
 class _StateProxy(MutableMapping[str, Any]):
     """Dict-like state object that quantizes only the ``pooled`` slot."""
 
@@ -165,23 +265,7 @@ class _StateProxy(MutableMapping[str, Any]):
 
     def __getitem__(self, key: str) -> Any:
         if key == "pooled":
-            if self._pooled_bf16 is not None:
-                return self._pooled_bf16
-            if not self._pooled_q_segments:
-                if self._pooled_empty_spec is not None:
-                    shape, dtype = self._pooled_empty_spec
-                    return mx.zeros(shape, dtype=dtype)
-                return None
-            parts = [
-                part
-                for part in (_dequant_pool(qpool) for qpool in self._pooled_q_segments)
-                if part is not None
-            ]
-            if not parts:
-                return None
-            if len(parts) == 1:
-                return parts[0]
-            return mx.concatenate(parts, axis=1)
+            return self.materialize_pooled()
         return self._data[key]
 
     def __setitem__(self, key: str, value: Any) -> None:
@@ -210,6 +294,184 @@ class _StateProxy(MutableMapping[str, Any]):
                 _quant_pool(value[:, start:start + _POOL_SEGMENT_ROWS])
             )
 
+    def pool_shape_dtype(self, empty_like=None):
+        """Return logical array geometry without decoding native q8 storage."""
+        if self._pooled_bf16 is not None:
+            return tuple(self._pooled_bf16.shape), self._pooled_bf16.dtype
+        if self._pooled_q_segments:
+            first = self._pooled_q_segments[0]
+            rows = sum(_qpool_rows(segment) for segment in self._pooled_q_segments)
+            shape = tuple(rows if axis == 1 else dim for axis, dim in enumerate(first[3]))
+            return shape, _dtype_from_storage_name(first[6])
+        if self._pooled_empty_spec is not None:
+            return self._pooled_empty_spec
+        if empty_like is not None:
+            return (
+                (int(empty_like.shape[0]), 0, int(empty_like.shape[-1])),
+                empty_like.dtype,
+            )
+        return None, None
+
+    def pool_view(self, empty_like=None):
+        return _QuantizedPoolView(self, empty_like=empty_like)
+
+    def iter_dequantized_tiles(self, max_rows: int = _POOL_ATTENTION_TILE_ROWS):
+        """Yield ``(global_row_start, BF16_tile)`` under a strict row bound."""
+        max_rows = max(1, int(max_rows))
+        if self._pooled_bf16 is not None:
+            rows = int(self._pooled_bf16.shape[1])
+            for start in range(0, rows, max_rows):
+                yield start, self._pooled_bf16[:, start:start + max_rows]
+            return
+
+        cursor = 0
+        pending = []
+        pending_start = 0
+        pending_rows = 0
+
+        def _flush():
+            nonlocal pending, pending_start, pending_rows
+            if not pending:
+                return None
+            parts = [_dequant_pool(segment) for segment in pending]
+            tile = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=1)
+            result = (pending_start, tile)
+            pending = []
+            pending_rows = 0
+            return result
+
+        for raw_segment in self._pooled_q_segments:
+            segment = _validated_qpool(raw_segment)
+            segment_rows = _qpool_rows(segment)
+            segment_offset = 0
+            while segment_offset < segment_rows:
+                available = max_rows - pending_rows
+                take = min(available, segment_rows - segment_offset)
+                piece = (
+                    segment
+                    if segment_offset == 0 and take == segment_rows
+                    else _slice_qpool_row_range(
+                        segment,
+                        segment_offset,
+                        segment_offset + take,
+                    )
+                )
+                if not pending:
+                    pending_start = cursor + segment_offset
+                pending.append(piece)
+                pending_rows += take
+                segment_offset += take
+                if pending_rows == max_rows:
+                    result = _flush()
+                    if result is not None:
+                        yield result
+            cursor += segment_rows
+        result = _flush()
+        if result is not None:
+            yield result
+
+    def gather_dequantized_rows(self, indices):
+        """Gather CSA-selected rows without decoding an unselected pool row.
+
+        ``indices`` has shape ``(B, ..., K)`` and contains global pool-row
+        indices.  The indexer result has already been materialized at the
+        tiled top-k boundary, so one small device-to-host copy lets us map each
+        occurrence to its owning q8 segment.  Only those code/scale/minimum
+        rows are gathered and decoded; the ordered result is returned with
+        shape ``(*indices.shape, D)``.
+        """
+        logical_shape, _dtype = self.pool_shape_dtype()
+        if logical_shape is None:
+            raise ValueError("cannot gather rows from an absent DSV4 pool")
+        if int(indices.ndim) < 2:
+            raise ValueError("DSV4 pool gather indices must include batch and row axes")
+        batch = int(logical_shape[0])
+        rows = int(logical_shape[1])
+        width = int(logical_shape[-1])
+        if int(indices.shape[0]) != batch:
+            raise ValueError(
+                "DSV4 pool gather batch mismatch: "
+                f"indices={int(indices.shape[0])} pool={batch}"
+            )
+
+        host_indices = np.asarray(indices, dtype=np.int64)
+        if host_indices.size == 0:
+            return mx.zeros((*indices.shape, width), dtype=_dtype)
+        if host_indices.min() < 0 or host_indices.max() >= rows:
+            raise IndexError(
+                "DSV4 pool gather index is outside retained rows: "
+                f"min={int(host_indices.min())} max={int(host_indices.max())} "
+                f"rows={rows}"
+            )
+
+        if self._pooled_bf16 is not None:
+            batch_shape = (batch,) + (1,) * (int(indices.ndim) - 1)
+            batch_indices = mx.broadcast_to(
+                mx.arange(batch, dtype=mx.int32).reshape(batch_shape),
+                indices.shape,
+            )
+            return self._pooled_bf16[
+                batch_indices,
+                indices.astype(mx.int32),
+            ]
+
+        flat_indices = host_indices.reshape(-1)
+        per_batch = int(host_indices[0].size)
+        flat_positions = np.arange(flat_indices.size, dtype=np.int64)
+        batch_indices = flat_positions // per_batch
+        segment_rows = np.asarray(
+            [_qpool_rows(segment) for segment in self._pooled_q_segments],
+            dtype=np.int64,
+        )
+        segment_ends = np.cumsum(segment_rows)
+        segment_ids = np.searchsorted(segment_ends, flat_indices, side="right")
+        segment_starts = np.concatenate(
+            [np.zeros((1,), dtype=np.int64), segment_ends[:-1]]
+        )
+
+        decoded_parts = []
+        decoded_positions = []
+        for segment_id in np.unique(segment_ids):
+            positions = np.flatnonzero(segment_ids == segment_id)
+            local_rows = (
+                flat_indices[positions] - segment_starts[int(segment_id)]
+            )
+            decoded_parts.append(
+                _dequant_qpool_selected(
+                    self._pooled_q_segments[int(segment_id)],
+                    mx.array(batch_indices[positions], dtype=mx.int32),
+                    mx.array(local_rows, dtype=mx.int32),
+                )
+            )
+            decoded_positions.append(positions)
+
+        decoded = (
+            decoded_parts[0]
+            if len(decoded_parts) == 1
+            else mx.concatenate(decoded_parts, axis=0)
+        )
+        positions = np.concatenate(decoded_positions)
+        restore_order = np.argsort(positions, kind="stable")
+        if restore_order.size > 1:
+            decoded = mx.take(
+                decoded,
+                mx.array(restore_order, dtype=mx.int32),
+                axis=0,
+            )
+        return decoded.reshape(*indices.shape, width)
+
+    def materialize_pooled(self, empty_like=None):
+        """Compatibility-only full pool materialization; never retained."""
+        if self._pooled_bf16 is not None:
+            return self._pooled_bf16
+        parts = [tile for _start, tile in self.iter_dequantized_tiles()]
+        if parts:
+            return parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=1)
+        shape, dtype = self.pool_shape_dtype(empty_like)
+        if shape is None:
+            return None
+        return mx.zeros(shape, dtype=dtype)
+
     def _tail_segments(self) -> tuple[int, int]:
         """Return ``(start, rows)`` for trailing sub-chunk segments."""
         start = len(self._pooled_q_segments)
@@ -223,13 +485,11 @@ class _StateProxy(MutableMapping[str, Any]):
         return start, rows
 
     def _compact_full_tail(self) -> None:
-        """Merge one completed tail chunk without retaining its BF16 form."""
+        """Losslessly merge one completed tail chunk in native q8 form."""
         start, rows = self._tail_segments()
         if rows != _POOL_SEGMENT_ROWS:
             return
-        parts = [_dequant_pool(qpool) for qpool in self._pooled_q_segments[start:]]
-        materialized = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=1)
-        compacted = _quant_pool(materialized)
+        compacted = _concat_qpools(self._pooled_q_segments[start:])
         self._pooled_q_segments[start:] = [compacted]
 
     def append_pooled(self, value: Any) -> None:
@@ -338,6 +598,101 @@ class _StateProxy(MutableMapping[str, Any]):
             empty_shape,
             empty_dtype,
         )
+
+    def export_pool_delta(self, start_row: int, end_row: int):
+        """Export retained rows without dequantizing or re-quantizing q8 data."""
+        from .cache_delta import DSV4_POOL_DELTA_SCHEMA
+
+        start = int(start_row)
+        end = int(end_row)
+        if start < 0 or end < start:
+            raise ValueError("invalid DSV4 pool delta row range")
+        if self._pooled_bf16 is not None:
+            rows = int(self._pooled_bf16.shape[1])
+            if end > rows:
+                raise ValueError("DSV4 BF16 pool delta exceeds retained rows")
+            value = self._pooled_bf16[:, start:end, :] + mx.zeros_like(
+                self._pooled_bf16[:, start:end, :]
+            )
+            mx.eval(value)
+            return {
+                "schema": DSV4_POOL_DELTA_SCHEMA,
+                "storage": "bf16",
+                "start_row": start,
+                "end_row": end,
+                "value": value,
+            }
+
+        segments = []
+        cursor = 0
+        for segment in self._pooled_q_segments:
+            rows = _qpool_rows(segment)
+            segment_start = max(start - cursor, 0)
+            segment_end = min(end - cursor, rows)
+            if segment_start < segment_end:
+                segments.append(
+                    _slice_qpool_row_range(segment, segment_start, segment_end)
+                )
+            cursor += rows
+            if cursor >= end:
+                break
+        if end > cursor and end > start:
+            raise ValueError("DSV4 q8 pool delta exceeds retained rows")
+        return {
+            "schema": DSV4_POOL_DELTA_SCHEMA,
+            "storage": "q8",
+            "start_row": start,
+            "end_row": end,
+            "segments": tuple(segments),
+        }
+
+    def append_pool_delta(self, delta) -> None:
+        """Append a lossless BF16/q8 delta while preserving q8 codes directly."""
+        from .cache_delta import DSV4_POOL_DELTA_SCHEMA
+
+        if not isinstance(delta, dict) or delta.get("schema") != DSV4_POOL_DELTA_SCHEMA:
+            raise ValueError("unsupported DSV4 pool delta")
+        start = int(delta.get("start_row", -1))
+        end = int(delta.get("end_row", -1))
+        current_rows = (
+            int(self._pooled_bf16.shape[1])
+            if self._pooled_bf16 is not None
+            else sum(_qpool_rows(segment) for segment in self._pooled_q_segments)
+        )
+        if start != current_rows or end < start:
+            raise ValueError(
+                "DSV4 pool delta is not contiguous: "
+                f"current={current_rows} start={start} end={end}"
+            )
+        expected_rows = end - start
+        storage = delta.get("storage")
+        if storage == "none":
+            if start or end:
+                raise ValueError("absent DSV4 pool delta cannot declare rows")
+            return
+        if storage == "bf16":
+            value = delta.get("value")
+            if value is None or int(value.shape[1]) != expected_rows:
+                if expected_rows == 0 and value is None:
+                    return
+                raise ValueError("invalid DSV4 BF16 pool delta")
+            if self._pooled_q_segments:
+                self._pooled_q_segments.append(_quant_pool(value))
+                self._compact_full_tail()
+            else:
+                self.append_pooled(value)
+            return
+        if storage != "q8":
+            raise ValueError("unsupported DSV4 pool delta storage")
+        segments = [
+            _validated_qpool(segment) for segment in (delta.get("segments") or ())
+        ]
+        if sum(_qpool_rows(segment) for segment in segments) != expected_rows:
+            raise ValueError("DSV4 q8 pool delta row count does not match metadata")
+        if self._pooled_bf16 is not None:
+            self._replace_quantized(self._pooled_bf16)
+        self._pooled_empty_spec = None
+        self._pooled_q_segments.extend(segments)
 
     def import_storage_state(self, value) -> None:
         """Install a lossless state tree produced by ``export_storage_state``."""
@@ -479,20 +834,42 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
         self._compressor_state = compressor
         self._indexer_state = indexer
 
-    def update_pool(self, new_pooled, state_key):
+    def _export_pool_delta(self, state, start_row, end_row):
+        if not isinstance(state, _StateProxy):
+            raise ValueError("PoolQuantizedV4Cache requires _StateProxy branches")
+        return state.export_pool_delta(start_row, end_row)
+
+    def _append_pool_delta(self, state, delta):
+        if not isinstance(state, _StateProxy):
+            raise ValueError("PoolQuantizedV4Cache requires _StateProxy branches")
+        state.append_pool_delta(delta)
+
+    def update_pool_view(self, new_pooled, state_key):
+        """Append new rows and return the bounded attention-facing pool view."""
         state = self._branch_state(state_key)
         if new_pooled.shape[1] > 0:
             if isinstance(state, _StateProxy):
                 state.append_pooled(new_pooled)
-                pool = state["pooled"]
             else:
                 pool = state["pooled"]
                 pool = new_pooled if pool is None else mx.concatenate([pool, new_pooled], axis=1)
                 state["pooled"] = pool
-        else:
-            pool = state["pooled"]
+                return pool
+        if isinstance(state, _StateProxy):
+            return state.pool_view(empty_like=new_pooled)
+        pool = state["pooled"]
         if pool is None:
-            pool = mx.zeros((new_pooled.shape[0], 0, new_pooled.shape[-1]), new_pooled.dtype)
+            return mx.zeros(
+                (new_pooled.shape[0], 0, new_pooled.shape[-1]),
+                new_pooled.dtype,
+            )
+        return pool
+
+    def update_pool(self, new_pooled, state_key):
+        """Compatibility array API; inference uses ``update_pool_view``."""
+        pool = self.update_pool_view(new_pooled, state_key)
+        if getattr(pool, "is_dsv4_quantized_pool_view", False):
+            return pool.materialize()
         return pool
 
     def trim(self, n):

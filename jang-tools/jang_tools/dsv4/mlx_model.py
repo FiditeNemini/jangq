@@ -604,6 +604,498 @@ class DeepseekV4Cache:
     def _branch_state(self, key):
         return self.indexer_state if key == "indexer_state" else self.compressor_state
 
+    @staticmethod
+    def _copy_delta_tree(value):
+        """Detach a small cache-record tree from the live mutable cache."""
+        if value is None:
+            return None
+        if hasattr(value, "shape") and hasattr(value, "dtype"):
+            copied = value + mx.zeros_like(value)
+            mx.eval(copied)
+            return copied
+        if isinstance(value, tuple):
+            return tuple(DeepseekV4Cache._copy_delta_tree(item) for item in value)
+        if isinstance(value, list):
+            return [DeepseekV4Cache._copy_delta_tree(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: DeepseekV4Cache._copy_delta_tree(item)
+                for key, item in value.items()
+            }
+        return value
+
+    def _export_pool_delta(self, state, start_row, end_row):
+        """Export BF16 pool rows for one immutable token block."""
+        from .cache_delta import DSV4_POOL_DELTA_SCHEMA
+
+        pooled = state.get("pooled")
+        if pooled is None:
+            if start_row or end_row:
+                raise ValueError("DSV4 pool rows are missing for a non-empty delta")
+            value = None
+        else:
+            rows = int(pooled.shape[1])
+            if start_row < 0 or end_row < start_row or end_row > rows:
+                raise ValueError(
+                    "DSV4 pool delta is outside retained rows: "
+                    f"start={start_row} end={end_row} rows={rows}"
+                )
+            value = self._copy_delta_tree(pooled[:, start_row:end_row, :])
+        return {
+            "schema": DSV4_POOL_DELTA_SCHEMA,
+            "storage": "bf16",
+            "start_row": int(start_row),
+            "end_row": int(end_row),
+            "value": value,
+        }
+
+    def _append_pool_delta(self, state, delta):
+        """Append one validated BF16 pool delta during checkpoint restore."""
+        from .cache_delta import DSV4_POOL_DELTA_SCHEMA
+
+        if not isinstance(delta, dict) or delta.get("schema") != DSV4_POOL_DELTA_SCHEMA:
+            raise ValueError("unsupported DSV4 pool delta")
+        if delta.get("storage") == "none":
+            if int(delta.get("start_row", 0)) or int(delta.get("end_row", 0)):
+                raise ValueError("absent DSV4 pool delta cannot declare rows")
+            return
+        if delta.get("storage") != "bf16":
+            raise ValueError("base DeepseekV4Cache requires BF16 pool deltas")
+        value = delta.get("value")
+        expected_rows = int(delta.get("end_row", 0)) - int(delta.get("start_row", 0))
+        if expected_rows < 0:
+            raise ValueError("negative DSV4 pool delta row span")
+        if value is None:
+            if expected_rows:
+                raise ValueError("non-empty DSV4 pool delta has no tensor")
+            return
+        if int(value.shape[1]) != expected_rows:
+            raise ValueError("DSV4 pool delta tensor row count does not match metadata")
+        current = state.get("pooled")
+        current_rows = 0 if current is None else int(current.shape[1])
+        if current_rows != int(delta.get("start_row", -1)):
+            raise ValueError(
+                "DSV4 pool delta is not contiguous: "
+                f"current={current_rows} start={delta.get('start_row')}"
+            )
+        state["pooled"] = (
+            value if current is None else mx.concatenate([current, value], axis=1)
+        )
+
+    def export_block_delta(
+        self,
+        start_token: int,
+        end_token: int,
+        *,
+        block_size: int = 256,
+        anchor_interval_blocks: int = 8,
+        force_anchor: bool = False,
+    ):
+        """Export one immutable native block record without flattening pools.
+
+        Pool rows are emitted for every block.  Local rotating state and the
+        incomplete compressor/indexer buffers are emitted only at periodic
+        anchors or an explicitly requested request boundary.
+        """
+        from .cache_delta import DSV4_BLOCK_DELTA_SCHEMA
+
+        start = int(start_token)
+        end = int(end_token)
+        block_size = int(block_size)
+        anchor_interval_blocks = int(anchor_interval_blocks)
+        if start < 0 or end <= start:
+            raise ValueError(f"invalid DSV4 block interval [{start}, {end})")
+        if block_size <= 0 or anchor_interval_blocks <= 0:
+            raise ValueError("DSV4 block and anchor intervals must be positive")
+        if end - start > block_size:
+            raise ValueError("DSV4 block delta exceeds configured block size")
+        ratio = int(self.compress_ratio or 0)
+        if ratio <= 0:
+            raise ValueError("DeepseekV4Cache block deltas require a compression ratio")
+
+        start_row = start // ratio
+        end_row = end // ratio
+        compressor_delta = self._export_pool_delta(
+            self.compressor_state, start_row, end_row
+        )
+        if ratio == 4:
+            indexer_delta = self._export_pool_delta(
+                self.indexer_state, start_row, end_row
+            )
+        else:
+            from .cache_delta import DSV4_POOL_DELTA_SCHEMA
+
+            indexer_delta = {
+                "schema": DSV4_POOL_DELTA_SCHEMA,
+                "storage": "none",
+                "start_row": 0,
+                "end_row": 0,
+            }
+        anchor_interval = block_size * anchor_interval_blocks
+        make_anchor = bool(force_anchor or end % anchor_interval == 0)
+        anchor = None
+        if make_anchor:
+            from .cache_delta import canonical_rotating_window
+
+            if self.local.empty():
+                local_state = None
+                local_meta_state = self.meta_state
+            else:
+                (
+                    local_keys,
+                    local_values,
+                    local_max_size,
+                    local_keep,
+                    local_offset,
+                    local_idx,
+                ) = canonical_rotating_window(
+                    self.local,
+                    expected_offset=end,
+                )
+                local_state = (local_keys, local_values)
+                local_meta_state = tuple(
+                    map(
+                        str,
+                        (local_keep, local_max_size, local_offset, local_idx),
+                    )
+                )
+            anchor = {
+                "tokens": end,
+                "periodic": bool(end % anchor_interval == 0),
+                "terminal": bool(force_anchor),
+                "local_state": self._copy_delta_tree(local_state),
+                "meta_state": self._copy_delta_tree(local_meta_state),
+                "compressor_buffer_kv": self._copy_delta_tree(
+                    self.compressor_state.get("buffer_kv")
+                ),
+                "compressor_buffer_gate": self._copy_delta_tree(
+                    self.compressor_state.get("buffer_gate")
+                ),
+                "indexer_buffer_kv": self._copy_delta_tree(
+                    self.indexer_state.get("buffer_kv")
+                ),
+                "indexer_buffer_gate": self._copy_delta_tree(
+                    self.indexer_state.get("buffer_gate")
+                ),
+            }
+        return {
+            "schema": DSV4_BLOCK_DELTA_SCHEMA,
+            "class_name": type(self).__name__,
+            "start_token": start,
+            "end_token": end,
+            "block_size": block_size,
+            "anchor_interval_blocks": anchor_interval_blocks,
+            "sliding_window": int(getattr(self.local, "max_size", 128) or 128),
+            "compress_ratio": ratio,
+            "compressor_pool": compressor_delta,
+            "indexer_pool": indexer_delta,
+            "anchor": anchor,
+        }
+
+    @classmethod
+    def restore_anchor_from_deltas(
+        cls,
+        deltas,
+        *,
+        target_tokens: int,
+        block_size: int = 256,
+        anchor_interval_blocks: int = 8,
+    ):
+        """Restore the greatest validated anchor not after ``target_tokens``."""
+        from .cache_delta import DSV4AnchorRestore, DSV4_BLOCK_DELTA_SCHEMA
+
+        target = int(target_tokens)
+        records = list(deltas or ())
+        if target <= 0 or not records:
+            raise ValueError("DSV4 restore requires a positive target and deltas")
+        allowed_classes = {"DeepseekV4Cache", "PoolQuantizedV4Cache"}
+        expected_class = cls.__name__
+        if expected_class not in allowed_classes:
+            raise ValueError(
+                f"unsupported DSV4 delta cache class {expected_class!r}"
+            )
+
+        def _validate_pool_span(record, key, expected_row_start, expected_row_end):
+            delta = record.get(key)
+            if not isinstance(delta, dict):
+                raise ValueError(f"DSV4 {key} delta is malformed")
+            try:
+                row_start = int(delta.get("start_row", -1))
+                row_end = int(delta.get("end_row", -1))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"DSV4 {key} row span is not integral") from exc
+            if (row_start, row_end) != (expected_row_start, expected_row_end):
+                raise ValueError(
+                    f"DSV4 {key} row span does not match token geometry: "
+                    f"got={row_start}:{row_end} "
+                    f"expected={expected_row_start}:{expected_row_end}"
+                )
+
+        def _validate_anchor(anchor, *, end, sliding_window):
+            if not isinstance(anchor, dict):
+                raise ValueError("DSV4 anchor is malformed")
+            if int(anchor.get("tokens", -1)) != end:
+                raise ValueError("DSV4 anchor token boundary mismatch")
+            periodic = anchor.get("periodic")
+            terminal = anchor.get("terminal")
+            if not isinstance(periodic, bool) or not isinstance(terminal, bool):
+                raise ValueError("DSV4 anchor kind flags must be boolean")
+            if not periodic and not terminal:
+                raise ValueError("DSV4 anchor is neither periodic nor terminal")
+            if periodic and end % (int(block_size) * int(anchor_interval_blocks)):
+                raise ValueError("DSV4 periodic anchor is misaligned")
+
+            local_state = anchor.get("local_state")
+            if not isinstance(local_state, (tuple, list)) or len(local_state) != 2:
+                raise ValueError("DSV4 anchor is missing exact local K/V state")
+            local_keys, local_values = local_state
+            key_shape = tuple(getattr(local_keys, "shape", ()))
+            value_shape = tuple(getattr(local_values, "shape", ()))
+            expected_rows = min(end, sliding_window)
+            if (
+                len(key_shape) < 3
+                or key_shape != value_shape
+                or int(key_shape[-2]) != expected_rows
+            ):
+                raise ValueError(
+                    "DSV4 anchor local K/V geometry is not canonical: "
+                    f"keys={key_shape} values={value_shape} "
+                    f"expected_rows={expected_rows}"
+                )
+
+            local_meta = anchor.get("meta_state")
+            if not isinstance(local_meta, (tuple, list)) or len(local_meta) < 4:
+                raise ValueError("DSV4 anchor is missing local rotating metadata")
+            try:
+                keep, max_size, offset, idx = map(int, local_meta[:4])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("DSV4 anchor local metadata is not integral") from exc
+            if (
+                keep < 0
+                or keep > max_size
+                or max_size != sliding_window
+                or offset != end
+                or idx != expected_rows
+            ):
+                raise ValueError(
+                    "DSV4 anchor local metadata is not canonical: "
+                    f"keep={keep} max_size={max_size} offset={offset} "
+                    f"idx={idx} expected={sliding_window}/{end}/{expected_rows}"
+                )
+
+        expected_start = 0
+        selected = []
+        selected_anchor = None
+        chain_ratio = None
+        chain_sliding_window = None
+        saw_partial = False
+        for record in records:
+            if not isinstance(record, dict) or record.get("schema") != DSV4_BLOCK_DELTA_SCHEMA:
+                raise ValueError("unsupported DSV4 block delta")
+            record_class = str(record.get("class_name") or "")
+            if record_class != expected_class:
+                raise ValueError(
+                    "DSV4 cache class changed inside delta chain: "
+                    f"expected={expected_class!r} got={record_class!r}"
+                )
+            if int(record.get("block_size", 0)) != int(block_size):
+                raise ValueError("DSV4 block-size mismatch")
+            if int(record.get("anchor_interval_blocks", 0)) != int(anchor_interval_blocks):
+                raise ValueError("DSV4 anchor-interval mismatch")
+            start = int(record.get("start_token", -1))
+            end = int(record.get("end_token", -1))
+            if (
+                saw_partial
+                or start != expected_start
+                or start % int(block_size)
+                or end <= start
+                or end - start > int(block_size)
+            ):
+                raise ValueError(
+                    "non-contiguous DSV4 delta chain: "
+                    f"expected={expected_start} got=[{start},{end})"
+                )
+            ratio = int(record.get("compress_ratio", 0))
+            sliding_window = int(record.get("sliding_window", 0))
+            if ratio not in (4, 128) or sliding_window <= 0:
+                raise ValueError("invalid DSV4 cache geometry in delta chain")
+            if chain_ratio is None:
+                chain_ratio = ratio
+                chain_sliding_window = sliding_window
+            elif ratio != chain_ratio or sliding_window != chain_sliding_window:
+                raise ValueError(
+                    "DSV4 cache geometry changed inside delta chain: "
+                    f"ratio={chain_ratio}->{ratio} "
+                    f"window={chain_sliding_window}->{sliding_window}"
+                )
+
+            expected_row_start = start // ratio
+            expected_row_end = end // ratio
+            _validate_pool_span(
+                record,
+                "compressor_pool",
+                expected_row_start,
+                expected_row_end,
+            )
+            if ratio == 4:
+                _validate_pool_span(
+                    record,
+                    "indexer_pool",
+                    expected_row_start,
+                    expected_row_end,
+                )
+            else:
+                _validate_pool_span(record, "indexer_pool", 0, 0)
+
+            anchor = record.get("anchor")
+            if anchor is not None:
+                _validate_anchor(
+                    anchor,
+                    end=end,
+                    sliding_window=sliding_window,
+                )
+            is_partial = end - start < int(block_size)
+            if is_partial:
+                if not isinstance(anchor, dict) or anchor.get("terminal") is not True:
+                    raise ValueError(
+                        "DSV4 partial block must be an exact terminal anchor"
+                    )
+                saw_partial = True
+            if end > target:
+                break
+            selected.append(record)
+            expected_start = end
+            if anchor is not None:
+                selected_anchor = record
+        if selected_anchor is None:
+            raise ValueError("DSV4 delta chain has no anchor at or before target")
+
+        checkpoint = int(selected_anchor["end_token"])
+        selected = [record for record in selected if int(record["end_token"]) <= checkpoint]
+        first = selected[0]
+        ratio = int(first.get("compress_ratio", 0))
+        sliding_window = int(first.get("sliding_window", 0))
+        cache = cls(sliding_window=sliding_window, compress_ratio=ratio)
+        compressor_rows = 0
+        indexer_rows = 0
+        for record in selected:
+            if (
+                int(record.get("compress_ratio", 0)) != ratio
+                or int(record.get("sliding_window", 0)) != sliding_window
+            ):
+                raise ValueError("DSV4 geometry changed inside selected delta chain")
+
+        if cls.__name__ == "PoolQuantizedV4Cache":
+            # Native q8 segments are already detached and immutable. Append
+            # their code/scale/min tuples directly; only the bounded initial
+            # BF16 hot tier can trigger one deterministic promotion.
+            for record in selected:
+                cache._append_pool_delta(
+                    cache.compressor_state, record["compressor_pool"]
+                )
+                cache._append_pool_delta(
+                    cache.indexer_state, record["indexer_pool"]
+                )
+                compressor_rows = int(record["compressor_pool"]["end_row"])
+                indexer_rows = int(record["indexer_pool"]["end_row"])
+        else:
+            # A million-token BF16 chain contains thousands of block deltas.
+            # Repeated pairwise concatenation is quadratic; validate the row
+            # spans, then materialize each branch exactly once.
+            def _restore_bf16_branch(state, key, *, allow_none):
+                expected_start = 0
+                values = []
+                for item in selected:
+                    delta = item[key]
+                    start_row = int(delta.get("start_row", -1))
+                    end_row = int(delta.get("end_row", -1))
+                    if start_row != expected_start or end_row < start_row:
+                        raise ValueError(
+                            f"DSV4 {key} delta is not contiguous: "
+                            f"expected={expected_start} got={start_row}:{end_row}"
+                        )
+                    storage = delta.get("storage")
+                    if storage == "none":
+                        if not allow_none or start_row or end_row:
+                            raise ValueError(f"invalid absent DSV4 {key} delta")
+                    elif storage == "bf16":
+                        value = delta.get("value")
+                        if value is None or int(value.shape[1]) != end_row - start_row:
+                            raise ValueError(f"invalid DSV4 {key} BF16 rows")
+                        if end_row > start_row:
+                            values.append(value)
+                    else:
+                        raise ValueError(
+                            f"base DeepseekV4Cache cannot restore {storage!r} {key}"
+                        )
+                    expected_start = end_row
+                if values:
+                    state["pooled"] = (
+                        values[0]
+                        if len(values) == 1
+                        else mx.concatenate(values, axis=1)
+                    )
+                    mx.eval(state["pooled"])
+                else:
+                    state["pooled"] = None
+                return expected_start
+
+            compressor_rows = _restore_bf16_branch(
+                cache.compressor_state,
+                "compressor_pool",
+                allow_none=False,
+            )
+            indexer_rows = _restore_bf16_branch(
+                cache.indexer_state,
+                "indexer_pool",
+                allow_none=ratio != 4,
+            )
+        expected_rows = checkpoint // ratio
+        expected_indexer_rows = expected_rows if ratio == 4 else 0
+        if compressor_rows != expected_rows or indexer_rows != expected_indexer_rows:
+            raise ValueError(
+                "DSV4 restored pool rows do not match checkpoint: "
+                f"compressor={compressor_rows} indexer={indexer_rows} "
+                f"expected={expected_rows}/{expected_indexer_rows}"
+            )
+
+        anchor = selected_anchor["anchor"]
+        local_state = anchor.get("local_state")
+        if local_state is None:
+            cache.local.keys = None
+            cache.local.values = None
+        else:
+            local_rows = int(local_state[0].shape[-2])
+            expected_local_rows = min(checkpoint, sliding_window)
+            if local_rows != expected_local_rows:
+                raise ValueError(
+                    "DSV4 anchor local window is not canonical: "
+                    f"rows={local_rows} expected={expected_local_rows}"
+                )
+            cache.local.state = local_state
+        local_meta = anchor.get("meta_state")
+        if local_meta is None or len(local_meta) < 4:
+            raise ValueError("DSV4 anchor is missing local rotating metadata")
+        try:
+            _, _, local_offset, local_idx = map(int, local_meta[:4])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DSV4 anchor local metadata is not integral") from exc
+        if local_offset != checkpoint or local_idx != min(checkpoint, sliding_window):
+            raise ValueError(
+                "DSV4 anchor local metadata is not canonical: "
+                f"offset={local_offset} idx={local_idx} checkpoint={checkpoint}"
+            )
+        cache.meta_state = local_meta
+        cache.compressor_state["buffer_kv"] = anchor.get("compressor_buffer_kv")
+        cache.compressor_state["buffer_gate"] = anchor.get("compressor_buffer_gate")
+        cache.indexer_state["buffer_kv"] = anchor.get("indexer_buffer_kv")
+        cache.indexer_state["buffer_gate"] = anchor.get("indexer_buffer_gate")
+        return DSV4AnchorRestore(
+            cache=cache,
+            checkpoint_tokens=checkpoint,
+            replayed_tokens=max(0, target - checkpoint),
+        )
+
     def accumulate_windows(self, kv, gate, state_key, ratio, start_pos):
         state = self._branch_state(state_key)
         buf_kv, buf_gate = state["buffer_kv"], state["buffer_gate"]
@@ -821,6 +1313,8 @@ class Compressor(nn.Module):
             )
             new_pooled = _apply_partial_rope(new_pooled[:, None], rope, positions=positions).squeeze(1)
         if cache is not None:
+            if hasattr(cache, "update_pool_view"):
+                return cache.update_pool_view(new_pooled, state_key)
             return cache.update_pool(new_pooled, state_key)
         return new_pooled
 
@@ -836,21 +1330,51 @@ class Indexer(nn.Module):
         self.compressor = Compressor(config, compress_ratio, self.head_dim)
         self.scale = self.head_dim ** -0.5
 
-    def __call__(self, x, q_residual, rope, position_rope, cache, start_pos):
+    def update_pool(self, x, rope, cache, start_pos):
+        """Advance the indexer's compressor state for this attention pass.
+
+        DSV4's reference runtime advances the indexer compressor on every
+        compress-ratio-4 pass, including while the retained pool is still too
+        small to require sparse top-k selection.  Keeping this state update
+        separate from scoring avoids the query projection/top-k cost below the
+        threshold without letting the indexer pool fall behind the main pool.
+        """
+        return self.compressor(
+            x,
+            rope,
+            cache,
+            start_pos,
+            state_key="indexer_state",
+        )
+
+    def select(self, x, q_residual, position_rope, pooled, start_pos):
+        """Select sparse compressed-pool rows from already-updated state."""
         B, L, _ = x.shape
-        pooled = self.compressor(x, rope, cache, start_pos, state_key="indexer_state")
         if pooled.shape[1] == 0:
             return None
         offset = start_pos
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
         q = q.transpose(0, 2, 1, 3)
         q = _apply_partial_rope(q, position_rope, offset)
+        weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads ** -0.5)
+        if getattr(pooled, "is_dsv4_quantized_pool_view", False):
+            return _dsv4_tiled_index_topk(
+                q,
+                weights,
+                pooled,
+                scale=self.scale,
+                top_k=self.index_topk,
+            )
         scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(mx.float32)
         scores = mx.maximum(scores, 0) * self.scale
-        weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads ** -0.5)
         scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
         k = min(self.index_topk, pooled.shape[1])
         return mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+
+    def __call__(self, x, q_residual, rope, position_rope, cache, start_pos):
+        """Compatibility path that advances state and then selects rows."""
+        pooled = self.update_pool(x, rope, cache, start_pos)
+        return self.select(x, q_residual, position_rope, pooled, start_pos)
 
 
 def _mlx_apply_rotary_cis(x: mx.array, freqs_cis_real: mx.array) -> mx.array:
@@ -958,6 +1482,305 @@ def _dsv4_compressed_visibility(
         visible[None, None, :, :],
         (batch, 1, seq_len, compressed_len),
     )
+
+
+_DSV4_POOL_TILE_TARGET_BYTES = 128 * 1024 * 1024
+_DSV4_POOL_TILE_MAX_ROWS = 64 * 1024
+_DSV4_POOL_TILE_MIN_ROWS = 64
+
+
+def _dsv4_pool_tile_rows(q: mx.array, value_dim: int) -> int:
+    """Choose a bounded row tile from query-score and BF16-view geometry."""
+    batch, heads, seq_len, _ = map(int, q.shape)
+    score_bytes_per_row = batch * heads * seq_len * 4
+    value_bytes_per_row = batch * int(value_dim) * 2
+    mask_bytes_per_row = batch * seq_len
+    bytes_per_row = max(1, score_bytes_per_row + value_bytes_per_row + mask_bytes_per_row)
+    rows = _DSV4_POOL_TILE_TARGET_BYTES // bytes_per_row
+    rows = min(_DSV4_POOL_TILE_MAX_ROWS, max(_DSV4_POOL_TILE_MIN_ROWS, rows))
+    if rows >= _DSV4_POOL_TILE_MIN_ROWS:
+        rows = (rows // _DSV4_POOL_TILE_MIN_ROWS) * _DSV4_POOL_TILE_MIN_ROWS
+    return max(1, rows)
+
+
+def _dsv4_tiled_index_topk(
+    q: mx.array,
+    head_weights: mx.array,
+    pooled,
+    *,
+    scale: float,
+    top_k: int,
+) -> mx.array:
+    """Exact global top-k over a segmented native-q8 indexer pool.
+
+    Only one bounded BF16 tile and its score matrix exist at a time. Candidate
+    scores are reduced to the global top-k before the next tile is consumed.
+    """
+    total_rows = int(pooled.shape[1])
+    k = min(max(1, int(top_k)), total_rows)
+    tile_rows = _dsv4_pool_tile_rows(q, int(pooled.shape[-1]))
+    q32 = q.astype(mx.float32)
+    weights = head_weights.swapaxes(-1, -2)[..., None].astype(mx.float32)
+    best_scores = None
+    best_indices = None
+    for start, tile in pooled.iter_dequantized_tiles(max_rows=tile_rows):
+        tile32 = tile.astype(mx.float32)
+        scores = q32 @ tile32[:, None].swapaxes(-1, -2)
+        scores = mx.maximum(scores, 0) * float(scale)
+        scores = (scores * weights).sum(axis=1)
+        indices = mx.broadcast_to(
+            (int(start) + mx.arange(int(tile.shape[1]), dtype=mx.int32))[None, None],
+            scores.shape,
+        )
+        if best_scores is not None:
+            scores = mx.concatenate([best_scores, scores], axis=-1)
+            indices = mx.concatenate([best_indices, indices], axis=-1)
+        keep = min(k, int(scores.shape[-1]))
+        if int(scores.shape[-1]) > keep:
+            selected = mx.argpartition(-scores, kth=keep - 1, axis=-1)[..., :keep]
+            best_scores = mx.take_along_axis(scores, selected, axis=-1)
+            best_indices = mx.take_along_axis(indices, selected, axis=-1)
+        else:
+            best_scores = scores
+            best_indices = indices
+        # Bound the lazy graph as well as the tensor geometry. At decode this
+        # is at most a handful of tiles; long prefill already materializes per
+        # layer in ``Model.__call__``.
+        mx.eval(best_scores, best_indices)
+    if best_indices is None:
+        return mx.zeros((*q.shape[:1], q.shape[2], 0), dtype=mx.int32)
+    return best_indices.astype(mx.int32)
+
+
+def _dsv4_attention_accumulate(
+    q32: mx.array,
+    kv: mx.array,
+    mask: mx.array,
+    *,
+    scale: float,
+    running_max: mx.array,
+    running_sum: mx.array,
+    running_value: mx.array,
+):
+    """Merge one key/value tile into an online softmax accumulator."""
+    scores = (q32 * float(scale)) @ kv[:, None].swapaxes(-1, -2).astype(mx.float32)
+    scores = mx.where(mask, scores, mx.full(scores.shape, -float("inf")))
+    tile_max = mx.max(scores, axis=-1)
+    next_max = mx.maximum(running_max, tile_max)
+    prior_scale = mx.exp(running_max - next_max)
+    tile_weights = mx.exp(scores - next_max[..., None])
+    next_sum = running_sum * prior_scale + tile_weights.sum(axis=-1)
+    next_value = (
+        running_value * prior_scale[..., None]
+        + tile_weights @ kv[:, None].astype(mx.float32)
+    )
+    return next_max, next_sum, next_value
+
+
+def _dsv4_selected_attention_accumulate(
+    q32: mx.array,
+    selected_kv: mx.array,
+    mask: mx.array,
+    *,
+    scale: float,
+    running_max: mx.array,
+    running_sum: mx.array,
+    running_value: mx.array,
+):
+    """Merge per-query CSA-selected values into an online softmax state."""
+    scores = mx.einsum(
+        "bhqd,bqkd->bhqk",
+        q32 * float(scale),
+        selected_kv.astype(mx.float32),
+    )
+    scores = mx.where(mask, scores, mx.full(scores.shape, -float("inf")))
+    tile_max = mx.max(scores, axis=-1)
+    next_max = mx.maximum(running_max, tile_max)
+    prior_scale = mx.exp(running_max - next_max)
+    tile_weights = mx.exp(scores - next_max[..., None])
+    next_sum = running_sum * prior_scale + tile_weights.sum(axis=-1)
+    next_value = running_value * prior_scale[..., None] + mx.einsum(
+        "bhqk,bqkd->bhqd",
+        tile_weights,
+        selected_kv.astype(mx.float32),
+    )
+    return next_max, next_sum, next_value
+
+
+def _dsv4_selected_query_rows(q: mx.array, topk: mx.array) -> int:
+    """Bound selected-value and score temporaries during multi-token prefill."""
+    batch, heads, seq_len, head_dim = map(int, q.shape)
+    selected_rows = int(topk.shape[-1])
+    # Per query: selected BF16 values, fp32 per-head scores/masks, and the
+    # fp32 online-softmax output accumulator. Keep the combined estimate under
+    # the same 128 MiB budget used by the indexer scan.
+    bytes_per_query = batch * (
+        selected_rows * (head_dim * 2 + heads * 4 + 1)
+        + heads * head_dim * 4
+    )
+    return max(
+        1,
+        min(seq_len, _DSV4_POOL_TILE_TARGET_BYTES // max(1, bytes_per_query)),
+    )
+
+
+def _dsv4_selected_pool_attention(
+    q: mx.array,
+    local_kv: mx.array,
+    pooled,
+    *,
+    offset: int,
+    window: int,
+    ratio: int,
+    scale: float,
+    sinks: mx.array,
+    topk: mx.array,
+) -> mx.array:
+    """Attend to CSA top-k by decoding exactly the selected q8 rows.
+
+    The 128-dimensional indexer remains a bounded full-pool scan. Once it has
+    selected global row indices, the 512-dimensional compressor pool must not
+    be scanned again: each query tile gathers code/scale/min leaves for only
+    those row occurrences and performs the local+selected online softmax.
+    """
+    batch, heads, seq_len, head_dim = map(int, q.shape)
+    local_rows = int(local_kv.shape[2])
+    local_mask = _dsv4_window_visibility(
+        batch,
+        seq_len,
+        int(offset),
+        int(window),
+        local_rows,
+    )
+    query_rows = _dsv4_selected_query_rows(q, topk)
+    outputs = []
+    for start in range(0, seq_len, query_rows):
+        end = min(seq_len, start + query_rows)
+        q_tile = q[:, :, start:end]
+        q32 = q_tile.astype(mx.float32)
+        selected_indices = topk[:, start:end].astype(mx.int32)
+        selected_kv = pooled.gather_dequantized_rows(selected_indices)
+        tile_len = end - start
+        running_max = mx.broadcast_to(
+            sinks.astype(mx.float32).reshape(1, heads, 1),
+            (batch, heads, tile_len),
+        )
+        running_sum = mx.ones((batch, heads, tile_len), dtype=mx.float32)
+        running_value = mx.zeros(
+            (batch, heads, tile_len, head_dim),
+            dtype=mx.float32,
+        )
+        if local_rows:
+            running_max, running_sum, running_value = _dsv4_attention_accumulate(
+                q32,
+                local_kv.squeeze(1),
+                local_mask[:, :, start:end],
+                scale=scale,
+                running_max=running_max,
+                running_sum=running_sum,
+                running_value=running_value,
+            )
+
+        q_pos = int(offset) + mx.arange(start, end)
+        visible = ((selected_indices + 1) * int(ratio)) <= (
+            q_pos[None, :, None] + 1
+        )
+        running_max, running_sum, running_value = (
+            _dsv4_selected_attention_accumulate(
+                q32,
+                selected_kv,
+                visible[:, None],
+                scale=scale,
+                running_max=running_max,
+                running_sum=running_sum,
+                running_value=running_value,
+            )
+        )
+        output = (running_value / running_sum[..., None]).astype(q.dtype)
+        mx.eval(output)
+        outputs.append(output)
+    return outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=2)
+
+
+def _dsv4_tiled_pool_attention(
+    q: mx.array,
+    local_kv: mx.array,
+    pooled,
+    *,
+    offset: int,
+    window: int,
+    ratio: int,
+    scale: float,
+    sinks: mx.array,
+    topk: mx.array | None = None,
+) -> mx.array:
+    """DSV4 local plus compressed attention without a full BF16 pool view."""
+    if topk is not None:
+        return _dsv4_selected_pool_attention(
+            q,
+            local_kv,
+            pooled,
+            offset=offset,
+            window=window,
+            ratio=ratio,
+            scale=scale,
+            sinks=sinks,
+            topk=topk,
+        )
+
+    batch, heads, seq_len, head_dim = map(int, q.shape)
+    q32 = q.astype(mx.float32)
+    running_max = mx.broadcast_to(
+        sinks.astype(mx.float32).reshape(1, heads, 1),
+        (batch, heads, seq_len),
+    )
+    # Attention sinks contribute to the softmax denominator with a zero value.
+    running_sum = mx.ones((batch, heads, seq_len), dtype=mx.float32)
+    running_value = mx.zeros(
+        (batch, heads, seq_len, head_dim),
+        dtype=mx.float32,
+    )
+
+    local_rows = int(local_kv.shape[2])
+    if local_rows:
+        local_mask = _dsv4_window_visibility(
+            batch,
+            seq_len,
+            int(offset),
+            int(window),
+            local_rows,
+        )
+        running_max, running_sum, running_value = _dsv4_attention_accumulate(
+            q32,
+            local_kv.squeeze(1),
+            local_mask,
+            scale=scale,
+            running_max=running_max,
+            running_sum=running_sum,
+            running_value=running_value,
+        )
+
+    tile_rows = _dsv4_pool_tile_rows(q, int(pooled.shape[-1]))
+    q_pos = int(offset) + mx.arange(seq_len)
+    for start, tile in pooled.iter_dequantized_tiles(max_rows=tile_rows):
+        rows = int(tile.shape[1])
+        k_idx = int(start) + mx.arange(rows)
+        visible = ((k_idx[None, :] + 1) * int(ratio)) <= (q_pos[:, None] + 1)
+        pool_mask = mx.broadcast_to(
+            visible[None, None, :, :],
+            (batch, 1, seq_len, rows),
+        )
+        running_max, running_sum, running_value = _dsv4_attention_accumulate(
+            q32,
+            tile,
+            pool_mask,
+            scale=scale,
+            running_max=running_max,
+            running_sum=running_sum,
+            running_value=running_value,
+        )
+        mx.eval(running_max, running_sum, running_value)
+    return (running_value / running_sum[..., None]).astype(q.dtype)
 
 
 # Cache of unit weight tensors for mx.fast.rms_norm (per-head Q norm uses
@@ -1075,6 +1898,7 @@ class DeepseekV4Attention(nn.Module):
             kv, _ = local_cache.update_and_fetch(kv, kv)
         full_kv = kv
         attn_mask = mask
+        tiled_pool_out = None
 
         if self.compress_ratio:
             v4_cache = cache if isinstance(cache, DeepseekV4Cache) else None
@@ -1088,15 +1912,54 @@ class DeepseekV4Attention(nn.Module):
             # - L >= compress_ratio (enough tokens to produce non-empty pool in one call)
             if v4_cache is not None or L >= self.compress_ratio:
                 pooled = self.compressor(x, self.compress_rope, v4_cache, offset)
+                indexer_pooled = None
+                if hasattr(self, "indexer"):
+                    # The native DSV4 indexer owns a second compressor and must
+                    # advance on every ratio-4 pass.  Deferring this update
+                    # until sparse selection is needed creates a shorter
+                    # indexer pool, corrupting both top-k positions and native
+                    # block-delta export once the main pool crosses index_topk.
+                    indexer_pooled = self.indexer.update_pool(
+                        x,
+                        self.compress_rope,
+                        v4_cache,
+                        offset,
+                    )
+                    main_rows = int(pooled.shape[1])
+                    indexer_rows = int(indexer_pooled.shape[1])
+                    if indexer_rows != main_rows:
+                        raise RuntimeError(
+                            "DSV4 compressor/indexer pool row misalignment: "
+                            f"compressor={main_rows} indexer={indexer_rows} "
+                            f"offset={int(offset)} input_tokens={int(L)}"
+                        )
                 if pooled.shape[1] > 0:
                     topk = None
-                    if hasattr(self, "indexer") and pooled.shape[1] > self.indexer.index_topk:
-                        topk = self.indexer(
-                            x, q_residual, self.compress_rope, self.rope,
-                            v4_cache, offset,
+                    if (
+                        indexer_pooled is not None
+                        and pooled.shape[1] > self.indexer.index_topk
+                    ):
+                        topk = self.indexer.select(
+                            x,
+                            q_residual,
+                            self.rope,
+                            indexer_pooled,
+                            offset,
                         )
 
-                    if L == 1:
+                    if getattr(pooled, "is_dsv4_quantized_pool_view", False):
+                        tiled_pool_out = _dsv4_tiled_pool_attention(
+                            q,
+                            full_kv,
+                            pooled,
+                            offset=offset,
+                            window=self.args.sliding_window,
+                            ratio=self.compress_ratio,
+                            scale=self.softmax_scale,
+                            sinks=self.attn_sink.astype(q.dtype),
+                            topk=topk,
+                        )
+                    elif L == 1:
                         # Decode fast path: materialize only the selected rows
                         # for the single query. This is bounded by index_topk
                         # and avoids carrying a full pool mask through SDPA.
@@ -1160,11 +2023,14 @@ class DeepseekV4Attention(nn.Module):
                     )
                 attn_mask = mx.concatenate([attn_mask, pad], axis=-1)
 
-        out = scaled_dot_product_attention(
-            q, full_kv, full_kv,
-            cache=local_cache, scale=self.softmax_scale, mask=attn_mask,
-            sinks=self.attn_sink.astype(q.dtype),
-        )
+        if tiled_pool_out is None:
+            out = scaled_dot_product_attention(
+                q, full_kv, full_kv,
+                cache=local_cache, scale=self.softmax_scale, mask=attn_mask,
+                sinks=self.attn_sink.astype(q.dtype),
+            )
+        else:
+            out = tiled_pool_out
         out = _apply_partial_rope(out, self.rope, offset, inverse=True)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, self.n_heads * self.head_dim)
         out = self._grouped_output_projection(out)
@@ -1519,11 +2385,13 @@ class Model(nn.Module):
         pool_quant = os.environ.get("DSV4_POOL_QUANT", "0") == "1"
         pool_cache_cls = DeepseekV4Cache
         if pool_quant:
-            try:
-                from .pool_quant_cache import PoolQuantizedV4Cache
-                pool_cache_cls = PoolQuantizedV4Cache
-            except Exception:
-                pool_cache_cls = DeepseekV4Cache
+            # Pool quant is a user-visible native cache contract, not an
+            # optional optimization. Silently falling back to BF16 leaves the
+            # environment and /health claiming q8 while the model retains a
+            # different cache class and memory footprint.
+            from .pool_quant_cache import PoolQuantizedV4Cache
+
+            pool_cache_cls = PoolQuantizedV4Cache
         caches = []
         for layer in self.model.layers:
             if not long_ctx:
