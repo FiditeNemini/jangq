@@ -434,7 +434,7 @@ def hadamard_rotate_activation(x: mx.array) -> mx.array:
     return mx.hadamard_transform(x).astype(x.dtype)
 
 
-def _fp8_qat_non_rope(x: mx.array, rope_dims: int) -> mx.array:
+def _fp8_qat_non_rope_ops(x: mx.array, rope_dims: int) -> mx.array:
     """Apply block-64 E4M3 QAT while preserving positional dimensions."""
 
     split = int(x.shape[-1]) - int(rope_dims)
@@ -444,6 +444,256 @@ def _fp8_qat_non_rope(x: mx.array, rope_dims: int) -> mx.array:
         [act_quant_sim(x[..., :split], 64), x[..., split:]],
         axis=-1,
     )
+
+
+def _indexer_activation_roundtrip_ops(x: mx.array) -> mx.array:
+    """Pure-MLX fallback for the official Hadamard-128 + E2M1 graph."""
+
+    rotated = mx.hadamard_transform(x.astype(mx.float32))
+    return fp4_act_quant_sim(rotated, 32).astype(x.dtype)
+
+
+def _make_e4m3_kv_activation_roundtrip_kernel():
+    """Fuse the source-native post-RoPE KV QAT graph into one Metal launch."""
+
+    try:
+        if mx.default_device() != mx.gpu or not mx.metal.is_available():
+            return None
+    except Exception:
+        return None
+
+    source = r"""
+        const uint gid = thread_position_in_grid.x;
+        const uint lane = thread_position_in_threadgroup.x;
+        const uint group = gid >> 6;
+        const uint block = group % NBT;
+        const uint row = group / NBT;
+        const uint idx = row * N + block * 64 + lane;
+
+        if (block >= NBQ) {
+            y[idx] = static_cast<outT>(x[idx]);
+        } else {
+            threadgroup float scratch[64];
+            const float input_value = static_cast<float>(x[idx]);
+            scratch[lane] = metal::abs(input_value);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = 32; stride > 0; stride >>= 1) {
+                if (lane < stride) {
+                    scratch[lane] = metal::max(
+                        scratch[lane], scratch[lane + stride]);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+
+            const float amax = metal::max(scratch[0], 1.0e-4f);
+            const float raw_scale = amax / 448.0f;
+            const uint raw_bits = as_type<uint>(raw_scale);
+            const int raw_exp = int((raw_bits >> 23) & 0xffu) - 127;
+            const bool has_mantissa = (raw_bits & 0x7fffffu) != 0u;
+            const int scale_exp = raw_exp + int(has_mantissa);
+            const float scale = as_type<float>(uint(scale_exp + 127) << 23);
+
+            const float normalized = metal::clamp(
+                input_value / scale, -448.0f, 448.0f);
+            const float sign = normalized < 0.0f ? -1.0f : 1.0f;
+            const float absolute = metal::min(metal::abs(normalized), 448.0f);
+            int low = 0;
+            int high = 126;
+            while (low < high) {
+                const int middle = (low + high + 1) >> 1;
+                const int exponent = (middle >> 3) & 0x0f;
+                const int mantissa = middle & 0x07;
+                const float candidate = exponent == 0
+                    ? float(mantissa) * 0.001953125f
+                    : (1.0f + float(mantissa) * 0.125f)
+                        * metal::fast::exp2(float(exponent - 7));
+                if (candidate <= absolute) low = middle;
+                else high = middle - 1;
+            }
+
+            int best = low;
+            const int best_exponent = (best >> 3) & 0x0f;
+            const int best_mantissa = best & 0x07;
+            float best_value = best_exponent == 0
+                ? float(best_mantissa) * 0.001953125f
+                : (1.0f + float(best_mantissa) * 0.125f)
+                    * metal::fast::exp2(float(best_exponent - 7));
+            if (best < 126) {
+                const int next = best + 1;
+                const int next_exponent = (next >> 3) & 0x0f;
+                const int next_mantissa = next & 0x07;
+                const float next_value = next_exponent == 0
+                    ? float(next_mantissa) * 0.001953125f
+                    : (1.0f + float(next_mantissa) * 0.125f)
+                        * metal::fast::exp2(float(next_exponent - 7));
+                const float best_diff = metal::abs(absolute - best_value);
+                const float next_diff = metal::abs(absolute - next_value);
+                if (next_diff < best_diff ||
+                    (next_diff == best_diff && (next & 1) == 0 && (best & 1) != 0)) {
+                    best_value = next_value;
+                }
+            }
+            y[idx] = static_cast<outT>(sign * best_value * scale);
+        }
+    """
+
+    return mx.fast.metal_kernel(
+        name="deepseek_v4_e4m3_kv_activation_roundtrip",
+        input_names=["x"],
+        output_names=["y"],
+        source=source,
+    )
+
+
+def _make_indexer_activation_roundtrip_kernel():
+    """Fuse official Hadamard-128 and block-32 E2M1 QAT on Metal."""
+
+    try:
+        if mx.default_device() != mx.gpu or not mx.metal.is_available():
+            return None
+    except Exception:
+        return None
+
+    source = r"""
+        const uint gid = thread_position_in_grid.x;
+        const uint lane = thread_position_in_threadgroup.x;
+        const uint row = gid >> 7;
+        const uint idx = row * 128 + lane;
+        threadgroup float values[128];
+        threadgroup float magnitudes[128];
+
+        values[lane] = static_cast<float>(x[idx]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint stride = 1; stride < 128; stride <<= 1) {
+            if (lane < 64) {
+                const uint block = lane / stride;
+                const uint offset = lane % stride;
+                const uint low_idx = block * 2 * stride + offset;
+                const uint high_idx = low_idx + stride;
+                const float low = values[low_idx];
+                const float high = values[high_idx];
+                values[low_idx] = low + high;
+                values[high_idx] = low - high;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        const float rotated = values[lane] * 0.08838834764831845f;
+        magnitudes[lane] = metal::abs(rotated);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint stride = 16; stride > 0; stride >>= 1) {
+            if ((lane & 31u) < stride) {
+                magnitudes[lane] = metal::max(
+                    magnitudes[lane], magnitudes[lane + stride]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        const uint block_start = lane & ~31u;
+        const float amax = metal::max(
+            magnitudes[block_start], 7.052966104933725e-38f);
+        const float raw_scale = amax / 6.0f;
+        const uint raw_bits = as_type<uint>(raw_scale);
+        const int raw_exp = int((raw_bits >> 23) & 0xffu) - 127;
+        const bool has_mantissa = (raw_bits & 0x7fffffu) != 0u;
+        const int scale_exp = raw_exp + int(has_mantissa);
+        const float scale = as_type<float>(uint(scale_exp + 127) << 23);
+
+        const float normalized = metal::clamp(rotated / scale, -6.0f, 6.0f);
+        const float absolute = metal::abs(normalized);
+        constexpr float codebook[8] = {
+            0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f
+        };
+        int best = 0;
+        float best_diff = absolute;
+        for (int code = 1; code < 8; ++code) {
+            const float diff = metal::abs(absolute - codebook[code]);
+            if (diff < best_diff ||
+                (diff == best_diff && (code & 1) == 0 && (best & 1) != 0)) {
+                best = code;
+                best_diff = diff;
+            }
+        }
+        const float sign = normalized < 0.0f ? -1.0f : 1.0f;
+        y[idx] = static_cast<outT>(sign * codebook[best] * scale);
+    """
+
+    return mx.fast.metal_kernel(
+        name="deepseek_v4_indexer_hadamard128_e2m1_roundtrip",
+        input_names=["x"],
+        output_names=["y"],
+        source=source,
+    )
+
+
+_e4m3_kv_activation_roundtrip_kernel = (
+    _make_e4m3_kv_activation_roundtrip_kernel()
+)
+_indexer_activation_roundtrip_kernel = (
+    _make_indexer_activation_roundtrip_kernel()
+)
+
+
+def _fp8_qat_non_rope(x: mx.array, rope_dims: int) -> mx.array:
+    """Dispatch the official post-RoPE KV QAT graph without changing math."""
+
+    split = int(x.shape[-1]) - int(rope_dims)
+    width = int(x.shape[-1])
+    if split <= 0:
+        return x
+    try:
+        use_metal = mx.default_device() == mx.gpu and mx.metal.is_available()
+    except Exception:
+        use_metal = False
+    if (
+        _e4m3_kv_activation_roundtrip_kernel is None
+        or not use_metal
+        or width % 64
+        or split % 64
+        or int(x.size) == 0
+    ):
+        return _fp8_qat_non_rope_ops(x, rope_dims)
+    contiguous = mx.contiguous(x)
+    rows = int(contiguous.size) // width
+    return _e4m3_kv_activation_roundtrip_kernel(
+        inputs=[contiguous],
+        template=[
+            ("N", width),
+            ("NBQ", split // 64),
+            ("NBT", width // 64),
+            ("outT", contiguous.dtype),
+        ],
+        grid=(rows * width, 1, 1),
+        threadgroup=(64, 1, 1),
+        output_shapes=[contiguous.shape],
+        output_dtypes=[contiguous.dtype],
+    )[0]
+
+
+def _indexer_activation_roundtrip(x: mx.array) -> mx.array:
+    """Dispatch the official indexer activation graph without changing math."""
+
+    try:
+        use_metal = mx.default_device() == mx.gpu and mx.metal.is_available()
+    except Exception:
+        use_metal = False
+    if (
+        _indexer_activation_roundtrip_kernel is None
+        or not use_metal
+        or int(x.shape[-1]) != 128
+        or int(x.size) == 0
+    ):
+        return _indexer_activation_roundtrip_ops(x)
+    contiguous = mx.contiguous(x)
+    rows = int(contiguous.size) // 128
+    return _indexer_activation_roundtrip_kernel(
+        inputs=[contiguous],
+        template=[("outT", contiguous.dtype)],
+        grid=(rows * 128, 1, 1),
+        threadgroup=(128, 1, 1),
+        output_shapes=[contiguous.shape],
+        output_dtypes=[contiguous.dtype],
+    )[0]
 
 
 class DeepseekV4RoPE(nn.Module):
@@ -1431,10 +1681,7 @@ class Compressor(nn.Module):
             )
             new_pooled = _apply_partial_rope(new_pooled[:, None], rope, positions=positions).squeeze(1)
             if self.rotate:
-                new_pooled = fp4_act_quant_sim(
-                    hadamard_rotate_activation(new_pooled),
-                    32,
-                )
+                new_pooled = _indexer_activation_roundtrip(new_pooled)
             else:
                 new_pooled = _fp8_qat_non_rope(
                     new_pooled,
@@ -1490,7 +1737,7 @@ class Indexer(nn.Module):
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
         q = q.transpose(0, 2, 1, 3)
         q = _apply_partial_rope(q, position_rope, offset)
-        q = fp4_act_quant_sim(hadamard_rotate_activation(q), 32)
+        q = _indexer_activation_roundtrip(q)
         weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads ** -0.5)
         if getattr(pooled, "is_dsv4_quantized_pool_view", False):
             return _dsv4_tiled_index_topk(
@@ -2493,7 +2740,7 @@ class MoE(nn.Module):
 
 # ---------- Block with mHC ----------
 
-def _dsv4_hc_post(x, residual, post, comb):
+def _dsv4_hc_post_ops(x, residual, post, comb):
     """Apply the official DSV4 mHC post-residual contraction.
 
     Official 0731 computes::
@@ -2521,6 +2768,108 @@ def _dsv4_hc_post(x, residual, post, comb):
         )
     y = post.astype(mx.float32)[..., None] * x.astype(mx.float32)[..., None, :]
     return (y + residual_mix).astype(x.dtype)
+
+
+def _make_hc_post_decode_kernel():
+    """Fuse the source-order four-way mHC decode contraction on Metal.
+
+    The ordinary MLX expression materializes four full hidden-width products
+    and three additions for each of the two mHC residuals in every layer.  A
+    single-token decode therefore builds 86 copies of that graph.  This kernel
+    retains the same FP32 source-axis order and casts only the final result,
+    but emits one output element per Metal thread without intermediates.
+    """
+
+    try:
+        if mx.default_device() != mx.gpu or not mx.metal.is_available():
+            return None
+    except Exception:
+        return None
+
+    source = r"""
+        const uint gid = thread_position_in_grid.x;
+        const uint d = gid % D;
+        const uint residual_row = gid / D;
+        const uint target_hc = residual_row % HC;
+        const uint batch_row = residual_row / HC;
+
+        float residual_mix =
+            static_cast<float>(comb[batch_row * HC * HC + target_hc])
+            * static_cast<float>(residual[batch_row * HC * D + d]);
+        for (uint source_hc = 1; source_hc < HC; ++source_hc) {
+            const float term =
+                static_cast<float>(
+                    comb[batch_row * HC * HC + source_hc * HC + target_hc])
+                * static_cast<float>(
+                    residual[batch_row * HC * D + source_hc * D + d]);
+            residual_mix = residual_mix + term;
+        }
+
+        const float direct =
+            static_cast<float>(post[batch_row * HC + target_hc])
+            * static_cast<float>(x[batch_row * D + d]);
+        y[gid] = static_cast<outT>(direct + residual_mix);
+    """
+    return mx.fast.metal_kernel(
+        name="deepseek_v4_hc_post_decode",
+        input_names=["x", "residual", "post", "comb"],
+        output_names=["y"],
+        source=source,
+    )
+
+
+_hc_post_decode_kernel = _make_hc_post_decode_kernel()
+
+
+def _dsv4_hc_post(x, residual, post, comb):
+    """Dispatch the exact fused decode contraction with a pure-MLX fallback."""
+
+    try:
+        use_metal = mx.default_device() == mx.gpu and mx.metal.is_available()
+    except Exception:
+        use_metal = False
+    hc_mult = int(comb.shape[-1])
+    hidden_size = int(x.shape[-1])
+    if (
+        _hc_post_decode_kernel is None
+        or not use_metal
+        or len(x.shape) < 3
+        or int(x.shape[-2]) != 1
+        or hc_mult != int(comb.shape[-2])
+        or int(residual.shape[-2]) != hc_mult
+        or int(x.size) == 0
+    ):
+        return _dsv4_hc_post_ops(x, residual, post, comb)
+
+    x_contiguous = mx.contiguous(x)
+    residual_contiguous = mx.contiguous(residual)
+    post_contiguous = mx.contiguous(post)
+    comb_contiguous = mx.contiguous(comb)
+    output_shape = (*x.shape[:-1], hc_mult, hidden_size)
+    return _hc_post_decode_kernel(
+        inputs=[
+            x_contiguous,
+            residual_contiguous,
+            post_contiguous,
+            comb_contiguous,
+        ],
+        template=[
+            ("HC", hc_mult),
+            ("D", hidden_size),
+            ("outT", x_contiguous.dtype),
+        ],
+        grid=(int(x_contiguous.size) * hc_mult, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[output_shape],
+        output_dtypes=[x_contiguous.dtype],
+    )[0]
+
+
+def _dsv4_norm_preserve_activation_dtype(norm, x):
+    """Apply a folded FP32 norm without promoting the activation stream."""
+
+    activation_dtype = x.dtype
+    return norm(x).astype(activation_dtype)
 
 
 class DeepseekV4DecoderLayer(nn.Module):
@@ -2566,7 +2915,17 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         residual = x
         x, post, comb = self._hc_pre(x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
-        x = self.post_attention_layernorm(x)
+        # Folded-AWQ bundles keep ``ffn_norm.weight`` in FP32 so the inverse
+        # per-channel scale is not rounded in storage.  MLX RMSNorm promotes
+        # its result to the weight dtype, which would otherwise make every
+        # routed expert qmm (and the rest of the network) run in FP32.  The
+        # DSV4 activation stream is FP16/BF16: retain the FP32 norm parameter
+        # and computation, then restore the incoming activation dtype before
+        # the MoE projections.
+        x = _dsv4_norm_preserve_activation_dtype(
+            self.post_attention_layernorm,
+            x,
+        )
         x = self.mlp(x, input_ids=input_ids)
         x = self._hc_post(x, residual, post, comb)
         return x

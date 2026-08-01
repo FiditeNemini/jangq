@@ -99,6 +99,31 @@ def test_short_pool_stays_bf16_without_quantize_or_dequantize():
     assert _cos(raw, materialized) >= 0.9999
 
 
+def test_short_pool_attention_path_returns_hot_bf16_array_until_promotion(
+    monkeypatch,
+):
+    """The q8 cache must not select tiled attention before q8 exists."""
+    monkeypatch.setattr(pool_quant_cache, "_POOL_BF16_MAX_BYTES", 1024)
+    cache = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+
+    hot = cache.update_pool_view(
+        mx.ones((1, 15, 32), dtype=mx.bfloat16),
+        "compressor_state",
+    )
+    assert isinstance(hot, mx.array)
+    assert not getattr(hot, "is_dsv4_quantized_pool_view", False)
+    assert cache.compressor_state._pooled_bf16 is hot
+    assert cache.compressor_state._pooled_q_segments == []
+
+    promoted = cache.update_pool_view(
+        mx.ones((1, 2, 32), dtype=mx.bfloat16),
+        "compressor_state",
+    )
+    assert getattr(promoted, "is_dsv4_quantized_pool_view", False)
+    assert cache.compressor_state._pooled_bf16 is None
+    assert cache.compressor_state._pooled_q_segments
+
+
 def test_adaptive_threshold_is_bytes_not_rows():
     """Narrow index pools remain hot longer than wide compressor pools."""
     narrow = mx.random.normal((1, 4096, 128), dtype=mx.bfloat16)

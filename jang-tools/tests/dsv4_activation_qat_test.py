@@ -19,6 +19,8 @@ def _run_qat_contract_on_cpu():
 
 
 def _np(value):
+    if value.dtype == mx.bfloat16:
+        value = value.astype(mx.float32)
     return np.asarray(value)
 
 
@@ -141,21 +143,19 @@ def test_dsv4_qat_is_wired_after_rope_and_before_cache_or_scoring():
 
     compressor_source = inspect.getsource(Compressor.__call__)
     pooled_rope = compressor_source.index("new_pooled = _apply_partial_rope")
-    indexer_hadamard = compressor_source.index("hadamard_rotate_activation")
-    indexer_fp4 = compressor_source.index("fp4_act_quant_sim")
+    indexer_qat = compressor_source.index("_indexer_activation_roundtrip")
     main_fp8 = compressor_source.index("_fp8_qat_non_rope")
     cache_pool_update = compressor_source.index("cache.update_pool_view")
-    assert "fp4_act_quant_sim(\n                    hadamard_rotate_activation(new_pooled)" in compressor_source
-    assert pooled_rope < indexer_fp4 < indexer_hadamard < cache_pool_update
+    assert "_indexer_activation_roundtrip(new_pooled)" in compressor_source
+    assert pooled_rope < indexer_qat < cache_pool_update
     assert pooled_rope < main_fp8 < cache_pool_update
 
     indexer_source = inspect.getsource(Indexer.select)
     q_rope = indexer_source.index("q = _apply_partial_rope")
-    q_hadamard = indexer_source.index("hadamard_rotate_activation")
-    q_fp4 = indexer_source.index("fp4_act_quant_sim")
+    q_qat = indexer_source.index("_indexer_activation_roundtrip")
     scoring = indexer_source.index("scores = q.astype")
-    assert "fp4_act_quant_sim(hadamard_rotate_activation(q), 32)" in indexer_source
-    assert q_rope < q_fp4 < q_hadamard < scoring
+    assert "_indexer_activation_roundtrip(q)" in indexer_source
+    assert q_rope < q_qat < scoring
 
     cfg = SimpleNamespace(
         hidden_size=16,
@@ -168,6 +168,135 @@ def test_dsv4_qat_is_wired_after_rope_and_before_cache_or_scoring():
     )
     indexer = Indexer(cfg, compress_ratio=4)
     assert indexer.compressor.rotate is True
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_dsv4_fused_e4m3_kv_qat_matches_pure_ops_and_preserves_rope(dtype):
+    import jang_tools.dsv4.mlx_model as model
+
+    if not mx.metal.is_available():
+        pytest.skip("requires Metal")
+    mx.set_default_device(mx.gpu)
+    kernel = model._make_e4m3_kv_activation_roundtrip_kernel()
+    assert kernel is not None
+
+    values = np.linspace(-511.0, 511.0, num=2 * 3 * 512, dtype=np.float32)
+    values = values.reshape(2, 3, 512)
+    x = mx.array(values).astype(dtype)
+    expected = model._fp8_qat_non_rope_ops(x, rope_dims=64)
+    contiguous = mx.contiguous(x)
+    actual = kernel(
+        inputs=[contiguous],
+        template=[
+            ("N", 512),
+            ("NBQ", 7),
+            ("NBT", 8),
+            ("outT", dtype),
+        ],
+        grid=(int(x.size), 1, 1),
+        threadgroup=(64, 1, 1),
+        output_shapes=[x.shape],
+        output_dtypes=[dtype],
+    )[0]
+    mx.eval(actual, expected)
+
+    np.testing.assert_array_equal(_np(actual), _np(expected))
+    np.testing.assert_array_equal(_np(actual[..., -64:]), _np(x[..., -64:]))
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_dsv4_fused_indexer_qat_matches_pure_ops(dtype):
+    import jang_tools.dsv4.mlx_model as model
+
+    if not mx.metal.is_available():
+        pytest.skip("requires Metal")
+    mx.set_default_device(mx.gpu)
+    kernel = model._make_indexer_activation_roundtrip_kernel()
+    assert kernel is not None
+
+    values = np.linspace(-9.0, 9.0, num=2 * 3 * 128, dtype=np.float32)
+    x = mx.array(values.reshape(2, 3, 128)).astype(dtype)
+    expected = model._indexer_activation_roundtrip_ops(x)
+    contiguous = mx.contiguous(x)
+    actual = kernel(
+        inputs=[contiguous],
+        template=[("outT", dtype)],
+        grid=(int(x.size), 1, 1),
+        threadgroup=(128, 1, 1),
+        output_shapes=[x.shape],
+        output_dtypes=[dtype],
+    )[0]
+    mx.eval(actual, expected)
+
+    np.testing.assert_array_equal(_np(actual), _np(expected))
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_dsv4_fused_hc_decode_matches_source_order_ops(dtype, monkeypatch):
+    import jang_tools.dsv4.mlx_model as model
+
+    if not mx.metal.is_available():
+        pytest.skip("requires Metal")
+    mx.set_default_device(mx.gpu)
+    kernel = model._make_hc_post_decode_kernel()
+    assert kernel is not None
+    monkeypatch.setattr(model, "_hc_post_decode_kernel", kernel)
+
+    rng = np.random.default_rng(731)
+    x = mx.array(rng.normal(size=(1, 1, 64)).astype(np.float32)).astype(dtype)
+    residual = mx.array(
+        rng.normal(size=(1, 1, 4, 64)).astype(np.float32)
+    ).astype(dtype)
+    post = mx.array(rng.normal(size=(1, 1, 4)).astype(np.float32))
+    comb = mx.array(rng.normal(size=(1, 1, 4, 4)).astype(np.float32))
+
+    expected = model._dsv4_hc_post_ops(x, residual, post, comb)
+    actual = model._dsv4_hc_post(x, residual, post, comb)
+    mx.eval(actual, expected)
+
+    assert actual.dtype == dtype
+    np.testing.assert_array_equal(_np(actual), _np(expected))
+
+
+def test_dsv4_hc_prefill_retains_source_order_fallback(monkeypatch):
+    import jang_tools.dsv4.mlx_model as model
+
+    class DecodeOnlyKernel:
+        def __call__(self, *args, **kwargs):
+            raise AssertionError("multi-token prefill must not use decode kernel")
+
+    monkeypatch.setattr(model, "_hc_post_decode_kernel", DecodeOnlyKernel())
+    x = mx.ones((1, 3, 16), dtype=mx.float16)
+    residual = mx.ones((1, 3, 4, 16), dtype=mx.float16)
+    post = mx.ones((1, 3, 4), dtype=mx.float32)
+    comb = mx.ones((1, 3, 4, 4), dtype=mx.float32)
+
+    expected = model._dsv4_hc_post_ops(x, residual, post, comb)
+    actual = model._dsv4_hc_post(x, residual, post, comb)
+    mx.eval(actual, expected)
+
+    np.testing.assert_array_equal(_np(actual), _np(expected))
+
+
+def test_dsv4_folded_fp32_norm_does_not_promote_activation_stream():
+    import mlx.nn as nn
+    from jang_tools.dsv4.mlx_model import (
+        _dsv4_norm_preserve_activation_dtype,
+    )
+
+    norm = nn.RMSNorm(16, eps=1e-6)
+    norm.weight = mx.ones((16,), dtype=mx.float32)
+    activation = mx.arange(16, dtype=mx.float32).reshape(1, 1, 16).astype(
+        mx.float16
+    )
+
+    promoted = norm(activation)
+    actual = _dsv4_norm_preserve_activation_dtype(norm, activation)
+    mx.eval(promoted, actual)
+
+    assert promoted.dtype == mx.float32
+    assert actual.dtype == mx.float16
+    np.testing.assert_array_equal(_np(actual), _np(promoted.astype(mx.float16)))
 
 
 def test_dsv4_compressor_stages_q8_projection_and_pooling_in_fp32():

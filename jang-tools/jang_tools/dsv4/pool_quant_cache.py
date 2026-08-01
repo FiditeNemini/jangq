@@ -845,7 +845,18 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
         state.append_pool_delta(delta)
 
     def update_pool_view(self, new_pooled, state_key):
-        """Append new rows and return the bounded attention-facing pool view."""
+        """Append rows and return the active attention representation.
+
+        Pools below ``_POOL_BF16_MAX_BYTES`` are deliberately retained as a
+        normal BF16 array.  Return that array directly so short prompts use
+        the model's single-token SDPA fast path.  Wrapping hot BF16 storage in
+        ``_QuantizedPoolView`` incorrectly selected the tiled q8 attention
+        path (and its per-layer materialization barrier) even though no pool
+        row had been quantized.
+
+        Once the state promotes to segmented q8 storage, return the bounded
+        view so attention never materializes the complete historical pool.
+        """
         state = self._branch_state(state_key)
         if new_pooled.shape[1] > 0:
             if isinstance(state, _StateProxy):
@@ -856,6 +867,8 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
                 state["pooled"] = pool
                 return pool
         if isinstance(state, _StateProxy):
+            if state._pooled_bf16 is not None:
+                return state._pooled_bf16
             return state.pool_view(empty_like=new_pooled)
         pool = state["pooled"]
         if pool is None:
