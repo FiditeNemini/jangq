@@ -292,48 +292,158 @@ def hc_split_sinkhorn(
 # ---------- Attention (simplified: full scaled_dot_product) ----------
 
 
-def act_quant_sim(x: mx.array, block_size: int = 128) -> mx.array:
-    """FP8 e4m3 fake-quant on activations (block_size=128 per last dim).
+def _activation_blocks(x: mx.array, block_size: int):
+    """Pad only a non-production tail and expose last-axis QAT blocks.
 
-    Reference (`inference/kernel.py act_quant_kernel`) applies this before
-    every Linear with FP4/FP8 weights during inference. The model was
-    TRAINED expecting this activation noise — skipping it gives weights
-    cleaner-than-trained inputs, which paradoxically hurts accuracy.
-
-    e4m3fn has fp8_max=448. Per-block scale = amax/fp8_max rounded to
-    power-of-2 (fast_round_scale). Quantize → 8-bit e4m3 levels → dequant.
-
-    Enable with env DSV4_ACT_QUANT=1; default OFF because it adds overhead
-    and most runtime queries work without it. For arithmetic-heavy
-    reasoning, turn ON.
+    The official 0731 dimensions are exact multiples of 64 (FP8) or 32
+    (FP4).  Padding keeps small architecture tests useful without changing
+    any value or scale for those production shapes.
     """
-    import os as _os
-    if _os.environ.get("DSV4_ACT_QUANT", "0") != "1":
-        return x
-    orig_dtype = x.dtype
-    shape = x.shape
-    if shape[-1] % block_size != 0:
-        return x
+
+    if block_size <= 0:
+        raise ValueError("activation QAT block_size must be positive")
+    shape = tuple(x.shape)
+    width = int(shape[-1])
+    if width == 0:
+        return x.astype(mx.float32), shape, width
+    padded_width = ((width + block_size - 1) // block_size) * block_size
     x32 = x.astype(mx.float32)
-    reshaped = x32.reshape(*shape[:-1], -1, block_size)
-    fp8_max = 448.0
-    amax = mx.max(mx.abs(reshaped), axis=-1, keepdims=True)
-    # fast_round_scale: 2^ceil(log2(amax/fp8_max)), zero-safe
-    raw_scale = amax / fp8_max
-    # Handle zero blocks — leave them as 1.0 (no-op)
-    safe_scale = mx.where(raw_scale > 1e-30, raw_scale, mx.ones_like(raw_scale))
-    log2s = mx.ceil(mx.log2(safe_scale))
-    scale = mx.power(mx.array(2.0, dtype=mx.float32), log2s)
-    # e4m3fn has 3 mantissa bits → ~8 equal-ratio levels per binade.
-    # Approximation: uniform 8-bit levels within ±fp8_max. Real e4m3 is
-    # log-spaced per binade; this simplification is close enough for
-    # the fake-quant effect the model was trained with.
-    normalized = reshaped / scale
-    # Round-trip through 8-bit signed range [-127, 127] scaled to [-448, 448]
-    q = mx.round(normalized * (127.0 / fp8_max)) * (fp8_max / 127.0)
-    q = mx.clip(q, -fp8_max, fp8_max)
-    result = (q * scale).reshape(shape)
-    return result.astype(orig_dtype)
+    if padded_width != width:
+        pad_width = [(0, 0)] * x.ndim
+        pad_width[-1] = (0, padded_width - width)
+        x32 = mx.pad(x32, pad_width)
+    return x32.reshape(*shape[:-1], -1, block_size), shape, width
+
+
+def _round_e4m3fn(x: mx.array) -> mx.array:
+    """Round FP32 values to the finite-only E4M3 grid, returning FP32.
+
+    MLX 0.31 has no float8 dtype.  This implements the exact E4M3FN value
+    lattice used by ``torch.float8_e4m3fn``: 2^-9 subnormal spacing, three
+    mantissa bits per normal binade, and a maximum finite value of 448.
+    ``mx.round`` is round-to-nearest-even, matching the reference cast.
+    """
+
+    clipped = mx.clip(x, -448.0, 448.0)
+    magnitude = mx.abs(clipped)
+    min_normal = 2.0**-6
+    subnormal_step = 2.0**-9
+    safe_magnitude = mx.maximum(magnitude, min_normal)
+    normal_step = mx.power(
+        mx.array(2.0, dtype=mx.float32),
+        mx.floor(mx.log2(safe_magnitude)) - 3.0,
+    )
+    step = mx.where(magnitude < min_normal, subnormal_step, normal_step)
+    rounded = mx.minimum(mx.round(magnitude / step) * step, 448.0)
+    rounded = mx.where(clipped < 0, -rounded, rounded)
+    return mx.where(mx.isnan(x), x, rounded)
+
+
+def act_quant_sim(x: mx.array, block_size: int = 64) -> mx.array:
+    """Official 0731 FP8-E4M3 activation QAT round-trip.
+
+    This mirrors ``inference/kernel.py::act_quant(..., inplace=True)`` for
+    the model's UE8M0 configuration: blockwise absolute maximum, power-of-two
+    scale, true E4M3FN rounding, dequantization, then restoration to the input
+    dtype.  It is source-native model math, not an optional runtime heuristic.
+    """
+
+    blocks, shape, width = _activation_blocks(x, block_size)
+    if width == 0:
+        return x
+    amax = mx.maximum(
+        mx.max(mx.abs(blocks), axis=-1, keepdims=True),
+        1e-4,
+    )
+    scale = mx.power(
+        mx.array(2.0, dtype=mx.float32),
+        mx.ceil(mx.log2(amax / 448.0)),
+    )
+    result = (_round_e4m3fn(blocks / scale) * scale).reshape(
+        *shape[:-1], -1
+    )[..., :width]
+    return result.astype(x.dtype)
+
+
+def _round_e2m1fn(x: mx.array) -> mx.array:
+    """Round FP32 values to the finite E2M1 grid, returning FP32."""
+
+    clipped = mx.clip(x, -6.0, 6.0)
+    magnitude = mx.abs(clipped)
+    # Positive E2M1 finite values are {0,.5,1,1.5,2,3,4,6}.  Boundary
+    # comparisons encode round-to-nearest-even at the unequal-width ties.
+    rounded = mx.where(
+        magnitude <= 0.25,
+        0.0,
+        mx.where(
+            magnitude < 0.75,
+            0.5,
+            mx.where(
+                magnitude <= 1.25,
+                1.0,
+                mx.where(
+                    magnitude < 1.75,
+                    1.5,
+                    mx.where(
+                        magnitude <= 2.5,
+                        2.0,
+                        mx.where(
+                            magnitude < 3.5,
+                            3.0,
+                            mx.where(magnitude <= 5.0, 4.0, 6.0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    rounded = mx.where(clipped < 0, -rounded, rounded)
+    return mx.where(mx.isnan(x), x, rounded)
+
+
+def fp4_act_quant_sim(x: mx.array, block_size: int = 32) -> mx.array:
+    """Official 0731 FP4-E2M1 activation QAT round-trip."""
+
+    blocks, shape, width = _activation_blocks(x, block_size)
+    if width == 0:
+        return x
+    amax = mx.maximum(
+        mx.max(mx.abs(blocks), axis=-1, keepdims=True),
+        6.0 * (2.0**-126),
+    )
+    scale = mx.power(
+        mx.array(2.0, dtype=mx.float32),
+        mx.ceil(mx.log2(amax / 6.0)),
+    )
+    result = (_round_e2m1fn(blocks / scale) * scale).reshape(
+        *shape[:-1], -1
+    )[..., :width]
+    return result.astype(x.dtype)
+
+
+def hadamard_rotate_activation(x: mx.array) -> mx.array:
+    """Normalized Sylvester Hadamard transform used by the 0731 indexer."""
+
+    width = int(x.shape[-1])
+    if width <= 0 or width & (width - 1):
+        raise ValueError(
+            "DeepSeek-V4 indexer QAT requires a positive power-of-two head dim"
+        )
+    # MLX defaults to the same orthonormal 1/sqrt(width) scale as the official
+    # 0731 path, while dispatching to its optimized native implementation.
+    return mx.hadamard_transform(x).astype(x.dtype)
+
+
+def _fp8_qat_non_rope(x: mx.array, rope_dims: int) -> mx.array:
+    """Apply block-64 E4M3 QAT while preserving positional dimensions."""
+
+    split = int(x.shape[-1]) - int(rope_dims)
+    if split <= 0:
+        return x
+    return mx.concatenate(
+        [act_quant_sim(x[..., :split], 64), x[..., split:]],
+        axis=-1,
+    )
 
 
 class DeepseekV4RoPE(nn.Module):
@@ -1250,11 +1360,12 @@ class DeepseekV4Cache:
 
 
 class Compressor(nn.Module):
-    def __init__(self, config, compress_ratio, head_dim):
+    def __init__(self, config, compress_ratio, head_dim, rotate=False):
         super().__init__()
         self.compress_ratio = compress_ratio
         self.head_dim = head_dim
         self.rope_head_dim = config.qk_rope_head_dim
+        self.rotate = bool(rotate)
         self.overlap = compress_ratio == 4
         self.out_dim = head_dim * (2 if self.overlap else 1)
         self.wkv = nn.Linear(config.hidden_size, self.out_dim, bias=False)
@@ -1271,8 +1382,15 @@ class Compressor(nn.Module):
 
     def __call__(self, x, rope, cache, start_pos, state_key="compressor_state"):
         B, _, _ = x.shape
-        kv = self.wkv(x)
-        gate = self.wgate(x)
+        dtype = x.dtype
+        # Official 0731 Compressor.forward promotes the residual stream before
+        # both projections and keeps projection, softmax, and pooling math in
+        # FP32.  The affine JANG bundle stores F16 q8 sidecars, so passing F16
+        # directly to MLX QuantizedLinear would otherwise keep this whole path
+        # in F16.  Restore the source precision boundary explicitly.
+        x_fp32 = x.astype(mx.float32)
+        kv = self.wkv(x_fp32)
+        gate = self.wgate(x_fp32)
         if cache is not None and self.overlap:
             pos = start_pos + mx.arange(gate.shape[1])
             ape = mx.take(self.ape.astype(gate.dtype), pos % self.compress_ratio, axis=0)
@@ -1306,12 +1424,22 @@ class Compressor(nn.Module):
                     gate = self._overlap_transform(gate, -float("inf"))
             weights = mx.softmax(gate.astype(mx.float32), axis=2, precise=True).astype(kv.dtype)
             new_pooled = (kv * weights).sum(axis=2)
-            new_pooled = self.norm(new_pooled.astype(x.dtype))
+            new_pooled = self.norm(new_pooled.astype(dtype))
             positions = (
                 mx.arange(new_pooled.shape[1], dtype=mx.float32) * self.compress_ratio
                 + pool_base
             )
             new_pooled = _apply_partial_rope(new_pooled[:, None], rope, positions=positions).squeeze(1)
+            if self.rotate:
+                new_pooled = fp4_act_quant_sim(
+                    hadamard_rotate_activation(new_pooled),
+                    32,
+                )
+            else:
+                new_pooled = _fp8_qat_non_rope(
+                    new_pooled,
+                    self.rope_head_dim,
+                )
         if cache is not None:
             if hasattr(cache, "update_pool_view"):
                 return cache.update_pool_view(new_pooled, state_key)
@@ -1325,9 +1453,15 @@ class Indexer(nn.Module):
         self.n_heads = config.index_n_heads
         self.head_dim = config.index_head_dim
         self.index_topk = config.index_topk
+        self.compress_ratio = int(compress_ratio)
         self.wq_b = nn.Linear(config.q_lora_rank, self.n_heads * self.head_dim, bias=False)
         self.weights_proj = nn.Linear(config.hidden_size, self.n_heads, bias=False)
-        self.compressor = Compressor(config, compress_ratio, self.head_dim)
+        self.compressor = Compressor(
+            config,
+            compress_ratio,
+            self.head_dim,
+            rotate=True,
+        )
         self.scale = self.head_dim ** -0.5
 
     def update_pool(self, x, rope, cache, start_pos):
@@ -1356,6 +1490,7 @@ class Indexer(nn.Module):
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
         q = q.transpose(0, 2, 1, 3)
         q = _apply_partial_rope(q, position_rope, offset)
+        q = fp4_act_quant_sim(hadamard_rotate_activation(q), 32)
         weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads ** -0.5)
         if getattr(pooled, "is_dsv4_quantized_pool_view", False):
             return _dsv4_tiled_index_topk(
@@ -1364,12 +1499,18 @@ class Indexer(nn.Module):
                 pooled,
                 scale=self.scale,
                 top_k=self.index_topk,
+                offset=offset,
+                ratio=self.compress_ratio,
             )
         scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(mx.float32)
         scores = mx.maximum(scores, 0) * self.scale
         scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
-        k = min(self.index_topk, pooled.shape[1])
-        return mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+        return _dsv4_causal_index_topk(
+            scores,
+            top_k=self.index_topk,
+            offset=offset,
+            ratio=self.compress_ratio,
+        )
 
     def __call__(self, x, q_residual, rope, position_rope, cache, start_pos):
         """Compatibility path that advances state and then selects rows."""
@@ -1484,6 +1625,61 @@ def _dsv4_compressed_visibility(
     )
 
 
+def _dsv4_index_visibility(
+    batch: int,
+    seq_len: int,
+    offset: int,
+    row_start: int,
+    row_count: int,
+    ratio: int,
+) -> mx.array:
+    """Return rows eligible for indexer top-k before ranking.
+
+    A compressed row becomes causal only after all ``ratio`` source tokens in
+    that row have been observed. ``offset`` is the absolute position of the
+    first query in the current call, so the rule is identical for one-shot
+    prefill, nonzero-offset chunked prefill, and decode.
+    """
+    if row_count <= 0:
+        return mx.zeros((batch, seq_len, 0), dtype=mx.bool_)
+    if ratio <= 0:
+        raise ValueError("DSV4 indexer compression ratio must be positive")
+    q_pos = int(offset) + mx.arange(seq_len)
+    row_idx = int(row_start) + mx.arange(row_count)
+    visible = ((row_idx[None, :] + 1) * int(ratio)) <= (
+        q_pos[:, None] + 1
+    )
+    return mx.broadcast_to(visible[None], (batch, seq_len, row_count))
+
+
+def _dsv4_causal_index_topk(
+    scores: mx.array,
+    *,
+    top_k: int,
+    offset: int,
+    ratio: int,
+) -> mx.array:
+    """Select top-k only after excluding causally unavailable pool rows."""
+    batch, seq_len, rows = map(int, scores.shape)
+    if rows <= 0:
+        return mx.zeros((batch, seq_len, 0), dtype=mx.int32)
+    visible = _dsv4_index_visibility(
+        batch,
+        seq_len,
+        int(offset),
+        0,
+        rows,
+        int(ratio),
+    )
+    scores = mx.where(
+        visible,
+        scores,
+        mx.full(scores.shape, -float("inf"), dtype=scores.dtype),
+    )
+    k = min(max(1, int(top_k)), rows)
+    return mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+
+
 _DSV4_POOL_TILE_TARGET_BYTES = 128 * 1024 * 1024
 _DSV4_POOL_TILE_MAX_ROWS = 64 * 1024
 _DSV4_POOL_TILE_MIN_ROWS = 64
@@ -1510,6 +1706,8 @@ def _dsv4_tiled_index_topk(
     *,
     scale: float,
     top_k: int,
+    offset: int,
+    ratio: int,
 ) -> mx.array:
     """Exact global top-k over a segmented native-q8 indexer pool.
 
@@ -1528,6 +1726,19 @@ def _dsv4_tiled_index_topk(
         scores = q32 @ tile32[:, None].swapaxes(-1, -2)
         scores = mx.maximum(scores, 0) * float(scale)
         scores = (scores * weights).sum(axis=1)
+        visible = _dsv4_index_visibility(
+            int(scores.shape[0]),
+            int(scores.shape[1]),
+            int(offset),
+            int(start),
+            int(tile.shape[1]),
+            int(ratio),
+        )
+        scores = mx.where(
+            visible,
+            scores,
+            mx.full(scores.shape, -float("inf"), dtype=scores.dtype),
+        )
         indices = mx.broadcast_to(
             (int(start) + mx.arange(int(tile.shape[1]), dtype=mx.int32))[None, None],
             scores.shape,
@@ -1893,6 +2104,7 @@ class DeepseekV4Attention(nn.Module):
 
         q = _apply_partial_rope(q, self.rope, offset)
         kv = _apply_partial_rope(kv, self.rope, offset)
+        kv = _fp8_qat_non_rope(kv, self.rope_head_dim)
 
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, kv)
@@ -2072,6 +2284,13 @@ class DeepseekV4Attention(nn.Module):
 # ---------- MoE ----------
 
 @mx.compile
+def _sqrt_softplus_router_scores(gates: mx.array):
+    """Stable official DSV4 ``sqrt(softplus(logit))`` router scores."""
+
+    return mx.sqrt(nn.softplus(gates))
+
+
+@mx.compile
 def sqrtsoftplus_select(
     gates: mx.array,
     bias: mx.array,
@@ -2084,7 +2303,7 @@ def sqrtsoftplus_select(
     `gates` is expected to already be fp32 (caller must cast). Returns
     inds as int32 (required by mlx's gather_qmm path).
     """
-    scores = mx.sqrt(mx.log1p(mx.exp(gates)))
+    scores = _sqrt_softplus_router_scores(gates)
     orig_scores = scores
     scores = scores + bias
     k = top_k
@@ -2119,7 +2338,7 @@ class Gate(nn.Module):
         if self.hash:
             # Hash: deterministic per-token lookup (ignoring gates beyond
             # scoring for weights). Use original scores as weights.
-            scores = mx.sqrt(mx.log1p(mx.exp(gates)))
+            scores = _sqrt_softplus_router_scores(gates)
             assert input_ids is not None, "hash-routed layer requires input_ids"
             inds = self.tid2eid[input_ids].astype(mx.int32)
             weights = mx.take_along_axis(scores, inds, axis=-1)
@@ -2135,21 +2354,28 @@ class Gate(nn.Module):
 
 
 @mx.compile
-def _dsv4_swiglu(gate, up, swiglu_limit: float):
+def _dsv4_swiglu_fp32(gate, up, swiglu_limit: float):
     """DSV4 SwiGLU with gate/up clamping to ±swiglu_limit (gate is clamped
-    to max only; up is clamped symmetrically). Without the clamp, deep MoE
-    stacks diverge numerically.
+    to max only; up is clamped symmetrically), retaining the official FP32
+    activation domain for optional router weighting before the down projection.
 
-    IMPORTANT: torch reference does `gate.float() * up.float()` — silu and
-    multiply in fp32. We match that here to avoid per-layer precision drift.
+    Official 0731 ``Expert.forward`` casts gate/up to FP32, computes the
+    limited SwiGLU, applies the FP32 route weight, and only then casts back to
+    the hidden dtype before ``w2``.
     """
-    out_dtype = gate.dtype
     gate = gate.astype(mx.float32)
     up = up.astype(mx.float32)
     if swiglu_limit > 0:
         up = mx.clip(up, a_min=-swiglu_limit, a_max=swiglu_limit)
         gate = mx.clip(gate, a_min=None, a_max=swiglu_limit)
-    return (nn.silu(gate) * up).astype(out_dtype)
+    return nn.silu(gate) * up
+
+
+@mx.compile
+def _dsv4_swiglu(gate, up, swiglu_limit: float):
+    """Unweighted DSV4 SwiGLU, restored to the projection input dtype."""
+
+    return _dsv4_swiglu_fp32(gate, up, swiglu_limit).astype(gate.dtype)
 
 
 class _DSV4SwiGLU(nn.Module):
@@ -2177,6 +2403,14 @@ class MLP(nn.Module):
         return self.down_proj(_dsv4_swiglu(self.gate_proj(x), self.up_proj(x), self.swiglu_limit))
 
 
+def _dsv4_accumulate_moe(routed, shared, output_shape, output_dtype):
+    """Accumulate routed and shared expert outputs exactly as official 0731."""
+
+    combined = routed.astype(mx.float32).sum(axis=-2).reshape(output_shape)
+    combined = combined + shared.astype(mx.float32)
+    return combined.astype(output_dtype)
+
+
 class MoE(nn.Module):
     def __init__(self, args: ModelArgs, layer_id: int):
         super().__init__()
@@ -2191,18 +2425,70 @@ class MoE(nn.Module):
         )
         self.shared_experts = MLP(args, intermediate_size=args.moe_intermediate_size)
 
+    def _weighted_routed_experts(self, x, inds, scores):
+        """Run selected experts in the official 0731 precision/order.
+
+        MLX's generic ``SwitchGLU`` applies ``down_proj`` before returning the
+        per-route outputs.  DSV4 instead multiplies the FP32 limited-SwiGLU
+        activation by its FP32 route score, casts once to the hidden dtype,
+        and then applies the selected expert's bias-free down projection.
+        This preserves the generic switch layer's expert-sorted execution
+        without changing ``mlx_lm`` globally.
+        """
+
+        switch = self.switch_mlp
+        dtype = x.dtype
+        expanded = mx.expand_dims(x, (-2, -3))
+        do_sort = inds.size >= 64
+        idx = inds
+        route_scores = scores.astype(mx.float32)
+        inv_order = None
+
+        if do_sort:
+            *_, routes_per_token = inds.shape
+            flat_indices = inds.flatten()
+            order = mx.argsort(flat_indices)
+            inv_order = mx.argsort(order)
+            expanded = expanded.flatten(0, -3)[order // routes_per_token]
+            idx = flat_indices[order]
+            route_scores = route_scores.flatten()[order]
+
+        if switch.training:
+            idx = mx.stop_gradient(idx)
+        x_up = switch.up_proj(expanded, idx, sorted_indices=do_sort)
+        x_gate = switch.gate_proj(expanded, idx, sorted_indices=do_sort)
+        activated = _dsv4_swiglu_fp32(
+            x_gate,
+            x_up,
+            self.args.swiglu_limit,
+        )
+        activated = (activated * route_scores[..., None, None]).astype(dtype)
+        routed = switch.down_proj(
+            activated,
+            idx,
+            sorted_indices=do_sort,
+        )
+
+        if do_sort:
+            routed = routed[inv_order]
+            routed = mx.unflatten(routed, 0, inds.shape)
+        return routed.squeeze(-2)
+
     def __call__(self, x, input_ids=None):
-        # Match PR #1192 DeepseekV4MoE forward exactly — no fp32 accumulation,
-        # no act_quant_sim (that's for CUDA kernel fake-quant; MLX native
-        # paths don't need it).
+        dtype = x.dtype
         inds, scores = self.gate(x, input_ids=input_ids)
         # Belt-and-suspenders int32 cast — mlx gather_qmm in QuantizedSwitchLinear
         # strictly requires int32; argpartition return dtype varies by mlx version.
         inds = inds.astype(mx.uint32)
-        y = self.switch_mlp(x, inds)
-        y = (y * scores[..., None]).sum(axis=-2).astype(y.dtype).reshape(x.shape)
-        y = y + self.shared_experts(x)
-        return y
+        routed = self._weighted_routed_experts(x, inds, scores)
+        # Official 0731 initializes the MoE accumulator in FP32, adds every
+        # routed expert and the shared expert there, then casts once to x.dtype.
+        return _dsv4_accumulate_moe(
+            routed,
+            self.shared_experts(x),
+            x.shape,
+            dtype,
+        )
 
 
 # ---------- Block with mHC ----------

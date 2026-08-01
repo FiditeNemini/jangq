@@ -188,6 +188,8 @@ def test_pool_quant_tiled_index_topk_matches_full_materialized_q8(monkeypatch):
         view,
         scale=16**-0.5,
         top_k=11,
+        offset=4 * 137,
+        ratio=4,
     )
     materialized = view.materialize()
     scores = q.astype(mx.float32) @ materialized[:, None].swapaxes(-1, -2).astype(
