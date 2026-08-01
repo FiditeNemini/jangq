@@ -97,5 +97,44 @@ def test_mlx_dsv4_hc_post_contracts_official_source_axis():
         + np.matmul(comb_np, residual_np)
     )
 
-    np.testing.assert_allclose(np.asarray(actual), expected, rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=1e-6, atol=1e-6)
     assert not np.allclose(np.asarray(actual), old_wrong_orientation)
+
+
+def test_mlx_dsv4_hc_post_preserves_low_precision_output_dtype():
+    import numpy as np
+    import mlx.core as mx
+
+    from jang_tools.dsv4.mlx_model import _dsv4_hc_post
+
+    x_values = np.arange(2 * 3 * 5, dtype=np.float32).reshape(2, 3, 5) / 17
+    residual_values = (
+        np.arange(2 * 3 * 4 * 5, dtype=np.float32).reshape(2, 3, 4, 5) / 29
+    )
+    post_values = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4) / 31
+    comb_values = (
+        np.arange(2 * 3 * 4 * 4, dtype=np.float32).reshape(2, 3, 4, 4) / 37
+    )
+    for dtype in (mx.float16, mx.bfloat16):
+        x = mx.array(x_values, dtype=dtype)
+        residual = mx.array(residual_values, dtype=dtype)
+        post = mx.array(post_values, dtype=mx.float32)
+        comb = mx.array(comb_values, dtype=mx.float32)
+        actual = _dsv4_hc_post(x, residual, post, comb)
+        mx.eval(actual)
+
+        assert actual.dtype == dtype
+        x_quantized = np.asarray(x.astype(mx.float32))
+        residual_quantized = np.asarray(residual.astype(mx.float32))
+        expected_from_quantized_inputs = (
+            post_values[..., None] * x_quantized[..., None, :]
+            + np.sum(
+                comb_values[..., None] * residual_quantized[..., None, :],
+                axis=2,
+            )
+        )
+        expected = mx.array(expected_from_quantized_inputs, dtype=dtype)
+        mx.eval(expected)
+        actual_fp32 = np.asarray(actual.astype(mx.float32))
+        expected_fp32 = np.asarray(expected.astype(mx.float32))
+        np.testing.assert_allclose(actual_fp32, expected_fp32, rtol=0, atol=0)

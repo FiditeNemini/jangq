@@ -2503,15 +2503,22 @@ def _dsv4_hc_post(x, residual, post, comb):
     For ``comb[..., i, j]`` and ``residual[..., i, d]`` this produces
     ``out[..., j, d] = sum_i comb[..., i, j] * residual[..., i, d]``.  The
     contraction is therefore ``comb.T @ residual``, not ``comb @ residual``.
-    Keep the source-shaped elementwise form so the contracted axis and
-    accumulation order remain explicit.
+    Reduce the source ``i`` axis explicitly. MLX's fast batched matmul path is
+    not numerically neutral even for FP32 inputs, while the source-order
+    four-term reduction is bit-identical to the official-shaped broadcast and
+    avoids its ``[B, S, hc, hc, D]`` temporary.
     """
 
-    residual_mix = mx.sum(
-        comb.astype(mx.float32)[..., None]
-        * residual.astype(mx.float32)[..., None, :],
-        axis=2,
+    comb_fp32 = comb.astype(mx.float32)
+    residual_fp32 = residual.astype(mx.float32)
+    residual_mix = (
+        comb_fp32[..., 0, :, None] * residual_fp32[..., 0, None, :]
     )
+    for source_index in range(1, int(comb.shape[-2])):
+        residual_mix = residual_mix + (
+            comb_fp32[..., source_index, :, None]
+            * residual_fp32[..., source_index, None, :]
+        )
     y = post.astype(mx.float32)[..., None] * x.astype(mx.float32)[..., None, :]
     return (y + residual_mix).astype(x.dtype)
 
