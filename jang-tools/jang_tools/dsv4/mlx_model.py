@@ -2493,6 +2493,29 @@ class MoE(nn.Module):
 
 # ---------- Block with mHC ----------
 
+def _dsv4_hc_post(x, residual, post, comb):
+    """Apply the official DSV4 mHC post-residual contraction.
+
+    Official 0731 computes::
+
+        sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2)
+
+    For ``comb[..., i, j]`` and ``residual[..., i, d]`` this produces
+    ``out[..., j, d] = sum_i comb[..., i, j] * residual[..., i, d]``.  The
+    contraction is therefore ``comb.T @ residual``, not ``comb @ residual``.
+    Keep the source-shaped elementwise form so the contracted axis and
+    accumulation order remain explicit.
+    """
+
+    residual_mix = mx.sum(
+        comb.astype(mx.float32)[..., None]
+        * residual.astype(mx.float32)[..., None, :],
+        axis=2,
+    )
+    y = post.astype(mx.float32)[..., None] * x.astype(mx.float32)[..., None, :]
+    return (y + residual_mix).astype(x.dtype)
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(self, args: ModelArgs, layer_id: int):
         super().__init__()
@@ -2525,18 +2548,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         return y.astype(x.dtype), post, comb
 
     def _hc_post(self, x, residual, post, comb):
-        # x: (B, L, D); residual: (B, L, hc_mult, D); return (B, L, hc_mult, D)
-        # Reference: y[b,s,i,d] = post[b,s,i] * x[b,s,d]
-        #                       + sum_j comb[b,s,i,j] * residual[b,s,j,d]
-        # Contracts comb's LAST axis with residual's hc axis → equivalent to
-        # `comb @ residual`. mlx_lm PR #1192 latest (commit ef8c95d6, 2026-04-24)
-        # uses `mx.matmul(comb, residual)` directly — mlx matmul is faster than
-        # einsum for this batched contraction because einsum adds string-parsing
-        # + intermediate graph overhead.
-        y = post[..., None] * x[..., None, :].astype(mx.float32) + mx.matmul(
-            comb.astype(mx.float32), residual.astype(mx.float32)
-        )
-        return y.astype(x.dtype)
+        return _dsv4_hc_post(x, residual, post, comb)
 
     def __call__(self, x, mask=None, cache=None, input_ids=None):
         residual = x
