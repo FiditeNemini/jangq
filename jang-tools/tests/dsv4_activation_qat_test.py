@@ -24,6 +24,110 @@ def _np(value):
     return np.asarray(value)
 
 
+@pytest.fixture
+def _qat_status_guard():
+    import jang_tools.dsv4.mlx_model as model
+
+    previous = dict(model._DSV4_ACTIVATION_QAT_STATUS)
+    try:
+        yield model._DSV4_ACTIVATION_QAT_STATUS
+    finally:
+        model._DSV4_ACTIVATION_QAT_STATUS.clear()
+        model._DSV4_ACTIVATION_QAT_STATUS.update(previous)
+
+
+def _set_qat_state(status, enabled):
+    status.update(
+        requested=enabled,
+        effective=enabled,
+        observed=None,
+        attested=False,
+        e4m3_kv_pool_observed=None,
+        hadamard_fp4_indexer_observed=None,
+    )
+
+
+def test_dsv4_activation_qat_env_is_explicit_opt_in_and_invalid_is_off():
+    from jang_tools.dsv4.mlx_model import _dsv4_activation_qat_requested
+
+    assert _dsv4_activation_qat_requested({}) is False
+    for value in ("1", "true", "TRUE", " yes ", "On"):
+        assert _dsv4_activation_qat_requested(
+            {"DSV4_ACTIVATION_QAT": value}
+        ) is True
+    for value in ("", "0", "false", "no", "off", "enabled", "garbage"):
+        assert _dsv4_activation_qat_requested(
+            {"DSV4_ACTIVATION_QAT": value}
+        ) is False
+
+
+def test_dsv4_activation_qat_off_is_identity_and_attests_both_paths(
+    _qat_status_guard,
+):
+    import jang_tools.dsv4.mlx_model as model
+
+    _set_qat_state(_qat_status_guard, False)
+    kv = mx.arange(128, dtype=mx.float32).reshape(1, 1, 128)
+    indexer = mx.arange(128, dtype=mx.float32).reshape(1, 1, 128)
+
+    assert model._fp8_qat_non_rope(kv, rope_dims=64) is kv
+    assert model._indexer_activation_roundtrip(indexer) is indexer
+    assert _qat_status_guard["attested"] is True
+    assert _qat_status_guard["observed"] is False
+    assert _qat_status_guard["e4m3_kv_pool_observed"] is False
+    assert _qat_status_guard["hadamard_fp4_indexer_observed"] is False
+
+
+def test_dsv4_activation_qat_on_matches_existing_source_native_ops(
+    _qat_status_guard,
+):
+    import jang_tools.dsv4.mlx_model as model
+
+    _set_qat_state(_qat_status_guard, True)
+    kv = mx.linspace(-511.0, 511.0, 256, dtype=mx.float32).reshape(
+        1, 2, 128
+    )
+    indexer = mx.linspace(-9.0, 9.0, 256, dtype=mx.float32).reshape(
+        1, 2, 128
+    )
+
+    actual_kv = model._fp8_qat_non_rope(kv, rope_dims=64)
+    expected_kv = model._fp8_qat_non_rope_ops(kv, rope_dims=64)
+    actual_indexer = model._indexer_activation_roundtrip(indexer)
+    expected_indexer = model._indexer_activation_roundtrip_ops(indexer)
+    mx.eval(actual_kv, expected_kv, actual_indexer, expected_indexer)
+
+    np.testing.assert_array_equal(_np(actual_kv), _np(expected_kv))
+    np.testing.assert_array_equal(_np(actual_indexer), _np(expected_indexer))
+    assert _qat_status_guard["attested"] is True
+    assert _qat_status_guard["observed"] is True
+    assert _qat_status_guard["e4m3_kv_pool_observed"] is True
+    assert _qat_status_guard["hadamard_fp4_indexer_observed"] is True
+
+
+def test_dsv4_model_exposes_live_activation_qat_status(_qat_status_guard):
+    from jang_tools.dsv4.mlx_model import Model, ModelArgs
+
+    runtime_model = Model(
+        ModelArgs(
+            vocab_size=8,
+            hidden_size=8,
+            num_hidden_layers=0,
+            hc_mult=1,
+        )
+    )
+
+    assert runtime_model._vmlx_dsv4_activation_qat_status is _qat_status_guard
+    assert _qat_status_guard["fp32_compressor_staging_unconditional"] is True
+    assert _qat_status_guard["attestation_scope"] == (
+        "transform_family_dispatch_not_every_call_site"
+    )
+    assert _qat_status_guard["transform_families"] == [
+        "e4m3_post_rope_kv_or_compressor_pool_dispatch",
+        "hadamard_fp4_indexer_pool_or_query_dispatch",
+    ]
+
+
 def test_dsv4_e4m3_block_qat_matches_reference_value_lattice():
     from jang_tools.dsv4.mlx_model import act_quant_sim
 

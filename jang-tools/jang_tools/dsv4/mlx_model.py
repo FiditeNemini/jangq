@@ -34,6 +34,27 @@ from mlx_lm.models.switch_layers import SwitchGLU
 logger = logging.getLogger(__name__)
 
 
+_DSV4_ACTIVATION_QAT_ENV = "DSV4_ACTIVATION_QAT"
+_DSV4_ACTIVATION_QAT_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _dsv4_activation_qat_requested(environ=None) -> bool:
+    """Return the explicit opt-in state for source-native activation QAT.
+
+    The runtime intentionally defaults this diagnostic-quality graph path off.
+    Unknown values also fail safe to off; changing the process environment
+    requires a model-process restart because the effective state is captured
+    when this module is imported.
+    """
+
+    source = os.environ if environ is None else environ
+    raw_value = source.get(_DSV4_ACTIVATION_QAT_ENV, "")
+    return str(raw_value).strip().lower() in _DSV4_ACTIVATION_QAT_TRUE_VALUES
+
+
+_DSV4_ACTIVATION_QAT_REQUESTED = _dsv4_activation_qat_requested()
+
+
 def _layerwise_prefill_materialization_enabled(input_ids) -> bool:
     """Bound DSV4's lazy cross-layer graph during multi-token prefill.
 
@@ -634,12 +655,74 @@ _indexer_activation_roundtrip_kernel = (
 )
 
 
+_DSV4_ACTIVATION_QAT_STATUS = {
+    "env": _DSV4_ACTIVATION_QAT_ENV,
+    "default": False,
+    "requested": _DSV4_ACTIVATION_QAT_REQUESTED,
+    "effective": _DSV4_ACTIVATION_QAT_REQUESTED,
+    # ``observed`` is deliberately not inferred from the environment.  It is
+    # populated only after both owned graph paths have actually run.
+    "observed": None,
+    "attested": False,
+    "e4m3_kv_pool_observed": None,
+    "hadamard_fp4_indexer_observed": None,
+    "implementation_available": True,
+    "fused_e4m3_available": _e4m3_kv_activation_roundtrip_kernel is not None,
+    "fused_indexer_available": _indexer_activation_roundtrip_kernel is not None,
+    "fp32_compressor_staging_unconditional": True,
+    # These observations attest the two shared transform dispatch families,
+    # not every individual call site that may use each helper later in a long
+    # sequence (for example the deferred indexer-query call site).
+    "attestation_scope": "transform_family_dispatch_not_every_call_site",
+    "transform_families": [
+        "e4m3_post_rope_kv_or_compressor_pool_dispatch",
+        "hadamard_fp4_indexer_pool_or_query_dispatch",
+    ],
+}
+
+
+def get_dsv4_activation_qat_status() -> Dict[str, Any]:
+    """Return the current process-local activation-QAT attestation."""
+
+    status = dict(_DSV4_ACTIVATION_QAT_STATUS)
+    status["transform_families"] = list(status["transform_families"])
+    return status
+
+
+def _observe_dsv4_activation_qat_path(path: str) -> bool:
+    """Record the actual active/bypass state at an owned graph boundary."""
+
+    if path not in {
+        "e4m3_kv_pool_observed",
+        "hadamard_fp4_indexer_observed",
+    }:
+        raise ValueError(f"unknown DSV4 activation-QAT path: {path}")
+    effective = bool(_DSV4_ACTIVATION_QAT_STATUS["effective"])
+    # The process-local setting is immutable after import.  Once a path has
+    # attested its branch, keep decode hot paths free of repeated dict writes.
+    if _DSV4_ACTIVATION_QAT_STATUS[path] is not None:
+        return effective
+    _DSV4_ACTIVATION_QAT_STATUS[path] = effective
+    path_states = (
+        _DSV4_ACTIVATION_QAT_STATUS["e4m3_kv_pool_observed"],
+        _DSV4_ACTIVATION_QAT_STATUS["hadamard_fp4_indexer_observed"],
+    )
+    attested = all(value is not None for value in path_states)
+    _DSV4_ACTIVATION_QAT_STATUS["attested"] = attested
+    _DSV4_ACTIVATION_QAT_STATUS["observed"] = (
+        effective if attested and path_states[0] == path_states[1] else None
+    )
+    return effective
+
+
 def _fp8_qat_non_rope(x: mx.array, rope_dims: int) -> mx.array:
     """Dispatch the official post-RoPE KV QAT graph without changing math."""
 
     split = int(x.shape[-1]) - int(rope_dims)
     width = int(x.shape[-1])
     if split <= 0:
+        return x
+    if not _observe_dsv4_activation_qat_path("e4m3_kv_pool_observed"):
         return x
     try:
         use_metal = mx.default_device() == mx.gpu and mx.metal.is_available()
@@ -673,6 +756,10 @@ def _fp8_qat_non_rope(x: mx.array, rope_dims: int) -> mx.array:
 def _indexer_activation_roundtrip(x: mx.array) -> mx.array:
     """Dispatch the official indexer activation graph without changing math."""
 
+    if not _observe_dsv4_activation_qat_path(
+        "hadamard_fp4_indexer_observed"
+    ):
+        return x
     try:
         use_metal = mx.default_device() == mx.gpu and mx.metal.is_available()
     except Exception:
@@ -3001,6 +3088,11 @@ class Model(nn.Module):
         super().__init__()
         self.args = args
         self.model_type = args.model_type
+        # vMLX health reads this shared dictionary directly. The observation
+        # fields update when both shared transform dispatch families execute,
+        # so health can distinguish an environment request from runtime branch
+        # observation without claiming every eventual call site has executed.
+        self._vmlx_dsv4_activation_qat_status = _DSV4_ACTIVATION_QAT_STATUS
         self.model = DeepseekV4Model(args)
         # Tied weight option not confirmed for DSV4 — use separate lm_head
         # (config has tie_word_embeddings=false)
