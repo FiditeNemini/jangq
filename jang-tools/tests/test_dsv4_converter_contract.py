@@ -350,7 +350,15 @@ def test_dsv4_docs_separate_std_baseline_from_runtime_candidate():
     assert "DSV4_V3_PLAN_PATH" in readme
     assert "uniform `std` JANGTQ2" in readme
     assert "not a production-cleared DSV4 runtime candidate" in readme
-    assert "DSV4_POOL_QUANT` | `0`" in examples
+    assert "DSV4_POOL_QUANT` | `1`" in examples
+
+
+def test_dsv4_affine_converter_defaults_native_pool_quant_on():
+    """Affine DSV4 rebuilds must preserve the proven native q8 pool default."""
+    src = AFFINE_CONVERTER.read_text()
+
+    assert src.count('"pool_quant_default": True') == 2
+    assert '"pool_quant_default": False' not in src
 
 
 def test_dsv4_affine_converter_separates_routed_and_bookend_group_sizes():
