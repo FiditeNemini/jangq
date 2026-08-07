@@ -55,7 +55,9 @@ def _dsv4_activation_qat_requested(environ=None) -> bool:
 _DSV4_ACTIVATION_QAT_REQUESTED = _dsv4_activation_qat_requested()
 
 
-def _layerwise_prefill_materialization_enabled(input_ids) -> bool:
+def _layerwise_prefill_materialization_enabled(
+    input_ids, final_context_tokens: int = 0
+) -> bool:
     """Bound DSV4's lazy cross-layer graph during multi-token prefill.
 
     CSA layers create a query-by-compressed-pool attention graph.  Leaving all
@@ -63,10 +65,24 @@ def _layerwise_prefill_materialization_enabled(input_ids) -> bool:
     can exceed Metal's working set even when the persistent SWA/CSA/HCA cache
     itself fits.  Evaluating the hidden state at layer boundaries preserves
     the exact graph math while releasing prior-layer attention temporaries.
+
+    The barrier costs 25-30% prefill throughput (live A/B: 267 vs 346 pp/s at
+    15k), while attention sub-chunking already bounds the dominant per-layer
+    score temporaries at 512 query rows.  When ``DSV4_LAYERWISE_PREFILL`` is
+    unset, barriers therefore engage only once the chunk's final context
+    (cache offset + chunk width) exceeds the standalone-proven safe curve
+    (``DSV4_LAYERWISE_PREFILL_AUTO_TOKENS``, default 24,576) or when
+    sub-chunking is disabled.  An explicit env value keeps the old absolute
+    on/off semantics.
     """
 
-    raw_enabled = os.environ.get("DSV4_LAYERWISE_PREFILL", "1").strip().lower()
-    if raw_enabled in {"0", "false", "no", "off"}:
+    raw_enabled = os.environ.get("DSV4_LAYERWISE_PREFILL")
+    if raw_enabled is not None and raw_enabled.strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
         return False
     try:
         min_tokens = max(
@@ -76,9 +92,24 @@ def _layerwise_prefill_materialization_enabled(input_ids) -> bool:
     except (TypeError, ValueError):
         min_tokens = 256
     try:
-        return int(input_ids.shape[-1]) >= min_tokens
+        if int(input_ids.shape[-1]) < min_tokens:
+            return False
     except (AttributeError, IndexError, TypeError, ValueError):
         return False
+    if raw_enabled is None and _dsv4_attn_subchunk_tokens() > 0:
+        try:
+            auto_threshold = int(
+                os.environ.get("DSV4_LAYERWISE_PREFILL_AUTO_TOKENS", "24576")
+            )
+        except (TypeError, ValueError):
+            auto_threshold = 24576
+        if auto_threshold > 0:
+            try:
+                if max(0, int(final_context_tokens or 0)) <= auto_threshold:
+                    return False
+            except (TypeError, ValueError):
+                pass
+    return True
 
 
 def _dsv4_attn_subchunk_tokens() -> int:
@@ -3568,12 +3599,26 @@ class DeepseekV4Model(nn.Module):
         return y.astype(x.dtype)
 
     def __call__(self, input_ids, cache=None, mask=None):
-        layerwise_prefill = _layerwise_prefill_materialization_enabled(input_ids)
+        if cache is None:
+            cache = [None] * len(self.layers)
+        try:
+            cache_offset = int(getattr(cache[0], "offset", 0) or 0)
+        except (IndexError, TypeError, ValueError):
+            cache_offset = 0
+        try:
+            chunk_tokens = int(input_ids.shape[-1])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            chunk_tokens = 0
+        layerwise_prefill = _layerwise_prefill_materialization_enabled(
+            input_ids, cache_offset + chunk_tokens
+        )
         if layerwise_prefill and not self._layerwise_prefill_logged:
             logger.info(
                 "DSV4 layerwise prefill materialization enabled: tokens=%d "
-                "layers=%d (bounds lazy CSA/HCA attention graph lifetime)",
-                int(input_ids.shape[-1]),
+                "final_context=%d layers=%d (bounds lazy CSA/HCA attention "
+                "graph lifetime)",
+                chunk_tokens,
+                cache_offset + chunk_tokens,
                 len(self.layers),
             )
             self._layerwise_prefill_logged = True
