@@ -2091,7 +2091,12 @@ class Compressor(nn.Module):
                 )
         if cache is not None:
             if hasattr(cache, "update_pool_view"):
-                result = cache.update_pool_view(new_pooled, state_key)
+                # seq_len tells the pool cache whether this forward is a
+                # prefill chunk (bounded tiled view past the dense-row cap)
+                # or a decode step (dense hot tier, fused-SDPA fast path).
+                result = cache.update_pool_view(
+                    new_pooled, state_key, seq_len=x.shape[1]
+                )
             else:
                 result = cache.update_pool(new_pooled, state_key)
             if _DSV4_PERF_PROBE_SKIP_POOL and x.shape[1] == 1:
@@ -2229,6 +2234,24 @@ def _precompute_freqs_cis_real(
     cos = mx.cos(theta)
     sin = mx.sin(theta)
     return mx.stack([cos, sin], axis=-1)  # (seqlen, dim/2, 2)
+
+
+_PHASE_MEM_LOG = os.environ.get("DSV4_PREFILL_MEM_LOG", "") == "2"
+
+
+def _phase_mem(layer_id, tag, *arrays):
+    arrs = [a for a in arrays if isinstance(a, mx.array)]
+    if arrs:
+        mx.eval(*arrs)
+    logger.info(
+        "DSV4 phase-mem layer=%d phase=%s active=%.2fGB peak=%.2fGB",
+        layer_id,
+        tag,
+        mx.get_active_memory() / 2**30,
+        mx.get_peak_memory() / 2**30,
+    )
+    if hasattr(mx, "reset_peak_memory"):
+        mx.reset_peak_memory()
 
 
 def _dsv4_window_visibility(
@@ -2840,7 +2863,12 @@ class DeepseekV4Attention(nn.Module):
             # - v4_cache is provided (state carries across calls), OR
             # - L >= compress_ratio (enough tokens to produce non-empty pool in one call)
             if v4_cache is not None or L >= self.compress_ratio:
+                _pm = _PHASE_MEM_LOG and L > 1
+                if _pm:
+                    _phase_mem(self.layer_id, "pre")
                 pooled = self.compressor(x, self.compress_rope, v4_cache, offset)
+                if _pm:
+                    _phase_mem(self.layer_id, "compressor", pooled)
                 indexer_pooled = None
                 if hasattr(self, "indexer"):
                     # The native DSV4 indexer owns a second compressor and must
@@ -2854,6 +2882,8 @@ class DeepseekV4Attention(nn.Module):
                         v4_cache,
                         offset,
                     )
+                    if _pm:
+                        _phase_mem(self.layer_id, "idx-update", indexer_pooled)
                     main_rows = int(pooled.shape[1])
                     indexer_rows = int(indexer_pooled.shape[1])
                     if indexer_rows != main_rows:
@@ -2875,6 +2905,8 @@ class DeepseekV4Attention(nn.Module):
                             indexer_pooled,
                             offset,
                         )
+                        if _pm:
+                            _phase_mem(self.layer_id, "select", topk)
 
                     if getattr(pooled, "is_dsv4_quantized_pool_view", False):
                         tiled_pool_out = _dsv4_tiled_pool_attention(
@@ -2888,6 +2920,8 @@ class DeepseekV4Attention(nn.Module):
                             sinks=self.attn_sink.astype(q.dtype),
                             topk=topk,
                         )
+                        if _pm:
+                            _phase_mem(self.layer_id, "pool-attn", tiled_pool_out)
                     elif L == 1:
                         # Decode fast path: materialize only the selected rows
                         # for the single query. This is bounded by index_topk
@@ -2994,7 +3028,10 @@ class DeepseekV4Attention(nn.Module):
         out = _apply_partial_rope(out, self.rope, offset, inverse=True)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, self.n_heads * self.head_dim)
         out = self._grouped_output_projection(out)
-        return self.wo_b(out)
+        out = self.wo_b(out)
+        if _PHASE_MEM_LOG and L > 1 and self.compress_ratio:
+            _phase_mem(self.layer_id, "attn-out", out)
+        return out
 
     def _grouped_output_projection(self, out):
         """Match PR #1192 V4Attention._grouped_output_projection — handles
@@ -3672,10 +3709,22 @@ class DeepseekV4Model(nn.Module):
                 window_size=self.args.sliding_window,
                 return_array=True,
             )
-        for layer, c in zip(self.layers, cache):
+        _mem_log = layerwise_prefill and os.environ.get(
+            "DSV4_PREFILL_MEM_LOG", ""
+        ) == "1"
+        for _li, (layer, c) in enumerate(zip(self.layers, cache)):
             h = layer(h, mask=mask, cache=c, input_ids=input_ids)
             if layerwise_prefill:
                 mx.eval(h)
+                if _mem_log:
+                    logger.info(
+                        "DSV4 prefill-mem layer=%d active=%.2fGB "
+                        "cache=%.2fGB peak=%.2fGB",
+                        _li,
+                        mx.get_active_memory() / 2**30,
+                        mx.get_cache_memory() / 2**30,
+                        mx.get_peak_memory() / 2**30,
+                    )
         h = self._hc_head_reduce(h)
         return self.norm(h)
 

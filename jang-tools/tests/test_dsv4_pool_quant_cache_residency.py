@@ -10,6 +10,7 @@ import numpy as np
 import jang_tools.dsv4.pool_quant_cache as pool_quant_cache
 from jang_tools.dsv4.pool_quant_cache import (
     _POOL_BF16_MAX_BYTES,
+    _POOL_PREFILL_DENSE_MAX_ROWS,
     PoolQuantizedV4Cache,
     _POOL_SEGMENT_ROWS,
     _StateProxy,
@@ -140,19 +141,47 @@ def test_adaptive_threshold_is_bytes_not_rows():
     assert wide_state._pooled_q_segments
 
 
-def test_ratio4_ordinary_prompt_stays_hot_and_12k_promotes():
-    """4K-token ratio-4 pools stay BF16 while 12K-token pools promote."""
-    prompt_4k_pool = mx.zeros((1, 4096 // 4, 512), dtype=mx.bfloat16)
+def test_ratio4_pools_stay_hot_under_64mb_and_promote_beyond():
+    """Ratio-4 pools stay BF16 under the 64 MiB hot tier; giant pools promote."""
     prompt_12k_pool = mx.zeros((1, 12000 // 4, 512), dtype=mx.bfloat16)
-    short_state = _StateProxy({"pooled": prompt_4k_pool})
-    long_state = _StateProxy({"pooled": prompt_12k_pool})
+    hot_state = _StateProxy({"pooled": prompt_12k_pool})
+    assert prompt_12k_pool.nbytes <= _POOL_BF16_MAX_BYTES
+    assert hot_state._pooled_bf16 is not None
+    assert not hot_state._pooled_q_segments
 
-    assert prompt_4k_pool.nbytes == 1024 * 1024
-    assert short_state._pooled_bf16 is not None
-    assert not short_state._pooled_q_segments
-    assert prompt_12k_pool.nbytes > _POOL_BF16_MAX_BYTES
-    assert long_state._pooled_bf16 is None
-    assert long_state._pooled_q_segments
+    giant_rows = _POOL_BF16_MAX_BYTES // (512 * 2) + 1
+    giant_pool = mx.zeros((1, giant_rows, 512), dtype=mx.bfloat16)
+    giant_state = _StateProxy({"pooled": giant_pool})
+    assert giant_pool.nbytes > _POOL_BF16_MAX_BYTES
+    assert giant_state._pooled_bf16 is None
+    assert giant_state._pooled_q_segments
+
+
+def test_prefill_past_dense_row_cap_gets_view_decode_stays_dense():
+    """Prefill beyond the dense-row cap returns the bounded view while
+    storage stays hot BF16; decode on the same cache returns the dense array
+    so the fused-SDPA decode fast path survives."""
+    cache = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    rows = _POOL_PREFILL_DENSE_MAX_ROWS + 8
+    big = mx.zeros((1, rows, 512), dtype=mx.bfloat16)
+    out = cache.update_pool_view(big, "compressor_state", seq_len=rows * 4)
+    assert getattr(out, "is_dsv4_quantized_pool_view", False)
+    assert cache.compressor_state._pooled_bf16 is not None
+    assert not cache.compressor_state._pooled_q_segments
+
+    dec = cache.update_pool_view(
+        mx.zeros((1, 1, 512), dtype=mx.bfloat16), "compressor_state", seq_len=1
+    )
+    assert isinstance(dec, mx.array)
+    assert dec.shape[1] == rows + 1
+
+    small = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    out_small = small.update_pool_view(
+        mx.zeros((1, 1024, 512), dtype=mx.bfloat16),
+        "compressor_state",
+        seq_len=4096,
+    )
+    assert isinstance(out_small, mx.array)
 
 
 def test_cache_trim_uses_active_storage_tier_without_conversion():

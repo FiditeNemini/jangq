@@ -51,6 +51,32 @@ def _pool_bf16_max_bytes() -> int:
 _POOL_BF16_MAX_BYTES = _pool_bf16_max_bytes()
 
 
+# The 64 MiB hot tier keeps DECODE on the fused-SDPA fast path, but a dense
+# pool returned to a PREFILL forward routes attention through the layer's
+# dense fallback and the indexer's dense top-k scoring, whose transients grow
+# with pool rows (~6-7.5 GB per layer past ~180K tokens on a 128 GB M5 Max —
+# Metal OOM against a ~107.5 GB working-set limit). Cap how many pool rows a
+# multi-token forward may see densely; beyond it, return the bounded
+# _QuantizedPoolView so attention and selection tile over the SAME hot BF16
+# storage (no quantization happens — the view slices _pooled_bf16 directly).
+# Rows, not bytes: compressor (head_dim 512) and indexer (head_dim 128) pools
+# must flip to tiling at the same token count or selection stays dense.
+# 16384 rows = 65K tokens at ratio 4; dense transients are proven safe at 40K.
+def _pool_prefill_dense_max_rows() -> int:
+    import os
+
+    raw = os.environ.get("DSV4_POOL_PREFILL_DENSE_MAX_ROWS", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 16384
+
+
+_POOL_PREFILL_DENSE_MAX_ROWS = _pool_prefill_dense_max_rows()
+
+
 def _quant_pool(pool: mx.array, group_size: int = 32, bits: int = 8):
     """Quantize a pool tensor along its last dimension with affine groups."""
     if pool is None:
@@ -863,20 +889,27 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
             raise ValueError("PoolQuantizedV4Cache requires _StateProxy branches")
         state.append_pool_delta(delta)
 
-    def update_pool_view(self, new_pooled, state_key):
+    def update_pool_view(self, new_pooled, state_key, seq_len=None):
         """Append rows and return the active attention representation.
 
         Pools below ``_POOL_BF16_MAX_BYTES`` are deliberately retained as a
-        normal BF16 array.  Return that array directly so short prompts use
-        the model's single-token SDPA fast path.  Wrapping hot BF16 storage in
-        ``_QuantizedPoolView`` incorrectly selected the tiled q8 attention
-        path (and its per-layer materialization barrier) even though no pool
-        row had been quantized.
+        normal BF16 array.  For DECODE (``seq_len == 1``) return that array
+        directly so single-token forwards keep the fused-SDPA fast path.
+        For PREFILL (``seq_len > 1``) a dense return routes the layer through
+        its dense attention fallback and dense top-k selection, whose
+        transients scale with pool rows and Metal-OOM past ~180K tokens.
+        Once the hot tier exceeds ``_POOL_PREFILL_DENSE_MAX_ROWS``, prefill
+        gets the bounded view instead — it tiles over the same BF16 storage
+        without quantizing anything, so decode keeps its dense hot tier.
 
         Once the state promotes to segmented q8 storage, return the bounded
         view so attention never materializes the complete historical pool.
         """
         state = self._branch_state(state_key)
+        if seq_len is None:
+            is_prefill = int(new_pooled.shape[1]) > 1
+        else:
+            is_prefill = int(seq_len) > 1
         if new_pooled.shape[1] > 0:
             if isinstance(state, _StateProxy):
                 state.append_pooled(new_pooled)
@@ -886,8 +919,12 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
                 state["pooled"] = pool
                 return pool
         if isinstance(state, _StateProxy):
-            if state._pooled_bf16 is not None:
-                return state._pooled_bf16
+            hot = state._pooled_bf16
+            if hot is not None and (
+                not is_prefill
+                or int(hot.shape[1]) <= _POOL_PREFILL_DENSE_MAX_ROWS
+            ):
+                return hot
             return state.pool_view(empty_like=new_pooled)
         pool = state["pooled"]
         if pool is None:
