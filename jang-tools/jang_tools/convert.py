@@ -29,6 +29,7 @@ from .ssm_layout import (
     prepare_mlx_passthrough_tensor as _shared_prepare_mlx_passthrough_tensor,
 )
 from .mup_fold import MupFold
+from .zero_centered_norms import ZeroCenteredNormShift
 
 
 # ── Stale-artifact cleanup (M115, iter 39) ────────────────────────────
@@ -857,6 +858,13 @@ def convert_model(
         for name in source_tensor_names
     )
 
+    norm_shift = ZeroCenteredNormShift.from_config(_raw_config, vl_wrapped)
+    if norm_shift is not None:
+        print(
+            "  Zero-centered RMSNorm: active — folding +1.0 into norm weights "
+            "(mlxstudio#130)"
+        )
+
     # Run bit allocation → produces _tensor_bits dict (tensor_name → bits)
     if use_compact:
         # Compact path: classify each tensor once, no per-block arrays.
@@ -1183,6 +1191,8 @@ def convert_model(
 
         if mup_fold is not None:
             weights = mup_fold.apply(tensor_name, weights)
+        if norm_shift is not None:
+            weights = norm_shift.apply(tensor_name, weights)
 
         # AWQ scaling
         awq_scales = None
@@ -1720,6 +1730,8 @@ def convert_model(
 
                     if mup_fold is not None and is_bias:
                         tensor = mup_fold.apply(tensor_name, tensor)
+                    if norm_shift is not None:
+                        tensor = norm_shift.apply(tensor_name, tensor)
 
                     forced_bits = _forced_passthrough_bits(tensor_name)
                     if forced_bits is not None:
@@ -1760,6 +1772,16 @@ def convert_model(
         # carry them.
         model_config["jang_mup_folded"] = True
         print(f"  muP fold: {len(mup_fold.folded)} tensors folded; config stamped jang_mup_folded")
+    if norm_shift is not None:
+        # Loaders must not re-apply the +1.0 (mlx_lm's sanitize gate never
+        # fires on JANG bundles, and the JANG loader repairs stamp-less
+        # legacy bundles — mlxstudio#130); the marker says weights already
+        # carry the shift.
+        model_config["jang_norms_pre_shifted"] = True
+        print(
+            f"  Zero-centered RMSNorm: {len(norm_shift.shifted)} norm tensors "
+            "shifted +1.0; config stamped jang_norms_pre_shifted"
+        )
     text_config_for_tokens = model_config.get("text_config")
     if isinstance(text_config_for_tokens, dict):
         for token_key in ("eos_token_id", "bos_token_id", "pad_token_id"):

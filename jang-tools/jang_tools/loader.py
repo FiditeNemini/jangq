@@ -95,6 +95,21 @@ def _sanitize_qwen3_next_conv1d_layout(weights: dict) -> dict:
     return _sanitize_grouped_conv1d_layout(weights)
 
 
+def _mlx_lm_sanitize_shifts_norms(model_type: str, weights: dict) -> bool:
+    """Mirror mlx_lm's per-shard norm-shift gate exactly (mlxstudio#130).
+
+    Evaluated on post-mtp-strip, pre-sanitize weights. qwen3_next.sanitize
+    early-returns (no shift) unless per-expert HF keys are present;
+    qwen3_5/qwen3_5_moe shift when the shard has mtp.* keys (already
+    stripped here, so always False) or an HF-layout conv1d.
+    """
+    if model_type == "qwen3_next":
+        return "model.layers.0.mlp.experts.0.up_proj.weight" in weights
+    return any(
+        "conv1d.weight" in k and v.shape[-1] != 1 for k, v in weights.items()
+    )
+
+
 def _find_config_path(model_path: Path) -> Optional[Path]:
     for name in JANG_CONFIG_FILENAMES:
         p = model_path / name
@@ -377,13 +392,36 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
         }
         _mistral4_cfg["head_dim"] = _mistral4_cfg["qk_nope"] + _mistral4_cfg["v_head"]
 
+    # Legacy zero-centered RMSNorm repair (mlxstudio#130): qwen3_5-family
+    # text bundles converted before jang_norms_pre_shifted stored raw
+    # (gamma-1) norms, and mlx_lm's sanitize gate (mtp keys / HF-layout
+    # conv1d) normally never fires on this path — mtp is stripped below
+    # and JANG conv1d is MLX layout. Apply the +1.0 for stamp-less
+    # bundles, but only on shards where mlx_lm's own sanitize did NOT
+    # already shift (gate mirrored per shard to avoid double-shifting).
+    _norm_shift = None
+    if not _model_cfg.get("jang_norms_pre_shifted"):
+        from .zero_centered_norms import ZeroCenteredNormShift
+        _norm_shift = ZeroCenteredNormShift.from_config(_model_cfg, vl_wrapped=False)
+        if _norm_shift is not None:
+            logger.info(
+                "  Legacy bundle without jang_norms_pre_shifted — applying "
+                "+1.0 zero-centered RMSNorm repair (mlxstudio#130)"
+            )
+    _norm_gate_type = _text_type or _top_type
+
     for sf in weight_files:
         weights = mx.load(str(sf))
         weights = {k: v for k, v in weights.items()
                    if not k.endswith(".importance") and not k.startswith("mtp.")}
+        _mlx_lm_shifted = False
+        if _norm_shift is not None and hasattr(model, "sanitize"):
+            _mlx_lm_shifted = _mlx_lm_sanitize_shifts_norms(_norm_gate_type, weights)
         if hasattr(model, "sanitize"):
             weights = model.sanitize(weights)
         weights = _sanitize_qwen3_next_conv1d_layout(weights)
+        if _norm_shift is not None and not _mlx_lm_shifted:
+            weights = {k: _norm_shift.apply(k, v) for k, v in weights.items()}
 
         # Nemotron-H: rename switch_mlp keys + dequantize gate weights
         if _needs_gate_dequant:
