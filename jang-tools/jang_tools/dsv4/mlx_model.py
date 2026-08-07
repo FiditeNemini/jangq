@@ -30,6 +30,11 @@ from mlx_lm.models.cache import KVCache
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.switch_layers import SwitchGLU
 
+try:  # env-gated Metal prefill kernel (VMLX_DSV4_HEADS16_PREFILL, default on)
+    from .indexed_prefill_attention import dsv4_heads16_prefill_attention
+except Exception:  # pragma: no cover - optional module; stock path if absent
+    dsv4_heads16_prefill_attention = None
+
 
 logger = logging.getLogger(__name__)
 
@@ -2911,20 +2916,47 @@ class DeepseekV4Attention(nn.Module):
                         # code expanded to (B, 1, L, P, D) and then gathered
                         # L*topk rows, which caused multi-GB/TB allocations and
                         # leaked query i into query j's selected pool slice.
-                        local_mask = _dsv4_window_visibility(
-                            B, L, offset, self.args.sliding_window, full_kv.shape[2],
-                        )
-                        comp_mask = _dsv4_compressed_visibility(
-                            B, L, offset, pooled.shape[1], self.compress_ratio,
-                        )
-                        if topk is not None:
-                            k_idx = mx.arange(pooled.shape[1])
-                            selected = (
-                                topk[..., None] == k_idx[None, None, None, :]
-                            ).any(axis=-2)
-                            comp_mask = comp_mask & selected[:, None, :, :]
-                        full_kv = mx.concatenate([full_kv, pooled[:, None]], axis=2)
-                        attn_mask = mx.concatenate([local_mask, comp_mask], axis=-1)
+                        heads16_out = None
+                        if (
+                            topk is not None
+                            and dsv4_heads16_prefill_attention is not None
+                        ):
+                            # Env-gated Metal kernel: attends each query to
+                            # window + selected pool rows only, skipping the
+                            # (B, 1, L, P) membership mask and full-pool SDPA.
+                            heads16_out = dsv4_heads16_prefill_attention(
+                                q,
+                                full_kv,
+                                pooled,
+                                topk,
+                                offset=int(offset),
+                                window=int(self.args.sliding_window),
+                                ratio=int(self.compress_ratio),
+                                scale=float(self.softmax_scale),
+                                sinks=self.attn_sink,
+                            )
+                        if heads16_out is not None:
+                            tiled_pool_out = heads16_out
+                            attn_mask = None
+                        else:
+                            local_mask = _dsv4_window_visibility(
+                                B, L, offset, self.args.sliding_window, full_kv.shape[2],
+                            )
+                            comp_mask = _dsv4_compressed_visibility(
+                                B, L, offset, pooled.shape[1], self.compress_ratio,
+                            )
+                            if topk is not None:
+                                k_idx = mx.arange(pooled.shape[1])
+                                selected = (
+                                    topk[..., None] == k_idx[None, None, None, :]
+                                ).any(axis=-2)
+                                comp_mask = comp_mask & selected[:, None, :, :]
+                            full_kv = mx.concatenate(
+                                [full_kv, pooled[:, None]], axis=2
+                            )
+                            attn_mask = mx.concatenate(
+                                [local_mask, comp_mask], axis=-1
+                            )
 
         if attn_mask is not None:
             # DSV4 has heterogeneous attention state: SWA-only layers may use a
