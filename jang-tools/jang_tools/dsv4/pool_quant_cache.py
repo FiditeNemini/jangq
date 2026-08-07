@@ -26,14 +26,29 @@ _POOL_SEGMENT_ROWS = 64
 _POOL_ATTENTION_TILE_ROWS = 16 * 1024
 POOL_STORAGE_SCHEMA = "dsv4_pool_q8_segmented_v2"
 _BRANCH_STORAGE_SCHEMA = "dsv4_pool_q8_branch_v2"
-# Quantization has a fixed conversion cost and codes are stored in uint8
-# containers. Keep small pools in their attention-ready BF16
-# form until one state would retain more than 2 MiB. At ratio 4, the wide
-# compressor pool is 1 MiB for a 4K-token prompt and exactly 2 MiB for 8K, so
-# ordinary <=4K prompts avoid quantize/dequantize work while a 12K prompt
-# (about 3 MiB of pooled BF16) still promotes. The byte budget also lets the
-# narrower indexer and high-ratio pools remain hot for substantially longer.
-_POOL_BF16_MAX_BYTES = 2 * 1024 * 1024
+# Quantization has a fixed conversion cost and, worse, a per-token decode
+# cost: once a pool promotes, every CSA layer pays a q8 dequant/gather op
+# flood on the host each token (measured ~100 ms/tok at 24K ctx on M5 Max vs
+# ~36 ms/tok on the BF16 fused-SDPA path). BF16 pools are cheap to retain: at
+# ratio 4 the wide compressor pool holds 1 MiB per 4K prompt tokens, so 128K
+# tokens is ~32 MiB per layer (~1.5 GB across all layers) — far inside the
+# ~6-8 GB live-cache RAM budget. Keep pools attention-ready BF16 until one
+# state would retain more than 64 MiB (~256K tokens at ratio 4); segmented q8
+# remains for genuinely huge contexts and for restored q8 block state.
+# Override with DSV4_POOL_BF16_MAX_BYTES.
+def _pool_bf16_max_bytes() -> int:
+    import os
+
+    raw = os.environ.get("DSV4_POOL_BF16_MAX_BYTES", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 64 * 1024 * 1024
+
+
+_POOL_BF16_MAX_BYTES = _pool_bf16_max_bytes()
 
 
 def _quant_pool(pool: mx.array, group_size: int = 32, bits: int = 8):
@@ -57,7 +72,7 @@ def _quant_pool(pool: mx.array, group_size: int = 32, bits: int = 8):
     q = mx.clip(q, 0, qmax).astype(mx.uint8)
     scale = scale.astype(mx.float16)
     mn = mn.astype(mx.float16)
-    mx.eval(q, scale, mn)
+    mx.async_eval(q, scale, mn)
     return (q, scale, mn, shape, group_size, bits, original_dtype)
 
 
@@ -129,7 +144,7 @@ def _slice_qpool_row_range(qpool, start: int, stop: int):
     mn = _row_slice(mn)
     rows = stop - start
     shape = tuple(rows if axis == 1 else dim for axis, dim in enumerate(shape))
-    mx.eval(q, scale, mn)
+    mx.async_eval(q, scale, mn)
     return (q, scale, mn, shape, group_size, bits, *dtype_tail)
 
 
@@ -213,7 +228,7 @@ def _concat_qpools(qpools):
     scale = mx.concatenate([qpool[1] for qpool in normalized], axis=1)
     mn = mx.concatenate([qpool[2] for qpool in normalized], axis=1)
     shape = (*batch_shape, rows, *tail_shape)
-    mx.eval(q, scale, mn)
+    mx.async_eval(q, scale, mn)
     return (q, scale, mn, shape, group_size, bits, original_dtype)
 
 

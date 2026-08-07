@@ -81,6 +81,25 @@ def _layerwise_prefill_materialization_enabled(input_ids) -> bool:
         return False
 
 
+def _dsv4_attn_subchunk_tokens() -> int:
+    """Attention sub-chunk length for wide-chunk prefill.
+
+    DSV4 prefill has opposed optima: SWA/CSA attention cost grows
+    super-linearly with chunk width (dense visibility masks stream
+    T_q x T_kv and defeat SDPA tile skipping), while MoE gather_qmm
+    throughput grows with batch (7.75 -> 21 TF going 512 -> 2048 rows).
+    Running attention in 512-token sub-slices against the layer cache is
+    numerically identical to top-level 512-chunk prefill (same call
+    sequence per layer, causal decomposition), while MoE still sees the
+    full chunk batch. 0 disables.
+    """
+
+    try:
+        return max(0, int(os.environ.get("DSV4_ATTN_SUBCHUNK", "512")))
+    except (TypeError, ValueError):
+        return 512
+
+
 @dataclass
 class ModelArgs(BaseModelArgs):
     model_type: str = "deepseek_v4"
@@ -841,7 +860,63 @@ class DeepseekV4RoPE(nn.Module):
         return out.reshape(*out.shape[:-2], out.shape[-2] * 2)
 
 
+# Decode-path host-encoding reduction: fuse per-token elementwise glue into a
+# small number of large `mx.compile` regions. DSV4 decode is host-bound (~30ms
+# of a ~42ms token is CPU graph build + Metal kernel encoding), so collapsing
+# hundreds of tiny ops into few compiled dispatches is the primary speed lever.
+# All compiled paths are gated to single-token shapes (L == 1) so prefill keeps
+# the raw graph (bounded trace count) and every region was verified bit-exact
+# (max|diff| = 0.0) against the raw path before adoption.
+_DSV4_COMPILE_REGIONS = os.environ.get("DSV4_COMPILE_REGIONS", "1") == "1"
+
+
+def _dsv4_rope_pair_rotate(x, cos, sin):
+    x = x.reshape(*x.shape[:-1], x.shape[-1] // 2, 2)
+    x0, x1 = x[..., 0], x[..., 1]
+    out = mx.stack([x0 * cos - x1 * sin, x0 * sin + x1 * cos], axis=-1)
+    return out.reshape(*out.shape[:-2], out.shape[-2] * 2)
+
+
+def _dsv4_rope_rotate(x, pos, inv_freq, inverse):
+    """Same numerics/op-order as `DeepseekV4RoPE.__call__` + partial split,
+    expressed over explicit `(pos, inv_freq)` inputs so it can live inside an
+    `mx.compile` region (value changes in `pos` never retrace)."""
+    dtype = x.dtype
+    rope_dim = inv_freq.shape[0] * 2
+    freqs = pos.astype(mx.float32)[:, None] * inv_freq[None, :]
+    cos = mx.cos(freqs)
+    sin = mx.sin(freqs)
+    if inverse:
+        sin = -sin
+    broadcast_shape = (1,) * (x.ndim - 2) + freqs.shape
+    cos = cos.reshape(broadcast_shape).astype(dtype)
+    sin = sin.reshape(broadcast_shape).astype(dtype)
+    if x.shape[-1] == rope_dim:
+        return _dsv4_rope_pair_rotate(x, cos, sin)
+    nope, pe = mx.split(x, [x.shape[-1] - rope_dim], axis=-1)
+    pe = _dsv4_rope_pair_rotate(pe, cos, sin)
+    return mx.concatenate([nope, pe], axis=-1)
+
+
+@mx.compile
+def _dsv4_rope_rot_fwd(x, pos, inv_freq):
+    return _dsv4_rope_rotate(x, pos, inv_freq, inverse=False)
+
+
+@mx.compile
+def _dsv4_rope_rot_inv(x, pos, inv_freq):
+    return _dsv4_rope_rotate(x, pos, inv_freq, inverse=True)
+
+
 def _apply_partial_rope(x, rope, offset=0, inverse=False, positions=None):
+    if _DSV4_COMPILE_REGIONS and x.shape[-2] == 1:
+        pos = (
+            mx.arange(offset, offset + 1, dtype=mx.float32)
+            if positions is None
+            else positions
+        )
+        fn = _dsv4_rope_rot_inv if inverse else _dsv4_rope_rot_fwd
+        return fn(x, pos, rope.inv_freq)
     rope_dim = rope.dims
     if x.shape[-1] == rope_dim:
         return rope(x, offset=offset, inverse=inverse, positions=positions)
@@ -1717,21 +1792,59 @@ class Compressor(nn.Module):
         out[:, 1:, :R] = x[:, :-1, :, :self.head_dim]
         return out
 
+    def _decode_front_overlap(self, x, pos):
+        fn = self.__dict__.get("_decode_front_overlap_compiled")
+        if fn is None:
+            ratio = float(self.compress_ratio)
+
+            def _impl(xin, p):
+                x32 = xin.astype(mx.float32)
+                kv = self.wkv(x32)
+                gate = self.wgate(x32)
+                idx = (p % ratio).astype(mx.int32)
+                ape = mx.take(self.ape, idx, axis=0)
+                return kv, gate + ape[None]
+
+            fn = mx.compile(_impl)
+            self.__dict__["_decode_front_overlap_compiled"] = fn
+        return fn(x, pos)
+
+    def _decode_front(self, x):
+        fn = self.__dict__.get("_decode_front_compiled")
+        if fn is None:
+
+            def _impl(xin):
+                x32 = xin.astype(mx.float32)
+                return self.wkv(x32), self.wgate(x32)
+
+            fn = mx.compile(_impl)
+            self.__dict__["_decode_front_compiled"] = fn
+        return fn(x)
+
     def __call__(self, x, rope, cache, start_pos, state_key="compressor_state"):
         B, _, _ = x.shape
         dtype = x.dtype
+        use_compiled = _DSV4_COMPILE_REGIONS and x.shape[1] == 1 and cache is not None
         # Official 0731 Compressor.forward promotes the residual stream before
         # both projections and keeps projection, softmax, and pooling math in
         # FP32.  The affine JANG bundle stores F16 q8 sidecars, so passing F16
         # directly to MLX QuantizedLinear would otherwise keep this whole path
         # in F16.  Restore the source precision boundary explicitly.
-        x_fp32 = x.astype(mx.float32)
-        kv = self.wkv(x_fp32)
-        gate = self.wgate(x_fp32)
+        if use_compiled:
+            if self.overlap:
+                pos = mx.array([start_pos], dtype=mx.float32)
+                kv, gate = self._decode_front_overlap(x, pos)
+            else:
+                kv, gate = self._decode_front(x)
+        else:
+            x_fp32 = x.astype(mx.float32)
+            kv = self.wkv(x_fp32)
+            gate = self.wgate(x_fp32)
         if cache is not None and self.overlap:
-            pos = start_pos + mx.arange(gate.shape[1])
-            ape = mx.take(self.ape.astype(gate.dtype), pos % self.compress_ratio, axis=0)
-            gate = gate + ape[None]
+            if not use_compiled:
+                pos = start_pos + mx.arange(gate.shape[1])
+                ape = mx.take(self.ape.astype(gate.dtype), pos % self.compress_ratio, axis=0)
+                gate = gate + ape[None]
             kv, gate, pool_base = cache.accumulate_overlap_windows(
                 kv, gate, state_key, self.compress_ratio, start_pos, self.head_dim
             )
@@ -2056,6 +2169,12 @@ def _dsv4_tiled_index_topk(
     best_scores = None
     best_indices = None
     for start, tile in pooled.iter_dequantized_tiles(max_rows=tile_rows):
+        if best_scores is not None:
+            # Bound the lazy graph across tiles WITHOUT a GPU round-trip stall:
+            # a blocking eval here serialized decode (one stall per layer per
+            # token) once pools promoted to q8. async_eval materializes the
+            # accumulator so prior tile buffers free, but never blocks.
+            mx.async_eval(best_scores, best_indices)
         tile32 = tile.astype(mx.float32)
         scores = q32 @ tile32[:, None].swapaxes(-1, -2)
         scores = mx.maximum(scores, 0) * float(scale)
@@ -2088,10 +2207,6 @@ def _dsv4_tiled_index_topk(
         else:
             best_scores = scores
             best_indices = indices
-        # Bound the lazy graph as well as the tensor geometry. At decode this
-        # is at most a handful of tiles; long prefill already materializes per
-        # layer in ``Model.__call__``.
-        mx.eval(best_scores, best_indices)
     if best_indices is None:
         return mx.zeros((*q.shape[:1], q.shape[2], 0), dtype=mx.int32)
     return best_indices.astype(mx.int32)
@@ -2200,6 +2315,11 @@ def _dsv4_selected_pool_attention(
     query_rows = _dsv4_selected_query_rows(q, topk)
     outputs = []
     for start in range(0, seq_len, query_rows):
+        if outputs:
+            # Materialize the previous query tile without blocking (memory
+            # bound for long prefill; decode has exactly one tile and pays
+            # nothing).
+            mx.async_eval(outputs[-1])
         end = min(seq_len, start + query_rows)
         q_tile = q[:, :, start:end]
         q32 = q_tile.astype(mx.float32)
@@ -2242,7 +2362,6 @@ def _dsv4_selected_pool_attention(
             )
         )
         output = (running_value / running_sum[..., None]).astype(q.dtype)
-        mx.eval(output)
         outputs.append(output)
     return outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=2)
 
@@ -2307,7 +2426,12 @@ def _dsv4_tiled_pool_attention(
 
     tile_rows = _dsv4_pool_tile_rows(q, int(pooled.shape[-1]))
     q_pos = int(offset) + mx.arange(seq_len)
+    first_tile = True
     for start, tile in pooled.iter_dequantized_tiles(max_rows=tile_rows):
+        if not first_tile:
+            # Non-blocking graph bound between tiles (see _dsv4_tiled_index_topk).
+            mx.async_eval(running_max, running_sum, running_value)
+        first_tile = False
         rows = int(tile.shape[1])
         k_idx = int(start) + mx.arange(rows)
         visible = ((k_idx[None, :] + 1) * int(ratio)) <= (q_pos[:, None] + 1)
@@ -2324,7 +2448,6 @@ def _dsv4_tiled_pool_attention(
             running_sum=running_sum,
             running_value=running_value,
         )
-        mx.eval(running_max, running_sum, running_value)
     return (running_value / running_sum[..., None]).astype(q.dtype)
 
 
@@ -2416,29 +2539,83 @@ class DeepseekV4Attention(nn.Module):
             if compress_ratio == 4:
                 self.indexer = Indexer(args, compress_ratio)
 
-    def __call__(self, x, mask=None, cache=None):
+    def _decode_pre_region(self, x, pos):
+        """Compiled decode projections: 3 qmm + norms + ropes + fp8 kernel in
+        one dispatch. Weights are trace constants (inference-static)."""
+        compiled = self.__dict__.get("_decode_pre_compiled")
+        if compiled is None:
+            def _impl(xin, p):
+                B, L = xin.shape[:2]
+                q_residual = self.q_norm(self.wq_a(xin))
+                q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
+                q = mx.fast.rms_norm(
+                    q,
+                    weight=_get_q_norm_ones(self.head_dim, q.dtype),
+                    eps=self.args.rms_norm_eps,
+                )
+                q = q.transpose(0, 2, 1, 3)
+                kv = (
+                    self.kv_norm(self.wkv(xin))
+                    .reshape(B, L, 1, self.head_dim)
+                    .transpose(0, 2, 1, 3)
+                )
+                q = _dsv4_rope_rotate(q, p, self.rope.inv_freq, inverse=False)
+                kv = _dsv4_rope_rotate(kv, p, self.rope.inv_freq, inverse=False)
+                kv = _fp8_qat_non_rope(kv, self.rope_head_dim)
+                return q_residual, q, kv
+
+            compiled = mx.compile(_impl)
+            self.__dict__["_decode_pre_compiled"] = compiled
+        return compiled(x, pos)
+
+    def _decode_out_math(self, o, p):
+        """Raw decode output math: inverse rope + grouped o-proj + wo_b.
+        Traced either standalone (`_decode_out_region`) or inside the layer
+        decode tail region."""
+        o = _dsv4_rope_rotate(o, p, self.rope.inv_freq, inverse=True)
+        B, H, L, D = o.shape
+        o = o.transpose(0, 2, 1, 3).reshape(B, L, H * D)
+        o = self._grouped_output_projection(o)
+        return self.wo_b(o)
+
+    def _decode_out_region(self, out, pos):
+        """Compiled decode output path: inverse rope + grouped o-proj + wo_b."""
+        compiled = self.__dict__.get("_decode_out_compiled")
+        if compiled is None:
+            compiled = mx.compile(self._decode_out_math)
+            self.__dict__["_decode_out_compiled"] = compiled
+        return compiled(out, pos)
+
+    def __call__(self, x, mask=None, cache=None, defer_out=False):
         # Match PR #1192 V4Attention forward. Handles compress_ratio>0 layers
         # via Compressor + Indexer, appending pooled global context to local KV.
+        # defer_out=True (decode tail region path) returns (sdpa_out, pos) so
+        # the caller can fuse the output projection into its own region.
         B, L, _ = x.shape
         local_cache = cache if isinstance(cache, DeepseekV4Cache) else cache
         offset = local_cache.offset if local_cache is not None else 0
 
-        q_residual = self.q_norm(self.wq_a(x))
-        q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
-        # Per-head RMSNorm via mx.fast.rms_norm (1 fused Metal kernel vs 3 ops).
-        # Uses unit weight tensor — DSV4 has no learned per-head norm weight.
-        q = mx.fast.rms_norm(
-            q,
-            weight=_get_q_norm_ones(self.head_dim, q.dtype),
-            eps=self.args.rms_norm_eps,
-        )
-        q = q.transpose(0, 2, 1, 3)
+        use_compiled = _DSV4_COMPILE_REGIONS and L == 1
+        if use_compiled:
+            pos = mx.arange(offset, offset + 1, dtype=mx.float32)
+            q_residual, q, kv = self._decode_pre_region(x, pos)
+        else:
+            q_residual = self.q_norm(self.wq_a(x))
+            q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
+            # Per-head RMSNorm via mx.fast.rms_norm (1 fused Metal kernel vs 3 ops).
+            # Uses unit weight tensor — DSV4 has no learned per-head norm weight.
+            q = mx.fast.rms_norm(
+                q,
+                weight=_get_q_norm_ones(self.head_dim, q.dtype),
+                eps=self.args.rms_norm_eps,
+            )
+            q = q.transpose(0, 2, 1, 3)
 
-        kv = self.kv_norm(self.wkv(x)).reshape(B, L, 1, self.head_dim).transpose(0, 2, 1, 3)
+            kv = self.kv_norm(self.wkv(x)).reshape(B, L, 1, self.head_dim).transpose(0, 2, 1, 3)
 
-        q = _apply_partial_rope(q, self.rope, offset)
-        kv = _apply_partial_rope(kv, self.rope, offset)
-        kv = _fp8_qat_non_rope(kv, self.rope_head_dim)
+            q = _apply_partial_rope(q, self.rope, offset)
+            kv = _apply_partial_rope(kv, self.rope, offset)
+            kv = _fp8_qat_non_rope(kv, self.rope_head_dim)
 
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, kv)
@@ -2577,6 +2754,10 @@ class DeepseekV4Attention(nn.Module):
             )
         else:
             out = tiled_pool_out
+        if use_compiled:
+            if defer_out:
+                return out, pos
+            return self._decode_out_region(out, pos)
         out = _apply_partial_rope(out, self.rope, offset, inverse=True)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, self.n_heads * self.head_dim)
         out = self._grouped_output_projection(out)
@@ -2808,21 +2989,52 @@ class MoE(nn.Module):
             routed = mx.unflatten(routed, 0, inds.shape)
         return routed.squeeze(-2)
 
-    def __call__(self, x, input_ids=None):
-        dtype = x.dtype
+    def _moe_math(self, x, input_ids=None):
+        """Raw MoE math: gate (+topk or hash lookup), 3 gather_qmm, swiglu,
+        shared expert, fp32 accumulate. Traced standalone or inside a region.
+
+        Official 0731 initializes the MoE accumulator in FP32, adds every
+        routed expert and the shared expert there, then casts once to x.dtype.
+        The uint32 cast is belt-and-suspenders — mlx gather_qmm in
+        QuantizedSwitchLinear strictly requires int32; argpartition return
+        dtype varies by mlx version.
+        """
         inds, scores = self.gate(x, input_ids=input_ids)
-        # Belt-and-suspenders int32 cast — mlx gather_qmm in QuantizedSwitchLinear
-        # strictly requires int32; argpartition return dtype varies by mlx version.
         inds = inds.astype(mx.uint32)
         routed = self._weighted_routed_experts(x, inds, scores)
-        # Official 0731 initializes the MoE accumulator in FP32, adds every
-        # routed expert and the shared expert there, then casts once to x.dtype.
         return _dsv4_accumulate_moe(
             routed,
             self.shared_experts(x),
             x.shape,
-            dtype,
+            x.dtype,
         )
+
+    def _decode_moe_region(self, x, input_ids):
+        """Whole-MoE compiled decode region — one dispatch."""
+        compiled = self.__dict__.get("_decode_moe_compiled")
+        if compiled is None:
+            if self.gate.hash:
+                def _impl(xin, ids):
+                    return self._moe_math(xin, ids)
+            else:
+                def _impl(xin):
+                    return self._moe_math(xin, None)
+
+            compiled = mx.compile(_impl)
+            self.__dict__["_decode_moe_compiled"] = compiled
+        if self.gate.hash:
+            return compiled(x, input_ids)
+        return compiled(x)
+
+    def __call__(self, x, input_ids=None):
+        if (
+            _DSV4_COMPILE_REGIONS
+            and x.shape[1] == 1
+            and not self.training
+            and not (self.gate.hash and input_ids is None)
+        ):
+            return self._decode_moe_region(x, input_ids)
+        return self._moe_math(x, input_ids)
 
 
 # ---------- Block with mHC ----------
@@ -2908,26 +3120,9 @@ def _make_hc_post_decode_kernel():
 _hc_post_decode_kernel = _make_hc_post_decode_kernel()
 
 
-def _dsv4_hc_post(x, residual, post, comb):
-    """Dispatch the exact fused decode contraction with a pure-MLX fallback."""
-
-    try:
-        use_metal = mx.default_device() == mx.gpu and mx.metal.is_available()
-    except Exception:
-        use_metal = False
+def _dsv4_hc_post_kernel_call(x, residual, post, comb):
     hc_mult = int(comb.shape[-1])
     hidden_size = int(x.shape[-1])
-    if (
-        _hc_post_decode_kernel is None
-        or not use_metal
-        or len(x.shape) < 3
-        or int(x.shape[-2]) != 1
-        or hc_mult != int(comb.shape[-2])
-        or int(residual.shape[-2]) != hc_mult
-        or int(x.size) == 0
-    ):
-        return _dsv4_hc_post_ops(x, residual, post, comb)
-
     x_contiguous = mx.contiguous(x)
     residual_contiguous = mx.contiguous(residual)
     post_contiguous = mx.contiguous(post)
@@ -2952,11 +3147,80 @@ def _dsv4_hc_post(x, residual, post, comb):
     )[0]
 
 
+_dsv4_hc_post_fused = None
+
+
+def _dsv4_hc_post(x, residual, post, comb):
+    """Dispatch the exact fused decode contraction with a pure-MLX fallback."""
+
+    try:
+        use_metal = mx.default_device() == mx.gpu and mx.metal.is_available()
+    except Exception:
+        use_metal = False
+    hc_mult = int(comb.shape[-1])
+    if (
+        _hc_post_decode_kernel is None
+        or not use_metal
+        or len(x.shape) < 3
+        or int(x.shape[-2]) != 1
+        or hc_mult != int(comb.shape[-2])
+        or int(residual.shape[-2]) != hc_mult
+        or int(x.size) == 0
+    ):
+        return _dsv4_hc_post_ops(x, residual, post, comb)
+
+    if _DSV4_COMPILE_REGIONS:
+        global _dsv4_hc_post_fused
+        if _dsv4_hc_post_fused is None:
+            _dsv4_hc_post_fused = mx.compile(_dsv4_hc_post_kernel_call)
+        return _dsv4_hc_post_fused(x, residual, post, comb)
+    return _dsv4_hc_post_kernel_call(x, residual, post, comb)
+
+
 def _dsv4_norm_preserve_activation_dtype(norm, x):
     """Apply a folded FP32 norm without promoting the activation stream."""
 
     activation_dtype = x.dtype
     return norm(x).astype(activation_dtype)
+
+
+_DSV4_HC_PRE_COMPILED: Dict[tuple, Any] = {}
+
+
+def _hc_pre_impl(x, fn_w, scale, base, rms_eps, hc_mult, sinkhorn_iters, hc_eps):
+    """Raw mHC-pre math shared by the standalone compiled region and the
+    per-layer decode tail region (traced inside either)."""
+    shape = x.shape
+    x_flat = mx.flatten(x, start_axis=2).astype(mx.float32)
+    rsqrt = mx.rsqrt(
+        mx.mean(x_flat.square(), axis=-1, keepdims=True) + rms_eps
+    )
+    mixes = (x_flat @ fn_w.T) * rsqrt
+    pre, post, comb = hc_split_sinkhorn(
+        mixes, scale, base, hc_mult, sinkhorn_iters, hc_eps,
+    )
+    y = mx.sum(pre[..., None] * mx.reshape(x_flat, shape), axis=2)
+    return y.astype(x.dtype), post, comb
+
+
+def _get_hc_pre_compiled(rms_eps, hc_mult, sinkhorn_iters, hc_eps):
+    """One compiled mHC-pre region shared by every layer (weights are inputs).
+
+    The sinkhorn Metal kernel traces cleanly inside `mx.compile`; fusing the
+    flatten/rsqrt/mix/reduce glue around it collapses ~10 host dispatches per
+    call (86 calls/token) into one.
+    """
+    key = (rms_eps, hc_mult, sinkhorn_iters, hc_eps)
+    fn = _DSV4_HC_PRE_COMPILED.get(key)
+    if fn is None:
+        def _impl(x, fn_w, scale, base):
+            return _hc_pre_impl(
+                x, fn_w, scale, base, rms_eps, hc_mult, sinkhorn_iters, hc_eps,
+            )
+
+        fn = mx.compile(_impl)
+        _DSV4_HC_PRE_COMPILED[key] = fn
+    return fn
 
 
 class DeepseekV4DecoderLayer(nn.Module):
@@ -2979,6 +3243,12 @@ class DeepseekV4DecoderLayer(nn.Module):
 
     def _hc_pre(self, x, fn, scale, base):
         # x: (B, L, hc_mult, D)
+        if _DSV4_COMPILE_REGIONS and x.shape[1] == 1:
+            compiled = _get_hc_pre_compiled(
+                self.args.rms_norm_eps, self.args.hc_mult,
+                self.args.hc_sinkhorn_iters, self.args.hc_eps,
+            )
+            return compiled(x, fn, scale, base)
         shape = x.shape
         x_flat = mx.flatten(x, start_axis=2).astype(mx.float32)
         rsqrt = mx.rsqrt(mx.mean(x_flat.square(), axis=-1, keepdims=True) + self.args.rms_norm_eps)
@@ -2993,11 +3263,92 @@ class DeepseekV4DecoderLayer(nn.Module):
     def _hc_post(self, x, residual, post, comb):
         return _dsv4_hc_post(x, residual, post, comb)
 
+    def _decode_tail_region(self, sdpa_out, residual, post, comb, pos, input_ids):
+        """One compiled region for the whole decode tail: attention output
+        projection + hc_post(attn) + hc_pre(ffn) + post-LN + MoE + hc_post(ffn).
+
+        Merging these five compiled calls + two raw norms into a single region
+        removes ~4 host dispatch floors per layer per token. Weights are
+        captured as trace constants (per-layer closure); pos/ids are array
+        inputs so value changes never retrace.
+        """
+        compiled = self.__dict__.get("_decode_tail_compiled")
+        if compiled is None:
+            args = self.args
+
+            def _tail(o, res, p1, c1, p, ids):
+                out = self.self_attn._decode_out_math(o, p)
+                h = _dsv4_hc_post_kernel_call(out, res, p1, c1)
+                h2, p2, c2 = _hc_pre_impl(
+                    h, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base,
+                    args.rms_norm_eps, args.hc_mult,
+                    args.hc_sinkhorn_iters, args.hc_eps,
+                )
+                h2 = _dsv4_norm_preserve_activation_dtype(
+                    self.post_attention_layernorm, h2,
+                )
+                m = self.mlp._moe_math(h2, ids)
+                return _dsv4_hc_post_kernel_call(m, h, p2, c2)
+
+            if self.mlp.gate.hash:
+                def _impl(o, res, p1, c1, p, ids):
+                    return _tail(o, res, p1, c1, p, ids)
+            else:
+                def _impl(o, res, p1, c1, p):
+                    return _tail(o, res, p1, c1, p, None)
+
+            compiled = mx.compile(_impl)
+            self.__dict__["_decode_tail_compiled"] = compiled
+        if self.mlp.gate.hash:
+            return compiled(sdpa_out, residual, post, comb, pos, input_ids)
+        return compiled(sdpa_out, residual, post, comb, pos)
+
     def __call__(self, x, mask=None, cache=None, input_ids=None):
+        if (
+            _DSV4_COMPILE_REGIONS
+            and x.shape[1] == 1
+            and _hc_post_decode_kernel is not None
+            and not self.mlp.training
+            and not (self.mlp.gate.hash and input_ids is None)
+        ):
+            try:
+                tail_ok = mx.default_device() == mx.gpu and mx.metal.is_available()
+            except Exception:
+                tail_ok = False
+            if tail_ok:
+                residual = x
+                xh, post, comb = self._hc_pre(
+                    x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base,
+                )
+                xh = self.input_layernorm(xh)
+                sdpa_out, pos = self.self_attn(
+                    xh, mask=mask, cache=cache, defer_out=True,
+                )
+                return self._decode_tail_region(
+                    sdpa_out, residual, post, comb, pos, input_ids,
+                )
+
         residual = x
         x, post, comb = self._hc_pre(x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         x = self.input_layernorm(x)
-        x = self.self_attn(x, mask=mask, cache=cache)
+        sub = _dsv4_attn_subchunk_tokens()
+        if cache is not None and sub and x.shape[1] >= 2 * sub:
+            # Sub-chunked attention: each slice sees the cache offset advanced
+            # by the previous slice's update_and_fetch, so the per-slice mask
+            # from the layer's own cache is exact. MoE below still consumes
+            # the full concatenated chunk for gather_qmm batch throughput.
+            outs = []
+            for s in range(0, x.shape[1], sub):
+                xs = x[:, s:s + sub]
+                sub_mask = create_attention_mask(
+                    xs, cache,
+                    window_size=self.args.sliding_window,
+                    return_array=True,
+                )
+                outs.append(self.self_attn(xs, mask=sub_mask, cache=cache))
+            x = mx.concatenate(outs, axis=1)
+        else:
+            x = self.self_attn(x, mask=mask, cache=cache)
         x = self._hc_post(x, residual, post, comb)
 
         residual = x
