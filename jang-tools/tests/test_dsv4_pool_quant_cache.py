@@ -560,3 +560,114 @@ def test_ratio4_attention_fails_closed_on_native_pool_misalignment(monkeypatch):
         match=r"compressor/indexer pool row misalignment: compressor=2 indexer=1",
     ):
         attention(values, cache=cache)
+
+
+def test_pool_quant_deferred_delta_appends_compact_once_and_stay_lossless(
+    monkeypatch,
+):
+    """Restore chains defer per-append compaction to one finalize per branch.
+
+    Compacting per append re-concatenates the trailing slab for every record;
+    a near-1M chain schedules that whole burst without a blocking eval and can
+    OOM Metal beside ~95GB of weights (box stage8 crash, 2026-08-07).
+    """
+    import jang_tools.dsv4.pool_quant_cache as pq
+    from jang_tools.dsv4.pool_quant_cache import PoolQuantizedV4Cache, _qpool_rows
+
+    monkeypatch.setattr(pq, "_POOL_BF16_MAX_BYTES", 0)
+    source = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    total_rows = 64 * 40
+    source.update_pool_view(_pool_values(total_rows, 32), "compressor_state")
+
+    records = [
+        source.compressor_state.export_pool_delta(start, start + 64)
+        for start in range(0, total_rows, 64)
+    ]
+
+    compactions = []
+    original = pq._StateProxy._compact_segments_to_slabs
+
+    def _counting(self):
+        compactions.append(True)
+        return original(self)
+
+    monkeypatch.setattr(pq._StateProxy, "_compact_segments_to_slabs", _counting)
+
+    restored = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    proxy = restored.compressor_state
+    for record in records:
+        proxy.append_pool_delta(record, defer_compaction=True)
+    assert not compactions, "deferred appends must not compact mid-chain"
+    assert len(proxy._pooled_q_segments) >= len(records)
+
+    proxy.finalize_deferred_pool_appends()
+    assert len(compactions) == 1
+    assert proxy._q_rows_deferred is None
+    assert sum(_qpool_rows(s) for s in proxy._pooled_q_segments) == total_rows
+    assert len(proxy._pooled_q_segments) <= max(
+        1, -(-total_rows // pq._POOL_SLAB_MAX_ROWS) + 1
+    )
+
+    expected = source.compressor_state.materialize_pooled()
+    actual = proxy.materialize_pooled()
+    mx.eval(expected, actual)
+    assert mx.array_equal(expected, actual).item()
+
+    stale = dict(records[0])
+    stale["start_row"] = int(stale["start_row"]) + 1
+    stale["end_row"] = int(stale["end_row"]) + 1
+    with pytest.raises(ValueError, match="not contiguous"):
+        proxy.append_pool_delta(stale, defer_compaction=True)
+
+
+def test_restore_anchor_from_deltas_finalizes_both_pool_branches(monkeypatch):
+    """restore_anchor_from_deltas must leave no deferred state behind."""
+    import jang_tools.dsv4.pool_quant_cache as pq
+
+    monkeypatch.setattr(pq, "_POOL_BF16_MAX_BYTES", 0)
+    finalized = []
+    original = pq._StateProxy.finalize_deferred_pool_appends
+
+    def _counting(self):
+        finalized.append(self)
+        return original(self)
+
+    monkeypatch.setattr(
+        pq._StateProxy, "finalize_deferred_pool_appends", _counting
+    )
+
+    from jang_tools.dsv4.pool_quant_cache import PoolQuantizedV4Cache
+
+    tokens = 8 * 256
+    cache = PoolQuantizedV4Cache(sliding_window=128, compress_ratio=4)
+    rows = tokens // 4
+    cache.update_pool_view(_pool_values(rows, 32), "compressor_state")
+    cache.update_pool_view(_pool_values(rows, 16, phase=0.3), "indexer_state")
+    keys = _pool_values(128, 16)[:, None]
+    cache.local.update_and_fetch(keys, keys)
+    cache.meta_state = (0, 128, tokens, 128)
+    cache._seen_tokens = tokens
+
+    records = [
+        cache.export_block_delta(
+            start,
+            start + 256,
+            block_size=256,
+            anchor_interval_blocks=8,
+            force_anchor=(start + 256 == tokens),
+        )
+        for start in range(0, tokens, 256)
+    ]
+
+    restored = PoolQuantizedV4Cache.restore_anchor_from_deltas(
+        records,
+        target_tokens=tokens,
+        block_size=256,
+        anchor_interval_blocks=8,
+    )
+    assert restored.checkpoint_tokens == tokens
+    assert restored.replayed_tokens == 0
+    proxies = {id(restored.cache.compressor_state), id(restored.cache.indexer_state)}
+    assert {id(p) for p in finalized} >= proxies
+    assert restored.cache.compressor_state._q_rows_deferred is None
+    assert restored.cache.indexer_state._q_rows_deferred is None

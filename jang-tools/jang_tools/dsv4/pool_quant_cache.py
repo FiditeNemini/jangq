@@ -329,6 +329,7 @@ class _StateProxy(MutableMapping[str, Any]):
         self._pooled_bf16 = None
         self._pooled_q_segments: list[Any] = []
         self._pooled_empty_spec: tuple[tuple[int, ...], Any] | None = None
+        self._q_rows_deferred: int | None = None
         if initial:
             for key, value in initial.items():
                 self[key] = value
@@ -343,6 +344,7 @@ class _StateProxy(MutableMapping[str, Any]):
             self._pooled_bf16 = None
             self._pooled_q_segments = []
             self._pooled_empty_spec = None
+            self._q_rows_deferred = None
             if value is not None:
                 rows = int(value.shape[1])
                 if rows == 0:
@@ -594,10 +596,23 @@ class _StateProxy(MutableMapping[str, Any]):
         exported under (a near-1M pool can carry thousands of 64-row wire
         segments). One native-q8 regroup on import keeps every later decode
         token off the per-segment op flood.
+
+        Each merged slab is evaluated before the next one is built. The concat
+        itself only async-schedules; a near-1M import/restore would otherwise
+        push the entire regroup into the Metal stream without one blocking
+        sync, which can exhaust device memory next to ~95GB of weights.
         """
         segments = self._pooled_q_segments
         if len(segments) <= 1:
             return
+
+        def _emit_slab(pending):
+            if len(pending) == 1:
+                return pending[0]
+            slab = _concat_qpools(pending)
+            mx.eval(slab[0], slab[1], slab[2])
+            return slab
+
         regrouped = []
         pending = []
         pending_rows = 0
@@ -610,18 +625,14 @@ class _StateProxy(MutableMapping[str, Any]):
                 or key is None
                 or key != pending_key
             ):
-                regrouped.append(
-                    pending[0] if len(pending) == 1 else _concat_qpools(pending)
-                )
+                regrouped.append(_emit_slab(pending))
                 pending = []
                 pending_rows = 0
             pending.append(segment)
             pending_rows += rows
             pending_key = key
         if pending:
-            regrouped.append(
-                pending[0] if len(pending) == 1 else _concat_qpools(pending)
-            )
+            regrouped.append(_emit_slab(pending))
         self._pooled_q_segments = regrouped
 
     def append_pooled(self, value: Any) -> None:
@@ -785,19 +796,30 @@ class _StateProxy(MutableMapping[str, Any]):
             "segments": tuple(segments),
         }
 
-    def append_pool_delta(self, delta) -> None:
-        """Append a lossless BF16/q8 delta while preserving q8 codes directly."""
+    def append_pool_delta(self, delta, *, defer_compaction: bool = False) -> None:
+        """Append a lossless BF16/q8 delta while preserving q8 codes directly.
+
+        ``defer_compaction=True`` skips the per-append slab regroup and reuses
+        a running row count for the contiguity check. A near-1M restore chain
+        (~1.6K records per branch) otherwise re-concatenates the trailing slab
+        on every append — an unsynchronized Metal burst that can OOM a
+        weight-heavy host. Deferred callers MUST invoke
+        :meth:`finalize_deferred_pool_appends` once the chain is applied.
+        """
         from .cache_delta import DSV4_POOL_DELTA_SCHEMA
 
         if not isinstance(delta, dict) or delta.get("schema") != DSV4_POOL_DELTA_SCHEMA:
             raise ValueError("unsupported DSV4 pool delta")
         start = int(delta.get("start_row", -1))
         end = int(delta.get("end_row", -1))
-        current_rows = (
-            int(self._pooled_bf16.shape[1])
-            if self._pooled_bf16 is not None
-            else sum(_qpool_rows(segment) for segment in self._pooled_q_segments)
-        )
+        if self._pooled_bf16 is not None:
+            current_rows = int(self._pooled_bf16.shape[1])
+        elif defer_compaction and self._q_rows_deferred is not None:
+            current_rows = self._q_rows_deferred
+        else:
+            current_rows = sum(
+                _qpool_rows(segment) for segment in self._pooled_q_segments
+            )
         if start != current_rows or end < start:
             raise ValueError(
                 "DSV4 pool delta is not contiguous: "
@@ -820,6 +842,8 @@ class _StateProxy(MutableMapping[str, Any]):
                 self._compact_full_tail()
             else:
                 self.append_pooled(value)
+            if defer_compaction:
+                self._q_rows_deferred = end
             return
         if storage != "q8":
             raise ValueError("unsupported DSV4 pool delta storage")
@@ -832,6 +856,15 @@ class _StateProxy(MutableMapping[str, Any]):
             self._replace_quantized(self._pooled_bf16)
         self._pooled_empty_spec = None
         self._pooled_q_segments.extend(segments)
+        if defer_compaction:
+            self._q_rows_deferred = end
+        else:
+            self._q_rows_deferred = None
+            self._compact_segments_to_slabs()
+
+    def finalize_deferred_pool_appends(self) -> None:
+        """Regroup once after a deferred ``append_pool_delta`` sequence."""
+        self._q_rows_deferred = None
         self._compact_segments_to_slabs()
 
     def import_storage_state(self, value) -> None:
@@ -877,6 +910,7 @@ class _StateProxy(MutableMapping[str, Any]):
         self._pooled_bf16 = pooled_bf16
         self._pooled_q_segments = segments
         self._pooled_empty_spec = empty_spec
+        self._q_rows_deferred = None
         self._compact_segments_to_slabs()
 
     def quant_nbytes(self) -> int:
@@ -984,10 +1018,15 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
             raise ValueError("PoolQuantizedV4Cache requires _StateProxy branches")
         return state.export_pool_delta(start_row, end_row)
 
-    def _append_pool_delta(self, state, delta):
+    def _append_pool_delta(self, state, delta, *, defer_compaction: bool = False):
         if not isinstance(state, _StateProxy):
             raise ValueError("PoolQuantizedV4Cache requires _StateProxy branches")
-        state.append_pool_delta(delta)
+        state.append_pool_delta(delta, defer_compaction=defer_compaction)
+
+    def _finalize_pool_delta_appends(self, state):
+        if not isinstance(state, _StateProxy):
+            raise ValueError("PoolQuantizedV4Cache requires _StateProxy branches")
+        state.finalize_deferred_pool_appends()
 
     def update_pool_view(self, new_pooled, state_key, seq_len=None):
         """Append rows and return the active attention representation.

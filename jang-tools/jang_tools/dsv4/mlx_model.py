@@ -1676,15 +1676,27 @@ class DeepseekV4Cache:
             # Native q8 segments are already detached and immutable. Append
             # their code/scale/min tuples directly; only the bounded initial
             # BF16 hot tier can trigger one deterministic promotion.
+            # Compaction is deferred to one finalize per branch: compacting per
+            # record re-concatenates the trailing slab on every append, and a
+            # near-1M chain (~1.6K records x 2 branches) schedules that whole
+            # burst without a blocking eval — enough to OOM Metal beside ~95GB
+            # of weights. The finalize regroups once with bounded per-slab
+            # evals instead.
             for record in selected:
                 cache._append_pool_delta(
-                    cache.compressor_state, record["compressor_pool"]
+                    cache.compressor_state,
+                    record["compressor_pool"],
+                    defer_compaction=True,
                 )
                 cache._append_pool_delta(
-                    cache.indexer_state, record["indexer_pool"]
+                    cache.indexer_state,
+                    record["indexer_pool"],
+                    defer_compaction=True,
                 )
                 compressor_rows = int(record["compressor_pool"]["end_row"])
                 indexer_rows = int(record["indexer_pool"]["end_row"])
+            cache._finalize_pool_delta_appends(cache.compressor_state)
+            cache._finalize_pool_delta_appends(cache.indexer_state)
         else:
             # A million-token BF16 chain contains thousands of block deltas.
             # Repeated pairwise concatenation is quadratic; validate the row
