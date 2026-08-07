@@ -28,6 +28,7 @@ from .ssm_layout import (
     forced_passthrough_bits as _shared_forced_passthrough_bits,
     prepare_mlx_passthrough_tensor as _shared_prepare_mlx_passthrough_tensor,
 )
+from .mup_fold import MupFold
 
 
 # ── Stale-artifact cleanup (M115, iter 39) ────────────────────────────
@@ -104,13 +105,19 @@ def _is_vision_tensor_name(tensor_name: str) -> bool:
     )
 
 
-def _sanitize_output_tensor_name(tensor_name: str) -> str:
-    """Map wrapped HF checkpoint keys to the runtime-facing MLX names."""
+def _sanitize_output_tensor_name(tensor_name: str, vl_wrapped: bool = False) -> str:
+    """Map wrapped HF checkpoint keys to the runtime-facing MLX names.
+
+    The `language_model.` prefix on lm_head only applies to VL checkpoints
+    whose other tensors live under the wrapped namespace; text checkpoints
+    keep lm_head at top level (mlxstudio#129: loaders bind the head at top
+    level and reject the prefixed name).
+    """
     if tensor_name.startswith("model.language_model."):
         return tensor_name.replace("model.language_model", "language_model.model", 1)
     if tensor_name.startswith("model.visual"):
         return tensor_name.replace("model.visual", "vision_tower", 1)
-    if tensor_name == "lm_head.weight" or tensor_name.startswith("lm_head."):
+    if vl_wrapped and (tensor_name == "lm_head.weight" or tensor_name.startswith("lm_head.")):
         return "language_model." + tensor_name
     if ".feed_forward.w1.weight" in tensor_name:
         return tensor_name.replace(".feed_forward.w1.weight", ".feed_forward.gate_proj.weight")
@@ -699,6 +706,10 @@ def convert_model(
     arch_config = detect_architecture(model_path)
     print(f"  {summarize_architecture(arch_config)}\n")
 
+    mup_fold = MupFold.from_config(_raw_config)
+    if mup_fold is not None:
+        print("  muP fold: active — folding config multipliers into weights (mlxstudio#129)")
+
     # Auto-detect optimal group_size for MoE models with many experts.
     # Models with 150+ experts suffer 15-25% speed regression at group_size=64
     # due to gather_qmm kernel cache pressure. group_size=128 eliminates this.
@@ -837,6 +848,14 @@ def convert_model(
                         imp = np.ones(n_blocks, dtype=np.float32) * 0.5
                     all_importance.append(imp)
                     all_tensor_names_for_alloc.extend([tensor_name] * n_blocks)
+
+    # Wrapped-VL checkpoints (model.language_model.* / model.visual*) need
+    # lm_head re-homed under language_model.; text checkpoints must keep it
+    # top-level (mlxstudio#129).
+    vl_wrapped = any(
+        name.startswith(("model.language_model.", "model.visual"))
+        for name in source_tensor_names
+    )
 
     # Run bit allocation → produces _tensor_bits dict (tensor_name → bits)
     if use_compact:
@@ -1116,7 +1135,7 @@ def convert_model(
                 except TypeError:
                     w = _load_bf16_tensor(sf_path, tensor_name, shape)
                 w_out = w.astype(np.float16) if w.dtype != np.float16 else w
-                passthrough[_sanitize_output_tensor_name(tensor_name)] = (
+                passthrough[_sanitize_output_tensor_name(tensor_name, vl_wrapped)] = (
                     _prepare_vision_passthrough_tensor(tensor_name, w_out)
                 )
             continue
@@ -1161,6 +1180,9 @@ def convert_model(
                         weights = load_fp8_tensor(sf_path, tensor_name, shape, scale_inv)
                     except Exception:
                         weights = _load_bf16_tensor(sf_path, tensor_name, shape)
+
+        if mup_fold is not None:
+            weights = mup_fold.apply(tensor_name, weights)
 
         # AWQ scaling
         awq_scales = None
@@ -1212,7 +1234,7 @@ def convert_model(
         # Gate is tiny (128 × 4096 = 0.5 MB per layer) so size impact is negligible.
         # This ensures maximum routing precision and avoids bf16/f16 dtype issues.
         if _is_moe_router_gate(tensor_name) and num_experts > 0:
-            passthrough[_sanitize_output_tensor_name(tensor_name)] = weights.astype(np.float16)
+            passthrough[_sanitize_output_tensor_name(tensor_name, vl_wrapped)] = weights.astype(np.float16)
             # offset already incremented at line 412 — do NOT increment again
             print(f"    Gate passthrough (f16): {tensor_name} → {weights.shape}")
             continue
@@ -1254,7 +1276,7 @@ def convert_model(
                 bits=split_up_bits,
                 group_size=tensor_gs,
             )
-            base_name = _sanitize_output_tensor_name(tensor_name)
+            base_name = _sanitize_output_tensor_name(tensor_name, vl_wrapped)
             gate_base = base_name.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
             up_base = base_name.replace("experts.gate_up_proj", "switch_mlp.up_proj")
             v2_tensors[f"{gate_base}.weight"] = gate_qw
@@ -1472,7 +1494,7 @@ def convert_model(
             _metal_cache_clear_error = _e
 
         # --- Store with MLX-ready names and shapes ---
-        base_name = _sanitize_output_tensor_name(tensor_name)
+        base_name = _sanitize_output_tensor_name(tensor_name, vl_wrapped)
         if base_name.endswith(".weight"):
             base_name = base_name[:-7]
 
@@ -1673,7 +1695,7 @@ def convert_model(
                 # Skip importance tensors (calibration-only)
                 if tensor_name.endswith(".importance"):
                     continue
-                out_name = _sanitize_output_tensor_name(tensor_name)
+                out_name = _sanitize_output_tensor_name(tensor_name, vl_wrapped)
                 if out_name in passthrough:
                     continue
                 base = out_name.replace(".weight", "")
@@ -1695,6 +1717,9 @@ def convert_model(
                         tensor = f.get_tensor(tensor_name)
                     except TypeError:
                         tensor = _load_bf16_tensor(sf_path, tensor_name, shape)
+
+                    if mup_fold is not None and is_bias:
+                        tensor = mup_fold.apply(tensor_name, tensor)
 
                     forced_bits = _forced_passthrough_bits(tensor_name)
                     if forced_bits is not None:
@@ -1729,6 +1754,12 @@ def convert_model(
     # Strip source quantization_config (FP8 metadata) — leaving it causes mlx_lm
     # to misinterpret the model format. JANG uses "quantization" key instead.
     model_config.pop("quantization_config", None)
+    if mup_fold is not None:
+        # Loaders must not re-apply muP multipliers (or gate a second fold
+        # on conv1d layout — mlxstudio#129); the marker says weights already
+        # carry them.
+        model_config["jang_mup_folded"] = True
+        print(f"  muP fold: {len(mup_fold.folded)} tensors folded; config stamped jang_mup_folded")
     text_config_for_tokens = model_config.get("text_config")
     if isinstance(text_config_for_tokens, dict):
         for token_key in ("eos_token_id", "bos_token_id", "pad_token_id"):

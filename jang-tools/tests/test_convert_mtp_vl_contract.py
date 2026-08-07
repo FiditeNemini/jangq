@@ -85,8 +85,18 @@ def test_qwen_conditional_generation_names_are_sanitized_to_runtime_keys():
         _sanitize_output_tensor_name("model.visual.patch_embed.proj.weight")
         == "vision_tower.patch_embed.proj.weight"
     )
-    assert _sanitize_output_tensor_name("lm_head.weight") == "language_model.lm_head.weight"
+    assert (
+        _sanitize_output_tensor_name("lm_head.weight", vl_wrapped=True)
+        == "language_model.lm_head.weight"
+    )
     assert _sanitize_output_tensor_name("mtp.fc.weight") == "mtp.fc.weight"
+
+
+def test_text_checkpoint_lm_head_stays_top_level():
+    # mlxstudio#129 secondary: text checkpoints must keep lm_head at top
+    # level; only wrapped-VL namespaces re-home it under language_model.
+    assert _sanitize_output_tensor_name("lm_head.weight") == "lm_head.weight"
+    assert _sanitize_output_tensor_name("lm_head.weight", vl_wrapped=False) == "lm_head.weight"
 
 
 def test_qwen_5d_patch_embed_transposes_to_mlx_layout():
