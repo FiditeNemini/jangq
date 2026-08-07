@@ -869,6 +869,29 @@ class DeepseekV4RoPE(nn.Module):
 # (max|diff| = 0.0) against the raw path before adoption.
 _DSV4_COMPILE_REGIONS = os.environ.get("DSV4_COMPILE_REGIONS", "1") == "1"
 
+# Diagnostic-only ceiling probe: freeze compressed pools during decode to
+# measure token speed with zero compressor/indexer bookkeeping ops. Produces
+# WRONG long-range attention — never enable outside perf diagnosis.
+_DSV4_PERF_PROBE_SKIP_POOL = os.environ.get("DSV4_PERF_PROBE_SKIP_POOL", "0") == "1"
+
+# Decode pool-bookkeeping deferral. Between compression-window boundaries the
+# compressor/indexer emit ZERO pool rows, yet the per-token path still pays
+# buffer concat/slice ops + front projections across 43 layers (~5.1ms/token
+# of host graph-build + kernel-encode, measured via the frozen-pool probe).
+# Deferral buffers raw hidden-state refs in Python lists and runs the real
+# advancement in one batched call at the token where a window completes — the
+# emitted rows and their visibility timing are identical to the per-token
+# path, so pool contents match token-for-token. External state readers
+# (anchors, prefix-cache extraction, block export, `state` property) flush
+# pending tokens first via `DeepseekV4Cache.flush_pool_pending()`.
+_DSV4_DEFER_MODE = int(os.environ.get("DSV4_DEFER_POOL", "1") or "1")
+# 0 = off, 1 = defer + window-boundary flush (production), 9 = perf probe:
+# defer path but never append/flush (stale pool, WRONG numerics — diagnostic
+# for separating bookkeeping cost from live-pool growth cost).
+_DSV4_DEFER_POOL = _DSV4_DEFER_MODE != 0
+# One-time diagnostics proving the deferral path engages and actually batches.
+_DSV4_DEFER_DIAG = {"entered": False, "batched": False}
+
 
 def _dsv4_rope_pair_rotate(x, cos, sin):
     x = x.reshape(*x.shape[:-1], x.shape[-1] // 2, 2)
@@ -951,6 +974,10 @@ class DeepseekV4Cache:
         self.local = RotatingKVCache(max_size=sliding_window, keep=0)
         self.compressor_state = {"buffer_kv": None, "buffer_gate": None, "pooled": None}
         self.indexer_state = {"buffer_kv": None, "buffer_gate": None, "pooled": None}
+        # Deferred-decode pool bookkeeping (see _DSV4_DEFER_POOL). Kept in a
+        # parallel structure so the canonical 3-key state dicts stay clean for
+        # the `state` tuple, anchors, and engine-side key-by-key copies.
+        self._pool_pending = None
         # `compress_ratio` is the per-layer attention compression ratio used
         # by Compressor.accumulate_windows / update_pool. Stored on the cache
         # so `trim()` can do proportional pool-row truncation matching the
@@ -974,6 +1001,7 @@ class DeepseekV4Cache:
     @property
     def state(self):
         """Cache state tuple — mlx_lm generate iterates this for pipelined evaluation."""
+        self.flush_pool_pending()
         local_state = None if self.local.empty() else self.local.state
         return (
             local_state,
@@ -983,6 +1011,7 @@ class DeepseekV4Cache:
 
     @state.setter
     def state(self, value):
+        self._pool_pending = None
         local_state, compressor_state, indexer_state = value
         if local_state is None:
             self.local.keys = None
@@ -1063,6 +1092,13 @@ class DeepseekV4Cache:
         the legacy single-arg signature), fall back to v2.5.14's full
         pool reset — still correct, just heavier.
         """
+        # Deferred pool tokens are the newest unprocessed tokens; any trim
+        # discards them. This is equivalent to the per-token path, which would
+        # have buffered them into buffer_kv/buffer_gate and then cleared
+        # those buffers unconditionally below (pending never spans a window
+        # boundary, so it can never have contributed pool rows).
+        self._drop_pool_pending()
+
         # Trim KV first so we know the new total length for proportional
         # pool truncation.
         rv = self.local.trim(n)
@@ -1121,10 +1157,102 @@ class DeepseekV4Cache:
             for value in state.values():
                 if value is not None:
                     total += value.nbytes
+        if self._pool_pending:
+            for slot in self._pool_pending.values():
+                if slot:
+                    for arr in slot["xs"]:
+                        total += arr.nbytes
         return total
 
     def _branch_state(self, key):
         return self.indexer_state if key == "indexer_state" else self.compressor_state
+
+    def _pool_pending_slot(self, state_key):
+        pending = self._pool_pending
+        if pending is None:
+            pending = {"compressor_state": None, "indexer_state": None}
+            self._pool_pending = pending
+        slot = pending.get(state_key)
+        if slot is None:
+            slot = {"xs": [], "base": 0, "module": None, "rope": None, "last_pool": None}
+            pending[state_key] = slot
+        return slot
+
+    def note_pool_result(self, state_key, module, rope, result):
+        """Memoize the last pool object returned by a real advancement so
+        deferred tokens can hand the identical object to attention."""
+        slot = self._pool_pending_slot(state_key)
+        slot["module"] = module
+        slot["rope"] = rope
+        slot["last_pool"] = result
+
+    def defer_pool_token(self, module, x, rope, start_pos, state_key):
+        """Defer one decode token's compressor/indexer advancement.
+
+        Non-boundary tokens emit zero pool rows in the per-token path, so
+        buffering the raw hidden-state ref and advancing in one batched call
+        at the window-completion token produces identical rows at identical
+        token positions while skipping the per-token buffer bookkeeping ops.
+        """
+        slot = self._pool_pending_slot(state_key)
+        if _DSV4_DEFER_MODE == 9 and slot["last_pool"] is not None:
+            return slot["last_pool"]
+        if not slot["xs"]:
+            slot["base"] = int(start_pos)
+        slot["module"] = module
+        slot["rope"] = rope
+        slot["xs"].append(x)
+        ratio = int(module.compress_ratio)
+        buf = self._branch_state(state_key).get("buffer_kv")
+        blen = 0 if buf is None else int(buf.shape[1])
+        if module.overlap and blen >= ratio:
+            blen -= ratio
+        if not _DSV4_DEFER_DIAG["entered"]:
+            _DSV4_DEFER_DIAG["entered"] = True
+            logger.info(
+                "DSV4 pool deferral engaged: state_key=%s ratio=%d blen=%d "
+                "last_pool=%s", state_key, ratio, blen,
+                "set" if slot["last_pool"] is not None else "None",
+            )
+        if slot["last_pool"] is None or blen + len(slot["xs"]) >= ratio:
+            # Window completes at this token (or no memoized pool yet on a
+            # fresh/restored cache): run the real advancement now.
+            return self._flush_pool_slot(state_key)
+        return slot["last_pool"]
+
+    def _flush_pool_slot(self, state_key):
+        slot = self._pool_pending_slot(state_key)
+        xs = slot["xs"]
+        if not xs:
+            return slot["last_pool"]
+        slot["xs"] = []
+        x = xs[0] if len(xs) == 1 else mx.concatenate(xs, axis=1)
+        if len(xs) > 1 and not _DSV4_DEFER_DIAG["batched"]:
+            _DSV4_DEFER_DIAG["batched"] = True
+            logger.info(
+                "DSV4 pool deferral first batched flush: state_key=%s k=%d",
+                state_key, len(xs),
+            )
+        result = slot["module"]._advance(x, slot["rope"], self, slot["base"], state_key)
+        slot["last_pool"] = result
+        return result
+
+    def flush_pool_pending(self):
+        """Materialize deferred pool tokens before any external state read
+        (anchors, block export, `state` tuple, prefix-cache extraction)."""
+        if not self._pool_pending:
+            return
+        for state_key, slot in self._pool_pending.items():
+            if slot and slot["xs"]:
+                self._flush_pool_slot(state_key)
+
+    def _drop_pool_pending(self):
+        if not self._pool_pending:
+            return
+        for slot in self._pool_pending.values():
+            if slot:
+                slot["xs"] = []
+                slot["last_pool"] = None
 
     @staticmethod
     def _copy_delta_tree(value):
@@ -1221,6 +1349,7 @@ class DeepseekV4Cache:
         """
         from .cache_delta import DSV4_BLOCK_DELTA_SCHEMA
 
+        self.flush_pool_pending()
         start = int(start_token)
         end = int(end_token)
         block_size = int(block_size)
@@ -1608,6 +1737,7 @@ class DeepseekV4Cache:
                 f"offset={local_offset} idx={local_idx} checkpoint={checkpoint}"
             )
         cache.meta_state = local_meta
+        cache._pool_pending = None
         cache.compressor_state["buffer_kv"] = anchor.get("compressor_buffer_kv")
         cache.compressor_state["buffer_gate"] = anchor.get("compressor_buffer_gate")
         cache.indexer_state["buffer_kv"] = anchor.get("indexer_buffer_kv")
@@ -1822,9 +1952,42 @@ class Compressor(nn.Module):
         return fn(x)
 
     def __call__(self, x, rope, cache, start_pos, state_key="compressor_state"):
+        if (
+            _DSV4_DEFER_POOL
+            and cache is not None
+            and x.shape[0] == 1
+            and x.shape[1] == 1
+            and hasattr(cache, "defer_pool_token")
+        ):
+            return cache.defer_pool_token(self, x, rope, start_pos, state_key)
+        if cache is not None and hasattr(cache, "flush_pool_pending"):
+            # Multi-token advancement (prefill chunk / tool continuation) must
+            # consume any deferred decode tokens first to keep window order.
+            cache.flush_pool_pending()
+        result = self._advance(x, rope, cache, start_pos, state_key)
+        if _DSV4_DEFER_POOL and cache is not None and hasattr(cache, "note_pool_result"):
+            cache.note_pool_result(state_key, self, rope, result)
+        return result
+
+    def _advance(self, x, rope, cache, start_pos, state_key="compressor_state"):
         B, _, _ = x.shape
         dtype = x.dtype
-        use_compiled = _DSV4_COMPILE_REGIONS and x.shape[1] == 1 and cache is not None
+        if _DSV4_PERF_PROBE_SKIP_POOL and x.shape[1] == 1 and cache is not None:
+            frozen = self.__dict__.get("_probe_frozen_pool")
+            if frozen is not None:
+                return frozen
+        # Compiled front path covers single-token decode AND the small batched
+        # flush the pool deferral emits (k<=ratio for overlap/ratio-4 layers;
+        # mx.compile shape-specializes so each k adds one trace, k<=4 total).
+        # Ratio-128 flushes stay uncompiled — up to 128 distinct k shapes.
+        use_compiled = (
+            _DSV4_COMPILE_REGIONS
+            and cache is not None
+            and (
+                x.shape[1] == 1
+                or (self.overlap and x.shape[1] <= self.compress_ratio)
+            )
+        )
         # Official 0731 Compressor.forward promotes the residual stream before
         # both projections and keeps projection, softmax, and pooling math in
         # FP32.  The affine JANG bundle stores F16 q8 sidecars, so passing F16
@@ -1832,7 +1995,10 @@ class Compressor(nn.Module):
         # in F16.  Restore the source precision boundary explicitly.
         if use_compiled:
             if self.overlap:
-                pos = mx.array([start_pos], dtype=mx.float32)
+                if x.shape[1] == 1:
+                    pos = mx.array([start_pos], dtype=mx.float32)
+                else:
+                    pos = mx.arange(x.shape[1], dtype=mx.float32) + float(start_pos)
                 kv, gate = self._decode_front_overlap(x, pos)
             else:
                 kv, gate = self._decode_front(x)
@@ -1889,8 +2055,12 @@ class Compressor(nn.Module):
                 )
         if cache is not None:
             if hasattr(cache, "update_pool_view"):
-                return cache.update_pool_view(new_pooled, state_key)
-            return cache.update_pool(new_pooled, state_key)
+                result = cache.update_pool_view(new_pooled, state_key)
+            else:
+                result = cache.update_pool(new_pooled, state_key)
+            if _DSV4_PERF_PROBE_SKIP_POOL and x.shape[1] == 1:
+                self.__dict__["_probe_frozen_pool"] = result
+            return result
         return new_pooled
 
 

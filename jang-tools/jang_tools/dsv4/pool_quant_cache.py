@@ -799,6 +799,7 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
 
     @property
     def state(self):
+        self.flush_pool_pending()
         local_state = None if self.local.empty() else self.local.state
         return (
             local_state,
@@ -808,6 +809,7 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
 
     @state.setter
     def state(self, value):
+        self._pool_pending = None
         local_state, compressor_state, indexer_state = value
         if local_state is None:
             self.local.keys = None
@@ -820,6 +822,7 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
     @property
     def storage_state(self):
         """Lossless prompt/L2 state preserving native q8 pool segments."""
+        self.flush_pool_pending()
         local_state = None if self.local.empty() else self.local.state
         return (
             POOL_STORAGE_SCHEMA,
@@ -837,6 +840,7 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
         ):
             raise ValueError("unsupported DSV4 pool cache storage state")
         _schema, local_state, compressor_state, indexer_state = value
+        self._pool_pending = None
         if local_state is None:
             self.local.keys = None
             self.local.values = None
@@ -902,6 +906,7 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
 
     def trim(self, n):
         """Trim local KV and pooled rows without materializing quantized storage."""
+        self._drop_pool_pending()
         rv = self.local.trim(n)
         for state in (self.compressor_state, self.indexer_state):
             state["buffer_kv"] = None
@@ -924,4 +929,9 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
         total = self.local.nbytes
         total += self.compressor_state.quant_nbytes()
         total += self.indexer_state.quant_nbytes()
+        if self._pool_pending:
+            for slot in self._pool_pending.values():
+                if slot:
+                    for arr in slot["xs"]:
+                        total += arr.nbytes
         return total
