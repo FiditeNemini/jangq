@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.39"
-description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.39 adds an explicit DeepSeek-V4 activation-QAT runtime toggle while preserving native SWA and q8 pool-cache transport."
+version = "2.5.40"
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.40 adds DSV4 compiled decode regions, attention sub-chunked prefill, BF16 pool retention, and zero-centered-norm conversion fixes."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]

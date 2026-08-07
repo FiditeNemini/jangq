@@ -1,5 +1,14 @@
-## Unreleased
+## 2.5.40 — 2026-08-07
 
+- DeepSeek-V4 decode/prefill speedups, default-on: compiled decode regions
+  (`DSV4_COMPILE_REGIONS`), 512-token attention sub-chunked prefill (lifts the
+  512 prefill clamp to wide chunks), and a 64 MiB BF16 pool retention threshold
+  for the q8 pool-cache transport.
+- Falcon-H1 muP multipliers folded at conversion; text `lm_head` kept
+  top-level (fixes silent muP drop in converted bundles).
+- Zero-centered RMSNorm conversion fixes for the qwen3_5 family: pre-shift at
+  convert time, gated on source format so mlx-format sources (already shifted)
+  are not double-shifted.
 - Gemma 4 12B (`gemma4_unified`) support. New `convert_gemma4_mxfp` (MXFP4/MXFP8)
   and `convert_gemma4_jang` (JANG_4M: 8-bit affine attention + 4-bit affine
   MLP/embed) converters for the dense, omni-modal release. Both handle the
