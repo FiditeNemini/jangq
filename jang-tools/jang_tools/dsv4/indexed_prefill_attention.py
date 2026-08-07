@@ -36,6 +36,7 @@ caller falls back to the stock branch.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Optional
 
@@ -215,6 +216,8 @@ _LAST_STATUS: dict[str, Any] = {
     "reason": None,
     "calls": 0,
 }
+_LOGGER = logging.getLogger(__name__)
+
 _DISABLED = False
 _SELF_TESTED = False
 
@@ -394,8 +397,18 @@ def dsv4_heads16_prefill_attention(
             _DISABLED = True
             _LAST_STATUS["self_test"] = "failed"
             _LAST_STATUS["reason"] = err
+            _LOGGER.warning(
+                "DSV4 heads16 indexed-prefill kernel self-test FAILED (%s); "
+                "using stock indexed prefill for this process",
+                err,
+            )
             return None
         _LAST_STATUS["self_test"] = "passed"
+        _LOGGER.info(
+            "DSV4 heads16 indexed-prefill Metal kernel ACTIVE "
+            "(self-test passed, rel_bf16=%s)",
+            _LAST_STATUS.get("self_test_rel_bfloat16", "n/a"),
+        )
 
     kv2d = local_kv.reshape(rows, head_dim)
     pool2d = pooled.reshape(pool_rows, head_dim).astype(q.dtype)
