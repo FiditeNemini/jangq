@@ -98,15 +98,18 @@ def _sanitize_qwen3_next_conv1d_layout(weights: dict) -> dict:
 def _mlx_lm_sanitize_shifts_norms(model_type: str, weights: dict) -> bool:
     """Mirror mlx_lm's per-shard norm-shift gate exactly (mlxstudio#130).
 
-    Evaluated on post-mtp-strip, pre-sanitize weights. qwen3_next.sanitize
-    early-returns (no shift) unless per-expert HF keys are present;
-    qwen3_5/qwen3_5_moe shift when the shard has mtp.* keys (already
-    stripped here, so always False) or an HF-layout conv1d.
+    Evaluated on the exact dict handed to model.sanitize() (post
+    top-level-mtp strip, pre-sanitize). The mtp leg still matters here:
+    the converter preserves mtp weights, and wrapped mid-key ``*.mtp.*``
+    tensors survive the loader's ``startswith("mtp.")`` strip — mlx_lm's
+    substring gate fires on those shards and shifts them itself.
     """
-    if model_type == "qwen3_next":
-        return "model.layers.0.mlp.experts.0.up_proj.weight" in weights
-    return any(
-        "conv1d.weight" in k and v.shape[-1] != 1 for k, v in weights.items()
+    from .zero_centered_norms import mlx_lm_sanitize_would_shift
+
+    return mlx_lm_sanitize_would_shift(
+        model_type,
+        weights.keys(),
+        [v.shape[-1] for k, v in weights.items() if "conv1d.weight" in k],
     )
 
 

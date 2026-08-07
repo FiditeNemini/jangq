@@ -9,7 +9,10 @@ norms (the VL load path shifts unconditionally).
 import numpy as np
 
 from jang_tools.loader import _mlx_lm_sanitize_shifts_norms
-from jang_tools.zero_centered_norms import ZeroCenteredNormShift
+from jang_tools.zero_centered_norms import (
+    ZeroCenteredNormShift,
+    mlx_lm_sanitize_would_shift,
+)
 
 
 def test_from_config_family_gating():
@@ -103,6 +106,48 @@ def test_loader_gate_mirrors_qwen3_5_conv1d_rule():
     }
     assert _mlx_lm_sanitize_shifts_norms("qwen3_5_moe", hf_layout)
     assert _mlx_lm_sanitize_shifts_norms("qwen3_5", hf_layout)
+
+
+def test_conversion_source_gate_hf_raw_vs_mlx_format():
+    # HF-raw qwen3_5 sources carry mtp.* weights and/or HF-layout conv1d
+    # → mlx_lm's sanitize would shift → source norms are RAW → we shift.
+    assert mlx_lm_sanitize_would_shift(
+        "qwen3_5_moe", {"mtp.layers.0.norm.weight", "model.norm.weight"}, []
+    )
+    assert mlx_lm_sanitize_would_shift(
+        "qwen3_5", {"model.layers.0.linear_attn.conv1d.weight"}, [4]
+    )
+    # mlx-format sources (e.g. the CRACK abliteration pipeline) had mtp
+    # stripped + conv1d moved to MLX layout by mlx_lm's own conversion,
+    # which already folded the +1.0 → we must NOT shift again.
+    assert not mlx_lm_sanitize_would_shift(
+        "qwen3_5", {"model.layers.0.linear_attn.conv1d.weight", "model.norm.weight"}, [1]
+    )
+    # qwen3_next: per-expert HF keys = raw source; stacked mlx-format = shifted.
+    assert mlx_lm_sanitize_would_shift(
+        "qwen3_next", {"model.layers.0.mlp.experts.0.up_proj.weight"}, []
+    )
+    assert not mlx_lm_sanitize_would_shift(
+        "qwen3_next", {"model.layers.0.mlp.switch_mlp.up_proj.weight"}, [1]
+    )
+
+
+def test_from_config_records_model_type_for_source_gate():
+    shift = ZeroCenteredNormShift.from_config({"model_type": "qwen3_next"}, False)
+    assert shift.model_type == "qwen3_next"
+    cfg = {"model_type": "qwen3_5_vl", "text_config": {"model_type": "qwen3_5_moe"}}
+    assert ZeroCenteredNormShift.from_config(cfg, False).model_type == "qwen3_5_moe"
+
+
+def test_loader_gate_mtp_leg_fires_on_wrapped_midkey_mtp():
+    # Converter preserves mtp weights; wrapped "*.mtp.*" keys survive the
+    # loader's startswith("mtp.") strip, and mlx_lm's substring gate
+    # shifts those shards itself — the repair must skip them.
+    shard = {
+        "language_model.model.mtp.layers.0.input_layernorm.weight": _Arr((4,)),
+        "language_model.model.norm.weight": _Arr((4,)),
+    }
+    assert _mlx_lm_sanitize_shifts_norms("qwen3_5_moe", shard)
 
 
 def test_loader_gate_mirrors_qwen3_next_early_return():

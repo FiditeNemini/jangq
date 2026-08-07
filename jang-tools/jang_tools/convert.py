@@ -29,7 +29,7 @@ from .ssm_layout import (
     prepare_mlx_passthrough_tensor as _shared_prepare_mlx_passthrough_tensor,
 )
 from .mup_fold import MupFold
-from .zero_centered_norms import ZeroCenteredNormShift
+from .zero_centered_norms import ZeroCenteredNormShift, mlx_lm_sanitize_would_shift
 
 
 # ── Stale-artifact cleanup (M115, iter 39) ────────────────────────────
@@ -800,11 +800,16 @@ def convert_model(
         all_tensor_names_for_alloc = []
 
     source_tensor_names: set[str] = set()
+    source_conv1d_last_dims: list[int] = []
     for sf_path in weight_files:
         with safe_open(str(sf_path), framework="numpy") as f:
             for tensor_name in f.keys():
                 if not tensor_name.endswith("_scale_inv"):
                     source_tensor_names.add(tensor_name)
+                if "conv1d.weight" in tensor_name:
+                    source_conv1d_last_dims.append(
+                        f.get_slice(tensor_name).get_shape()[-1]
+                    )
                 if any(skip in tensor_name for skip in skip_patterns):
                     continue
                 if tensor_name.endswith(".bias"):
@@ -859,7 +864,21 @@ def convert_model(
     )
 
     norm_shift = ZeroCenteredNormShift.from_config(_raw_config, vl_wrapped)
-    if norm_shift is not None:
+    # Output norms end up pre-shifted either way for family text bundles:
+    # raw sources get the +1.0 here; mlx-format sources already carry it
+    # (mlx_lm's own conversion sanitize applied it — its gate no longer
+    # fires on the re-exported layout, which is exactly how we detect it).
+    norms_stored_shifted = norm_shift is not None
+    if norm_shift is not None and not mlx_lm_sanitize_would_shift(
+        norm_shift.model_type, source_tensor_names, source_conv1d_last_dims
+    ):
+        print(
+            "  Zero-centered RMSNorm: source already sanitized (mlx-format) — "
+            "norms kept as stored, stamping jang_norms_pre_shifted "
+            "(mlxstudio#130)"
+        )
+        norm_shift = None
+    elif norm_shift is not None:
         print(
             "  Zero-centered RMSNorm: active — folding +1.0 into norm weights "
             "(mlxstudio#130)"
@@ -1772,16 +1791,23 @@ def convert_model(
         # carry them.
         model_config["jang_mup_folded"] = True
         print(f"  muP fold: {len(mup_fold.folded)} tensors folded; config stamped jang_mup_folded")
-    if norm_shift is not None:
+    if norms_stored_shifted:
         # Loaders must not re-apply the +1.0 (mlx_lm's sanitize gate never
         # fires on JANG bundles, and the JANG loader repairs stamp-less
         # legacy bundles — mlxstudio#130); the marker says weights already
-        # carry the shift.
+        # carry the shift — folded here (raw source) or inherited from the
+        # mlx-format source's own mlx_lm conversion.
         model_config["jang_norms_pre_shifted"] = True
-        print(
-            f"  Zero-centered RMSNorm: {len(norm_shift.shifted)} norm tensors "
-            "shifted +1.0; config stamped jang_norms_pre_shifted"
-        )
+        if norm_shift is not None:
+            print(
+                f"  Zero-centered RMSNorm: {len(norm_shift.shifted)} norm tensors "
+                "shifted +1.0; config stamped jang_norms_pre_shifted"
+            )
+        else:
+            print(
+                "  Zero-centered RMSNorm: norms inherited pre-shifted from "
+                "mlx-format source; config stamped jang_norms_pre_shifted"
+            )
     text_config_for_tokens = model_config.get("text_config")
     if isinstance(text_config_for_tokens, dict):
         for token_key in ("eos_token_id", "bos_token_id", "pad_token_id"):
