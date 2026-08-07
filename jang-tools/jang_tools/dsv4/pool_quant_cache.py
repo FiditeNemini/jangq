@@ -23,6 +23,15 @@ from .mlx_model import DeepseekV4Cache
 
 _STATE_KEYS = ("buffer_kv", "buffer_gate", "pooled")
 _POOL_SEGMENT_ROWS = 64
+# Ceiling for lossless segment compaction. Without it the q8 tier keeps one
+# 64-row segment per append chunk forever: at 1M tokens (ratio 4) that is
+# ~3.9K segments per pool state, and decode pays a Python loop over ALL of
+# them per layer per token in both iter_dequantized_tiles (indexer scan) and
+# gather_dequantized_rows (CSA gather) — the measured ~100 ms/tok op flood.
+# Equal-size neighbors merge via _concat_qpools (native q8, no requantize),
+# binary-counter style, so each row is copied at most log2(16384/64)=8 times
+# and the segment count stays O(rows/16K + log) instead of O(rows/64).
+_POOL_SLAB_MAX_ROWS = 16 * 1024
 _POOL_ATTENTION_TILE_ROWS = 16 * 1024
 POOL_STORAGE_SCHEMA = "dsv4_pool_q8_segmented_v2"
 _BRANCH_STORAGE_SCHEMA = "dsv4_pool_q8_branch_v2"
@@ -224,6 +233,26 @@ def _validated_qpool(qpool):
     return (q, scale, mn, shape, group_size, bits, original_dtype)
 
 
+def _qpool_merge_key(qpool):
+    """Concat-compatibility key (everything but the row count), or ``None``.
+
+    Compaction is an optimization pass and must never add a failure mode: a
+    corrupt or mismatched pool has to reach the attention-time fail-closed
+    misalignment guard, not die inside ``_concat_qpools``. Segments whose key
+    is ``None`` or differs from their neighbor are simply left unmerged.
+    """
+    try:
+        shape = tuple(int(dim) for dim in qpool[3])
+        group_size = int(qpool[4])
+        bits = int(qpool[5])
+        dtype = str(qpool[6]) if len(qpool) > 6 else str(mx.bfloat16)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if len(shape) < 2:
+        return None
+    return (shape[:1], shape[2:], group_size, bits, dtype)
+
+
 def _concat_qpools(qpools):
     """Join adjacent encoded rows without decoding or requantizing them.
 
@@ -326,13 +355,13 @@ class _StateProxy(MutableMapping[str, Any]):
             self._data[key] = value
 
     def _replace_quantized(self, value: Any) -> None:
-        """Replace pooled storage with bounded quantized row segments."""
+        """Replace pooled storage with bounded quantized row slabs."""
         self._pooled_bf16 = None
         self._pooled_q_segments = []
         rows = int(value.shape[1])
-        for start in range(0, rows, _POOL_SEGMENT_ROWS):
+        for start in range(0, rows, _POOL_SLAB_MAX_ROWS):
             self._pooled_q_segments.append(
-                _quant_pool(value[:, start:start + _POOL_SEGMENT_ROWS])
+                _quant_pool(value[:, start:start + _POOL_SLAB_MAX_ROWS])
             )
 
     def pool_shape_dtype(self, empty_like=None):
@@ -526,12 +555,74 @@ class _StateProxy(MutableMapping[str, Any]):
         return start, rows
 
     def _compact_full_tail(self) -> None:
-        """Losslessly merge one completed tail chunk in native q8 form."""
+        """Losslessly keep the sub-slab tail merged as one q8 segment.
+
+        Decode appends one pool row per window; leaving each as its own
+        segment puts up to 63 tiny segments on every per-token tile scan.
+        Merging the tail on every append keeps it a single segment, and once
+        it completes a 64-row chunk the slab cascade takes over.
+        """
         start, rows = self._tail_segments()
-        if rows != _POOL_SEGMENT_ROWS:
+        tail = self._pooled_q_segments[start:]
+        if len(tail) >= 2:
+            keys = {_qpool_merge_key(segment) for segment in tail}
+            if len(keys) == 1 and None not in keys:
+                self._pooled_q_segments[start:] = [_concat_qpools(tail)]
+        if rows >= _POOL_SEGMENT_ROWS:
+            self._compact_slab_cascade()
+
+    def _compact_slab_cascade(self) -> None:
+        """Merge trailing equal-size segments into bounded slabs (lossless)."""
+        segments = self._pooled_q_segments
+        while len(segments) >= 2:
+            prev_rows = _qpool_rows(segments[-2])
+            last_rows = _qpool_rows(segments[-1])
+            if (
+                prev_rows != last_rows
+                or prev_rows + last_rows > _POOL_SLAB_MAX_ROWS
+            ):
+                return
+            key = _qpool_merge_key(segments[-2])
+            if key is None or key != _qpool_merge_key(segments[-1]):
+                return
+            segments[-2:] = [_concat_qpools(segments[-2:])]
+
+    def _compact_segments_to_slabs(self) -> None:
+        """Greedily regroup imported segments into <=16K-row slabs.
+
+        Restored L2/delta state arrives with whatever segmentation it was
+        exported under (a near-1M pool can carry thousands of 64-row wire
+        segments). One native-q8 regroup on import keeps every later decode
+        token off the per-segment op flood.
+        """
+        segments = self._pooled_q_segments
+        if len(segments) <= 1:
             return
-        compacted = _concat_qpools(self._pooled_q_segments[start:])
-        self._pooled_q_segments[start:] = [compacted]
+        regrouped = []
+        pending = []
+        pending_rows = 0
+        pending_key = None
+        for segment in segments:
+            rows = _qpool_rows(segment)
+            key = _qpool_merge_key(segment)
+            if pending and (
+                pending_rows + rows > _POOL_SLAB_MAX_ROWS
+                or key is None
+                or key != pending_key
+            ):
+                regrouped.append(
+                    pending[0] if len(pending) == 1 else _concat_qpools(pending)
+                )
+                pending = []
+                pending_rows = 0
+            pending.append(segment)
+            pending_rows += rows
+            pending_key = key
+        if pending:
+            regrouped.append(
+                pending[0] if len(pending) == 1 else _concat_qpools(pending)
+            )
+        self._pooled_q_segments = regrouped
 
     def append_pooled(self, value: Any) -> None:
         """Append rows in BF16 until the byte threshold, then quantize once.
@@ -569,10 +660,17 @@ class _StateProxy(MutableMapping[str, Any]):
             self._compact_full_tail()
 
         while rows - offset >= _POOL_SEGMENT_ROWS:
+            # Quantize the largest 64*2^k chunk that fits so bulk (prefill)
+            # appends produce canonical counter sizes that keep merging.
+            full = ((rows - offset) // _POOL_SEGMENT_ROWS) * _POOL_SEGMENT_ROWS
+            take = _POOL_SEGMENT_ROWS
+            while take * 2 <= min(full, _POOL_SLAB_MAX_ROWS):
+                take *= 2
             self._pooled_q_segments.append(
-                _quant_pool(value[:, offset:offset + _POOL_SEGMENT_ROWS])
+                _quant_pool(value[:, offset:offset + take])
             )
-            offset += _POOL_SEGMENT_ROWS
+            offset += take
+            self._compact_slab_cascade()
 
         if offset < rows:
             self._pooled_q_segments.append(_quant_pool(value[:, offset:]))
@@ -734,6 +832,7 @@ class _StateProxy(MutableMapping[str, Any]):
             self._replace_quantized(self._pooled_bf16)
         self._pooled_empty_spec = None
         self._pooled_q_segments.extend(segments)
+        self._compact_segments_to_slabs()
 
     def import_storage_state(self, value) -> None:
         """Install a lossless state tree produced by ``export_storage_state``."""
@@ -778,6 +877,7 @@ class _StateProxy(MutableMapping[str, Any]):
         self._pooled_bf16 = pooled_bf16
         self._pooled_q_segments = segments
         self._pooled_empty_spec = empty_spec
+        self._compact_segments_to_slabs()
 
     def quant_nbytes(self) -> int:
         total = 0

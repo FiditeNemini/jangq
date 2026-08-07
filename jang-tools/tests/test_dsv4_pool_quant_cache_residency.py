@@ -13,6 +13,7 @@ from jang_tools.dsv4.pool_quant_cache import (
     _POOL_PREFILL_DENSE_MAX_ROWS,
     PoolQuantizedV4Cache,
     _POOL_SEGMENT_ROWS,
+    _POOL_SLAB_MAX_ROWS,
     _StateProxy,
 )
 
@@ -37,7 +38,10 @@ def test_materialized_pool_is_not_retained_and_segments_are_bounded():
     state.append_pooled(raw[:, :-1])
     state.append_pooled(raw[:, -1:])
 
-    assert len(state._pooled_q_segments) == math.ceil(rows / _POOL_SEGMENT_ROWS)
+    # Promotion emits slab-sized segments, not one segment per 64 rows: at
+    # near-1M contexts the per-64 layout put ~3.9K segments per pool state on
+    # the per-token decode path (op flood in iter/gather).
+    assert len(state._pooled_q_segments) == math.ceil(rows / _POOL_SLAB_MAX_ROWS)
     assert {segment[5] for segment in state._pooled_q_segments} == {8}
     assert state._pooled_bf16 is None
     retained_before = state.quant_nbytes()
@@ -287,6 +291,128 @@ def test_storage_state_preserves_empty_pool_dtype_and_shape():
 
     assert restored_empty.shape == empty.shape
     assert restored_empty.dtype == empty.dtype
+
+
+def test_decode_append_stream_keeps_segment_count_logarithmic(monkeypatch):
+    """Sustained decode appends must not grow one segment per 64 rows.
+
+    Before slab compaction the q8 tier kept every 64-row chunk forever; at 1M
+    tokens that is ~3.9K segments per pool state and decode loops over all of
+    them per layer per token. The binary-counter cascade bounds the count at
+    O(rows/16K + log2(16K/64)) while staying byte-lossless.
+    """
+    monkeypatch.setattr(pool_quant_cache, "_POOL_BF16_MAX_BYTES", 1)
+    np.random.seed(7)
+    total_rows = 40 * _POOL_SEGMENT_ROWS + 17
+    raw = mx.array(np.random.randn(1, total_rows, 64).astype(np.float32)).astype(
+        mx.bfloat16
+    )
+    state = _StateProxy()
+    for row in range(total_rows):
+        state.append_pooled(raw[:, row:row + 1])
+
+    segments = state._pooled_q_segments
+    sizes = [pool_quant_cache._qpool_rows(segment) for segment in segments]
+    assert sum(sizes) == total_rows
+    log_bound = (
+        total_rows // _POOL_SLAB_MAX_ROWS
+        + int(math.log2(_POOL_SLAB_MAX_ROWS // _POOL_SEGMENT_ROWS))
+        + 2  # sub-64 tail chunk(s)
+    )
+    assert len(segments) <= log_bound, sizes
+
+    # Compaction is a native-q8 concat: quality is identical to the uncompacted
+    # per-64 layout, so the standard round-trip quality bar applies unchanged.
+    materialized = state["pooled"]
+    assert materialized.shape == (1, total_rows, 64)
+    assert _cos(raw, materialized) >= 0.999
+
+
+def test_gather_and_tiles_agree_with_materialized_pool_after_compaction(
+    monkeypatch,
+):
+    """Selected-row gather and tile iteration index the compacted layout."""
+    monkeypatch.setattr(pool_quant_cache, "_POOL_BF16_MAX_BYTES", 1)
+    np.random.seed(11)
+    total_rows = 7 * _POOL_SEGMENT_ROWS + 5
+    raw = mx.array(np.random.randn(1, total_rows, 64).astype(np.float32)).astype(
+        mx.bfloat16
+    )
+    state = _StateProxy()
+    state.append_pooled(raw[:, : 3 * _POOL_SEGMENT_ROWS + 1])
+    for row in range(3 * _POOL_SEGMENT_ROWS + 1, total_rows):
+        state.append_pooled(raw[:, row:row + 1])
+
+    reference = state["pooled"]
+    mx.eval(reference)
+
+    rebuilt = []
+    cursor = 0
+    for start, tile in state.iter_dequantized_tiles(max_rows=100):
+        assert start == cursor
+        assert int(tile.shape[1]) <= 100
+        rebuilt.append(tile)
+        cursor += int(tile.shape[1])
+    assert cursor == total_rows
+    assert mx.array_equal(mx.concatenate(rebuilt, axis=1), reference).item()
+
+    picks = mx.array([[5, 0, total_rows - 1, 130, 64, 63]], dtype=mx.int32)
+    gathered = state.gather_dequantized_rows(picks)
+    expected = reference[
+        mx.zeros(picks.shape, dtype=mx.int32),
+        picks,
+    ]
+    assert mx.array_equal(gathered, expected).item()
+
+
+def test_imported_wire_segments_are_regrouped_into_slabs(monkeypatch):
+    """Restored L2/delta state with per-64 wire segments compacts on import."""
+    monkeypatch.setattr(pool_quant_cache, "_POOL_BF16_MAX_BYTES", 1)
+    np.random.seed(13)
+    total_rows = 9 * _POOL_SEGMENT_ROWS
+    raw = mx.array(np.random.randn(1, total_rows, 64).astype(np.float32)).astype(
+        mx.bfloat16
+    )
+    wire_segments = tuple(
+        pool_quant_cache._quant_pool(
+            raw[:, start:start + _POOL_SEGMENT_ROWS]
+        )
+        for start in range(0, total_rows, _POOL_SEGMENT_ROWS)
+    )
+    reference = mx.concatenate(
+        [pool_quant_cache._dequant_pool(segment) for segment in wire_segments],
+        axis=1,
+    )
+
+    state = _StateProxy()
+    state.import_storage_state(
+        (
+            pool_quant_cache._BRANCH_STORAGE_SCHEMA,
+            None,
+            None,
+            None,
+            wire_segments,
+            None,
+            None,
+        )
+    )
+    assert len(state._pooled_q_segments) == 1
+    assert mx.array_equal(state["pooled"], reference).item()
+
+    from jang_tools.dsv4.cache_delta import DSV4_POOL_DELTA_SCHEMA
+
+    delta_state = _StateProxy()
+    delta_state.append_pool_delta(
+        {
+            "schema": DSV4_POOL_DELTA_SCHEMA,
+            "storage": "q8",
+            "start_row": 0,
+            "end_row": total_rows,
+            "segments": wire_segments,
+        }
+    )
+    assert len(delta_state._pooled_q_segments) == 1
+    assert mx.array_equal(delta_state["pooled"], reference).item()
 
 
 def test_quantized_pool_restores_original_float16_dtype():

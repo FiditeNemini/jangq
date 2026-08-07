@@ -90,9 +90,13 @@ def test_native_q8_tiled_indexer_excludes_future_rows_before_topk(
     seq_len,
 ):
     import jang_tools.dsv4.mlx_model as model_module
+    import jang_tools.dsv4.pool_quant_cache as pool_quant_cache
     from jang_tools.dsv4.mlx_model import _dsv4_tiled_index_topk
     from jang_tools.dsv4.pool_quant_cache import _StateProxy
 
+    # Shrink the slab ceiling so 130 rows still lands as three native-q8
+    # segments; production slabs are 16K rows and would store this as one.
+    monkeypatch.setattr(pool_quant_cache, "_POOL_SLAB_MAX_ROWS", 64)
     state = _StateProxy()
     state._replace_quantized(_pool())
     pooled = state.pool_view()
