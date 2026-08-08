@@ -18,7 +18,7 @@ Quick start:
     profile = profile_for_bits(2)  # → "JANG_2S"
 """
 
-__version__ = "2.5.43"
+__version__ = "2.5.44"
 __author__ = "Jinho Jang"
 __email__ = "eric@jangq.ai"
 
