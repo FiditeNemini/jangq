@@ -13,16 +13,15 @@ local + full pool into one KV tensor and runs one masked SDPA over all P pool
 rows — cost grows with context. This kernel touches at most
 ``window + index_topk`` rows per query regardless of context length.
 
-Kernel geometry mirrors antirez/ds4 ``heads16_dual`` (222b2cb9f): one
-256-thread threadgroup per (query token, 16-head group); 8 simdgroups, each
-owning heads ``h0 = g*16 + sg`` and ``h1 = h0 + 8``; each KV row is staged
-once into threadgroup memory and consumed by all 16 heads (valid because DSV4
-is MQA — one shared KV head, K == V). fp32 online softmax with the attention
-sink folded into the initial state (M = sink, S = 1, O = 0), matching
-``_dsv4_tiled_pool_attention``. Unlike ds4 (which sorts topk chronologically
-and ``break``s), our topk indices are unsorted, so invisible rows are skipped
-with ``continue`` — the branch is threadgroup-uniform (idx depends only on
-the token), so the staging barriers stay convergent.
+Kernel geometry: one 256-thread threadgroup per (query token, 16-head
+group); 8 simdgroups, each owning heads ``h0 = g*16 + sg`` and ``h1 = h0 +
+8``; each KV row is staged once into threadgroup memory and consumed by all
+16 heads (valid because DSV4 is MQA — one shared KV head, K == V). fp32
+online softmax with the attention sink folded into the initial state (M =
+sink, S = 1, O = 0), matching ``_dsv4_tiled_pool_attention``. Our topk
+indices are unsorted, so invisible rows are skipped with ``continue`` — the
+branch is threadgroup-uniform (idx depends only on the token), so the
+staging barriers stay convergent.
 
 Dynamic dims (S, R, P, K, offset, window, ratio) arrive via an int32 params
 buffer so pool-shape-dependent math never enters the compiled source: one

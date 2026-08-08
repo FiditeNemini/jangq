@@ -1,3 +1,8 @@
+## 2.5.44 — 2026-08-07
+
+- Documentation-only: rewrote kernel/cache docstrings and comments to be
+  self-contained (no external repo references). No behavior change.
+
 ## 2.5.40 — 2026-08-07
 
 - DeepSeek-V4 decode/prefill speedups, default-on: compiled decode regions
@@ -186,11 +191,8 @@
   across multi-turn — so long-context chats no longer pay full pool
   re-derivation on every turn.
 
-  Strategy mirrors llama.cpp's
-  [antirez/llama.cpp-deepseek-v4-flash](https://github.com/antirez/llama.cpp-deepseek-v4-flash)
-  `dsv4_clear_rows` in `src/llama-memory-hybrid-iswa.cpp`:
-  `row_begin = p0 / ratio`, `row_end = ceil(p1 / ratio)`. Same principle
-  in MLX form: slice `pooled[:, :keep, :]` where `keep = n_rows -
+  Row-range rule: `row_begin = p0 / ratio`, `row_end = ceil(p1 / ratio)`.
+  In MLX form: slice `pooled[:, :keep, :]` where `keep = n_rows -
   rows_to_drop`.
 
   `buffer_kv` and `buffer_gate` partial-window buffers are still

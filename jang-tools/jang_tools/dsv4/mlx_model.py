@@ -1016,10 +1016,9 @@ class DeepseekV4Cache:
         self._pool_pending = None
         # `compress_ratio` is the per-layer attention compression ratio used
         # by Compressor.accumulate_windows / update_pool. Stored on the cache
-        # so `trim()` can do proportional pool-row truncation matching the
-        # llama.cpp dsv4_make_row_range strategy (see
-        # antirez/llama.cpp-deepseek-v4-flash, src/llama-memory-hybrid-iswa.cpp
-        # `dsv4_clear_rows`). When unset, `trim()` falls back to full reset.
+        # so `trim()` can do proportional pool-row truncation
+        # (row_begin = p0 / ratio, row_end = ceil(p1 / ratio)).
+        # When unset, `trim()` falls back to full reset.
         self.compress_ratio = compress_ratio
 
     @property
@@ -1109,10 +1108,8 @@ class DeepseekV4Cache:
         because they were built from KV positions that survived the
         trim.
 
-        This mirrors llama.cpp's `dsv4_clear_rows`
-        (`row_begin = p0 / ratio`, `row_end = ceil(p1 / ratio)` from
-        antirez/llama.cpp-deepseek-v4-flash,
-        src/llama-memory-hybrid-iswa.cpp). Multi-turn long-context
+        Row range: `row_begin = p0 / ratio`, `row_end = ceil(p1 /
+        ratio)`. Multi-turn long-context
         chats now keep their compressed history across turns instead of
         re-deriving the entire pool from scratch every turn (which
         2.5.14's full-reset did).
