@@ -121,6 +121,14 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # Tool format: <tool_call><tool_sep><arg_key>/<arg_value> — Tencent-specific
     # ("hunyuan" parser; vLLM names it "hy_v3", SGLang "hunyuan").
     "hy_v3":            ("hy_v3",       "qwen3",       "hunyuan",  False, "kv"),
+    # TII Falcon-H1 / H1R — hybrid Mamba2 SSM + attention (vmlx routes it
+    # through CacheList(ArraysCache, KVCache), so cache stays "hybrid").
+    # H1R emits <think>...</think> itself; the chat template never pre-opens
+    # a think block (generation prompt is a bare assistant header), so
+    # think_in_template stays False and the qwen3 parser extracts the tags.
+    # Tool calls are JSON inside <tool_call></tool_call> — the qwen format.
+    # Non-R Falcon-H1 shares model_type and simply never emits think tags.
+    "falcon_h1":        ("falcon_h1",   "qwen3",       "qwen",     False, "hybrid"),
     # Llama 3.x (dense) — base + instruct
     "llama":            ("llama",       None,          "llama",    False, "kv"),
     "llama3":           ("llama",       None,          "llama",    False, "kv"),
