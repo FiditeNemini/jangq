@@ -3128,7 +3128,15 @@ class Gate(nn.Module):
     def __call__(self, x, input_ids=None):
         # Reference PR #1192: gate logits matmul in fp32 explicitly to avoid
         # bf16 accumulation error across 256 experts × hidden=4096.
-        gates = x.astype(mx.float32) @ self.weight.T.astype(mx.float32)
+        # The transposed fp32 copy is cached: rebuilding it lazily per call
+        # materializes ~4MB × n_layers of cast traffic on every decode token.
+        w_t = getattr(self, "_gate_w_t_f32", None)
+        if w_t is None or getattr(self, "_gate_w_src", None) is not self.weight:
+            w_t = self.weight.T.astype(mx.float32)
+            mx.eval(w_t)
+            self._gate_w_t_f32 = w_t
+            self._gate_w_src = self.weight
+        gates = x.astype(mx.float32) @ w_t
         if self.hash:
             # Hash: deterministic per-token lookup (ignoring gates beyond
             # scoring for weights). Use original scores as weights.
@@ -3756,6 +3764,11 @@ class Model(nn.Module):
 
     def __call__(self, input_ids, cache=None, mask=None):
         h = self.model(input_ids, cache=cache, mask=mask)
+        if h.shape[1] > 1:
+            # Every consumer samples the final position only; projecting a
+            # full prefill chunk through the 129k vocab head is ~2 TFLOP of
+            # discarded logits per 2048-token chunk.
+            h = h[:, -1:, :]
         # CRITICAL: reference does lm_head matmul in FP32
         # (inference/model.py ParallelHead.get_logits: `F.linear(x[:, -1].float(), self.weight)`
         # with self.weight stored as fp32). Accumulating 4096-dim contraction
