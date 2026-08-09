@@ -66,11 +66,11 @@ def unpack_bits(packed: mx.array, bits: int, n_elements: int) -> mx.array:
     """
     vals_per_u32 = 32 // bits
     mask = (1 << bits) - 1
-    result = []
-    for i in range(vals_per_u32):
-        result.append(((packed >> (i * bits)) & mask).astype(mx.uint8))
-    flat = mx.stack(result, axis=-1).reshape(-1)[:n_elements]
-    return flat
+    # Broadcast unpack: one shift/mask over a (..., vals_per_u32) view replaces
+    # the per-lane Python loop (vals_per_u32 kernel launches -> 2).
+    shifts = mx.arange(vals_per_u32, dtype=mx.uint32) * bits
+    unpacked = (packed[..., None] >> shifts) & mask
+    return unpacked.astype(mx.uint8).reshape(-1)[:n_elements]
 
 
 def pack_signs(signs: mx.array) -> mx.array:
@@ -89,11 +89,37 @@ def pack_signs(signs: mx.array) -> mx.array:
 
 def unpack_signs(packed: mx.array, n_elements: int) -> mx.array:
     """Unpack uint32 bitfield back to {-1,+1} float array."""
-    result = []
-    for i in range(32):
-        result.append(((packed >> i) & 1).astype(mx.float32))
-    flat = mx.stack(result, axis=-1).reshape(-1)[:n_elements]
+    # Broadcast unpack: the 32-iteration Python loop dispatched ~100 small
+    # kernels per call; this is the block-restore decode hot path (vmlx#91).
+    shifts = mx.arange(32, dtype=mx.uint32)
+    bits_ = (packed[..., None] >> shifts) & 1
+    flat = bits_.reshape(-1)[:n_elements].astype(mx.float32)
     return flat * 2 - 1
+
+
+_METAL_INVERSE = None  # lazily resolved: False = unavailable
+
+
+def _hadamard_inverse_fast(y: mx.array, signs: mx.array) -> mx.array:
+    """Inverse RHT via the fused Metal butterfly when available.
+
+    H is self-inverse up to sign order: inverse = H(y) * signs. The Metal
+    kernel computes H(s ⊙ y); with s = ones that is exactly H(y). The Python
+    butterfly dispatches ~6 ops per stage per pow2 block at full element
+    count — the dominant cost of TQ block-restore decode (vmlx#91).
+    """
+    global _METAL_INVERSE
+    if _METAL_INVERSE is None:
+        try:
+            from .hadamard_kernel import hadamard_rotate_metal
+            _METAL_INVERSE = hadamard_rotate_metal if mx.metal.is_available() else False
+        except Exception:
+            _METAL_INVERSE = False
+    if _METAL_INVERSE is False:
+        return hadamard_inverse(y, signs)
+    flat = y.reshape(-1, y.shape[-1])
+    out = _METAL_INVERSE(flat, mx.ones_like(signs))
+    return (out * signs).reshape(y.shape)
 
 
 # ── Data structures ────────────────────────────────────────────────────────
@@ -187,7 +213,7 @@ def decode_keys(encoded: EncodedKeys, enc: TurboQuantEncoder) -> mx.array:
     qjl_dequant = qjl_scale * flat_res_norms * (flat_qjl @ enc.qjl_S)
 
     reconstructed_rotated = (mse_dequant + qjl_dequant).reshape(orig_shape)
-    reconstructed_unit = hadamard_inverse(reconstructed_rotated, enc.rotation_signs)
+    reconstructed_unit = _hadamard_inverse_fast(reconstructed_rotated, enc.rotation_signs)
 
     return reconstructed_unit * flat_vec_norms.reshape(orig_shape[:-1] + (1,))
 
@@ -225,6 +251,6 @@ def decode_values(encoded: EncodedValues, enc: TurboQuantEncoder) -> mx.array:
 
     mse_dequant = dequantize_scalar(flat_indices, enc.value_codebook)
     mse_dequant = mse_dequant.reshape(orig_shape)
-    reconstructed_unit = hadamard_inverse(mse_dequant, enc.rotation_signs)
+    reconstructed_unit = _hadamard_inverse_fast(mse_dequant, enc.rotation_signs)
 
     return reconstructed_unit * flat_vec_norms.reshape(orig_shape[:-1] + (1,))
