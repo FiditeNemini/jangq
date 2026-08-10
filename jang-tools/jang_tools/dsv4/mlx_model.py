@@ -2198,9 +2198,7 @@ class Indexer(nn.Module):
                 offset=offset,
                 ratio=self.compress_ratio,
             )
-        scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(mx.float32)
-        scores = mx.maximum(scores, 0) * self.scale
-        scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
+        scores = _dsv4_indexer_scores(q, pooled, weights, float(self.scale))
         return _dsv4_causal_index_topk(
             scores,
             top_k=self.index_topk,
@@ -2413,6 +2411,37 @@ def _dsv4_pool_tile_rows(q: mx.array, value_dim: int) -> int:
     return max(1, rows)
 
 
+def _dsv4_indexer_scores(
+    q: mx.array,
+    pool_tile: mx.array,
+    head_weights: mx.array,
+    scale: float,
+) -> mx.array:
+    """Head-reduced indexer scores [B, L, C] for one pool tile.
+
+    out[b, l, c] = sum_h relu(scale * dot(q[b, h, l, :], pool[b, c, :]))
+                   * head_weights[b, l, h]
+
+    Tries the fused Metal kernel first (env-gated, self-tested, returns None
+    when it declines); otherwise runs the stock op chain, which materializes a
+    [B, H, L, C] fp32 intermediate.
+    """
+    try:
+        from .indexer_scores_kernel import fused_indexer_scores as _fused
+
+        fused = _fused(q, pool_tile, head_weights, float(scale))
+        if fused is not None:
+            return fused
+    except Exception:
+        pass
+    q32 = q.astype(mx.float32)
+    tile32 = pool_tile.astype(mx.float32)
+    weights = head_weights.swapaxes(-1, -2)[..., None].astype(mx.float32)
+    scores = q32 @ tile32[:, None].swapaxes(-1, -2)
+    scores = mx.maximum(scores, 0) * float(scale)
+    return (scores * weights).sum(axis=1)
+
+
 def _dsv4_tiled_index_topk(
     q: mx.array,
     head_weights: mx.array,
@@ -2442,10 +2471,7 @@ def _dsv4_tiled_index_topk(
             # token) once pools promoted to q8. async_eval materializes the
             # accumulator so prior tile buffers free, but never blocks.
             mx.async_eval(best_scores, best_indices)
-        tile32 = tile.astype(mx.float32)
-        scores = q32 @ tile32[:, None].swapaxes(-1, -2)
-        scores = mx.maximum(scores, 0) * float(scale)
-        scores = (scores * weights).sum(axis=1)
+        scores = _dsv4_indexer_scores(q, tile, head_weights, float(scale))
         visible = _dsv4_index_visibility(
             int(scores.shape[0]),
             int(scores.shape[1]),
