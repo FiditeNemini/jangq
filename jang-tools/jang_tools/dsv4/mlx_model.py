@@ -2198,7 +2198,9 @@ class Indexer(nn.Module):
                 offset=offset,
                 ratio=self.compress_ratio,
             )
-        scores = _dsv4_indexer_scores(q, pooled, weights, float(self.scale))
+        scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(mx.float32)
+        scores = mx.maximum(scores, 0) * self.scale
+        scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
         return _dsv4_causal_index_topk(
             scores,
             top_k=self.index_topk,
@@ -2411,73 +2413,6 @@ def _dsv4_pool_tile_rows(q: mx.array, value_dim: int) -> int:
     return max(1, rows)
 
 
-_DSV4_INDEXER_FP16_CHUNK = 8
-# Below this many intermediate score elements the fp32 reduction is already
-# cheap and the chunked fp16 loop's extra dispatches make it slower (measured:
-# L=512 x C=256 is 0.94x, L=2048 x C=256 is 2.0x). Decode (L=1) never reaches
-# it, so the gate is prefill-only by construction.
-_DSV4_INDEXER_FP16_MIN_ELEMS = 64 * 1024 * 256
-
-
-def _dsv4_indexer_fp16_enabled() -> bool:
-    """Env gate for the reduced-precision indexer score reduction.
-
-    The stock reduction materializes a [B, H, L, C] fp32 score tensor and then
-    collapses it to [B, L, C] -- 64x the bytes of the result, which measures as
-    the dominant cost of long-context prefill on ratio-4 layers. Holding the
-    intermediate at fp16 and folding `scale` into q (relu(s*x) == s*relu(x) for
-    s > 0, and pre-scaling keeps the fp16 range safe) halves that traffic.
-
-    Default OFF: the reduction feeds an exact top-k selection, so any precision
-    change can reorder near-tie pool rows. Enable only where the token-identity
-    A/B has been run for the workload.
-    """
-    import os
-
-    value = os.environ.get("VMLX_DSV4_INDEXER_FP16", "0").strip().lower()
-    return value in {"1", "on", "true", "yes"}
-
-
-def _dsv4_indexer_scores(
-    q: mx.array,
-    pool_tile: mx.array,
-    head_weights: mx.array,
-    scale: float,
-) -> mx.array:
-    """Head-reduced indexer scores [B, L, C] for one pool tile.
-
-    out[b, l, c] = sum_h relu(scale * dot(q[b, h, l, :], pool[b, c, :]))
-                   * head_weights[b, l, h]
-    """
-    heads = int(q.shape[1])
-    seq_len = int(q.shape[2])
-    dim = int(q.shape[3])
-    tile_rows = int(pool_tile.shape[1])
-    small = heads * seq_len * tile_rows < _DSV4_INDEXER_FP16_MIN_ELEMS
-    if int(q.shape[0]) != 1 or small or not _dsv4_indexer_fp16_enabled():
-        q32 = q.astype(mx.float32)
-        tile32 = pool_tile.astype(mx.float32)
-        weights = head_weights.swapaxes(-1, -2)[..., None].astype(mx.float32)
-        scores = q32 @ tile32[:, None].swapaxes(-1, -2)
-        scores = mx.maximum(scores, 0) * float(scale)
-        return (scores * weights).sum(axis=1)
-
-    # Fold the scale into q so the fp16 product stays in range, then keep the
-    # per-head intermediate at fp16 and accumulate chunk partials in fp32.
-    q16 = q.astype(mx.float16) * mx.array(float(scale), mx.float16)
-    pool_t = pool_tile[0].swapaxes(0, 1).astype(mx.float16)
-    weights16 = head_weights[0].swapaxes(0, 1)[..., None].astype(mx.float16)
-    chunk = max(1, min(_DSV4_INDEXER_FP16_CHUNK, heads))
-    acc = None
-    for h0 in range(0, heads, chunk):
-        span = min(chunk, heads - h0)
-        block = q16[0, h0:h0 + span].reshape(span * seq_len, dim) @ pool_t
-        block = mx.maximum(block, 0).reshape(span, seq_len, tile_rows)
-        part = (block * weights16[h0:h0 + span]).sum(axis=0).astype(mx.float32)
-        acc = part if acc is None else acc + part
-    return acc[None]
-
-
 def _dsv4_tiled_index_topk(
     q: mx.array,
     head_weights: mx.array,
@@ -2507,7 +2442,10 @@ def _dsv4_tiled_index_topk(
             # token) once pools promoted to q8. async_eval materializes the
             # accumulator so prior tile buffers free, but never blocks.
             mx.async_eval(best_scores, best_indices)
-        scores = _dsv4_indexer_scores(q, tile, head_weights, float(scale))
+        tile32 = tile.astype(mx.float32)
+        scores = q32 @ tile32[:, None].swapaxes(-1, -2)
+        scores = mx.maximum(scores, 0) * float(scale)
+        scores = (scores * weights).sum(axis=1)
         visible = _dsv4_index_visibility(
             int(scores.shape[0]),
             int(scores.shape[1]),
