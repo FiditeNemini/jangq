@@ -749,8 +749,14 @@ class _StateProxy(MutableMapping[str, Any]):
             empty_dtype,
         )
 
-    def export_pool_delta(self, start_row: int, end_row: int):
-        """Export retained rows without dequantizing or re-quantizing q8 data."""
+    def export_pool_delta(self, start_row: int, end_row: int, _collector=None):
+        """Export retained rows without dequantizing or re-quantizing q8 data.
+
+        ``_collector`` (optional): batch the BF16 hot-tier snapshot eval with
+        the rest of the block-boundary leaves into one async materialization
+        instead of a blocking mx.eval per layer. See
+        ``DeepseekV4Cache._copy_delta_tree``.
+        """
         from .cache_delta import DSV4_POOL_DELTA_SCHEMA
 
         start = int(start_row)
@@ -764,7 +770,10 @@ class _StateProxy(MutableMapping[str, Any]):
             value = self._pooled_bf16[:, start:end, :] + mx.zeros_like(
                 self._pooled_bf16[:, start:end, :]
             )
-            mx.eval(value)
+            if _collector is None:
+                mx.eval(value)
+            else:
+                _collector.append(value)
             return {
                 "schema": DSV4_POOL_DELTA_SCHEMA,
                 "storage": "bf16",
@@ -1013,10 +1022,10 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
         self._compressor_state = compressor
         self._indexer_state = indexer
 
-    def _export_pool_delta(self, state, start_row, end_row):
+    def _export_pool_delta(self, state, start_row, end_row, _collector=None):
         if not isinstance(state, _StateProxy):
             raise ValueError("PoolQuantizedV4Cache requires _StateProxy branches")
-        return state.export_pool_delta(start_row, end_row)
+        return state.export_pool_delta(start_row, end_row, _collector)
 
     def _append_pool_delta(self, state, delta, *, defer_compaction: bool = False):
         if not isinstance(state, _StateProxy):

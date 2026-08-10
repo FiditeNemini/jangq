@@ -1288,26 +1288,47 @@ class DeepseekV4Cache:
                 slot["last_pool"] = None
 
     @staticmethod
-    def _copy_delta_tree(value):
-        """Detach a small cache-record tree from the live mutable cache."""
+    def _copy_delta_tree(value, _collector=None):
+        """Detach a small cache-record tree from the live mutable cache.
+
+        ``value + mx.zeros_like(value)`` already graph-detaches each leaf: the
+        term references the pre-mutation source array, not an alias, so the
+        snapshot is well defined even before it is materialized. The eval only
+        has to pin that snapshot before the next decode step overwrites rolling
+        state. When ``_collector`` is supplied the caller batches that pinning:
+        each detached leaf is appended for a single ``async_eval`` at the block
+        boundary instead of one blocking ``mx.eval`` per leaf. At ~7 leaves x
+        ~40 composite layers a forced-anchor boundary otherwise serializes a
+        few hundred GPU round-trips onto the decode thread — the DSV4
+        long-output per-256-token stall. Ordering safety is unchanged: the copy
+        ops are submitted at the boundary, before the next decode's in-place
+        writes, so same-stream ordering still reads pre-mutation values.
+        """
         if value is None:
             return None
         if hasattr(value, "shape") and hasattr(value, "dtype"):
             copied = value + mx.zeros_like(value)
-            mx.eval(copied)
+            if _collector is None:
+                mx.eval(copied)
+            else:
+                _collector.append(copied)
             return copied
         if isinstance(value, tuple):
-            return tuple(DeepseekV4Cache._copy_delta_tree(item) for item in value)
+            return tuple(
+                DeepseekV4Cache._copy_delta_tree(item, _collector) for item in value
+            )
         if isinstance(value, list):
-            return [DeepseekV4Cache._copy_delta_tree(item) for item in value]
+            return [
+                DeepseekV4Cache._copy_delta_tree(item, _collector) for item in value
+            ]
         if isinstance(value, dict):
             return {
-                key: DeepseekV4Cache._copy_delta_tree(item)
+                key: DeepseekV4Cache._copy_delta_tree(item, _collector)
                 for key, item in value.items()
             }
         return value
 
-    def _export_pool_delta(self, state, start_row, end_row):
+    def _export_pool_delta(self, state, start_row, end_row, _collector=None):
         """Export BF16 pool rows for one immutable token block."""
         from .cache_delta import DSV4_POOL_DELTA_SCHEMA
 
@@ -1323,7 +1344,7 @@ class DeepseekV4Cache:
                     "DSV4 pool delta is outside retained rows: "
                     f"start={start_row} end={end_row} rows={rows}"
                 )
-            value = self._copy_delta_tree(pooled[:, start_row:end_row, :])
+            value = self._copy_delta_tree(pooled[:, start_row:end_row, :], _collector)
         return {
             "schema": DSV4_POOL_DELTA_SCHEMA,
             "storage": "bf16",
@@ -1373,12 +1394,18 @@ class DeepseekV4Cache:
         block_size: int = 256,
         anchor_interval_blocks: int = 8,
         force_anchor: bool = False,
+        _eval_collector=None,
     ):
         """Export one immutable native block record without flattening pools.
 
         Pool rows are emitted for every block.  Local rotating state and the
         incomplete compressor/indexer buffers are emitted only at periodic
         anchors or an explicitly requested request boundary.
+
+        ``_eval_collector`` (optional): when the caller exports many layers at
+        one block boundary it passes a shared list so every detached snapshot
+        leaf is batched into a single ``async_eval`` instead of one blocking
+        ``mx.eval`` per leaf. See ``_copy_delta_tree``.
         """
         from .cache_delta import DSV4_BLOCK_DELTA_SCHEMA
 
@@ -1400,11 +1427,11 @@ class DeepseekV4Cache:
         start_row = start // ratio
         end_row = end // ratio
         compressor_delta = self._export_pool_delta(
-            self.compressor_state, start_row, end_row
+            self.compressor_state, start_row, end_row, _eval_collector
         )
         if ratio == 4:
             indexer_delta = self._export_pool_delta(
-                self.indexer_state, start_row, end_row
+                self.indexer_state, start_row, end_row, _eval_collector
             )
         else:
             from .cache_delta import DSV4_POOL_DELTA_SCHEMA
@@ -1447,19 +1474,21 @@ class DeepseekV4Cache:
                 "tokens": end,
                 "periodic": bool(end % anchor_interval == 0),
                 "terminal": bool(force_anchor),
-                "local_state": self._copy_delta_tree(local_state),
-                "meta_state": self._copy_delta_tree(local_meta_state),
+                "local_state": self._copy_delta_tree(local_state, _eval_collector),
+                "meta_state": self._copy_delta_tree(
+                    local_meta_state, _eval_collector
+                ),
                 "compressor_buffer_kv": self._copy_delta_tree(
-                    self.compressor_state.get("buffer_kv")
+                    self.compressor_state.get("buffer_kv"), _eval_collector
                 ),
                 "compressor_buffer_gate": self._copy_delta_tree(
-                    self.compressor_state.get("buffer_gate")
+                    self.compressor_state.get("buffer_gate"), _eval_collector
                 ),
                 "indexer_buffer_kv": self._copy_delta_tree(
-                    self.indexer_state.get("buffer_kv")
+                    self.indexer_state.get("buffer_kv"), _eval_collector
                 ),
                 "indexer_buffer_gate": self._copy_delta_tree(
-                    self.indexer_state.get("buffer_gate")
+                    self.indexer_state.get("buffer_gate"), _eval_collector
                 ),
             }
         return {
