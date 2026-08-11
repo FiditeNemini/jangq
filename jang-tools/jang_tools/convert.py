@@ -323,7 +323,29 @@ _PER_EXPERT_PATTERN = re.compile(
 # MiniMax/Mixtral name mapping: w1→gate_proj, w2→down_proj, w3→up_proj
 _EXPERT_NAME_MAP = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
 
+# Gate-less relu2 MoE (Nemotron-H family) stacks into mlx_lm's `SwitchMLP`,
+# whose submodules are named `fc1` / `fc2` — NOT `up_proj` / `down_proj`.
+# Cross-checked against both runtimes:
+#   mlx_lm/models/switch_layers.py::SwitchMLP  -> self.fc1, self.fc2
+#   mlx_lm/models/nemotron_h.py::sanitize      -> ("up_proj","fc1"), ("down_proj","fc2")
+# Emitting up_proj/down_proj here produces a bundle that silently fails to
+# load, because SwitchMLP has no such parameters. SwiGLU families keep the
+# gate/up/down names above (they stack into SwitchGLU).
+_EXPERT_NAME_MAP_SWITCHMLP = {
+    "up_proj": "fc1", "w3": "fc1",
+    "down_proj": "fc2", "w2": "fc2",
+}
+
 _LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
+
+
+def _expert_name_map(gateless_relu2: bool) -> dict:
+    """Stacked-expert submodule names for the target runtime module.
+
+    gate-less relu2 -> mlx_lm SwitchMLP (fc1/fc2); otherwise SwitchGLU
+    (gate_proj/up_proj/down_proj).
+    """
+    return _EXPERT_NAME_MAP_SWITCHMLP if gateless_relu2 else _EXPERT_NAME_MAP
 
 
 def _layer_index(tensor_name: str) -> int | None:
@@ -350,6 +372,32 @@ def _is_moe_router_gate(tensor_name: str) -> bool:
 def _is_routed_moe_router_gate(tensor_name: str) -> bool:
     name_lower = tensor_name.lower()
     return _is_moe_router_gate(tensor_name) and "shared_expert_gate.weight" not in name_lower
+
+
+# Tensors whose float32 source dtype is load-bearing and must survive conversion.
+#
+# `e_score_correction_bias` is the DeepSeek-V3-style noaux_tc routing bias, added
+# to sigmoid router scores before top-k. On Nemotron 3.5 Lightning it is literally
+# the ONLY fp32 tensor family in the checkpoint — 24 of 6513 tensors, everything
+# else is bf16 — so NVIDIA raised precision here and nowhere else, deliberately.
+#
+# It is 1-D, so it takes the small-tensor passthrough branch, which otherwise
+# casts fp32 -> fp16 unconditionally. fp16 has a 10-bit mantissa and min normal
+# ~6e-5; with 128 experts separated by small learned offsets, values near that
+# threshold flush to subnormal/zero and change expert selection. That is exactly
+# the failure the Swift fp32-sigmoid guard exists to prevent
+# (NemotronGroupExpertSelectFP32SigmoidTests), reintroduced one layer below it.
+#
+# Total cost of keeping fp32: 24 x 128 x 4 B = 12 KB.
+_FLOAT32_PASSTHROUGH_SUFFIXES = (
+    "e_score_correction_bias",
+)
+
+
+def _keeps_float32_passthrough(tensor_name: str) -> bool:
+    """True for tensors whose fp32 source precision must be preserved."""
+    name_lower = tensor_name.lower()
+    return any(name_lower.endswith(s) for s in _FLOAT32_PASSTHROUGH_SUFFIXES)
 
 
 def _compute_router_l2_keep_indices(
@@ -718,6 +766,7 @@ def convert_model(
     has_shared_mlp = getattr(arch_config, 'has_shared_mlp', False)
     if has_shared_mlp:
         print(f"  Shared MLP: parallel dense MLP alongside MoE → classified as CRITICAL")
+
     if block_size == DEFAULT_BLOCK_SIZE and arch_config.has_moe_layers:
         if num_experts >= 150:
             # Check MLA dim compatibility: sanitize reshapes kv_b_proj to (..., qk_nope_head_dim).
@@ -884,6 +933,31 @@ def convert_model(
             "(mlxstudio#130)"
         )
 
+    # Gate-less relu2 expert MLP (Nemotron-H / Nemotron 3.5 Lightning):
+    #     y = down_proj(relu2(up_proj(x)))
+    # There is no gate_proj, so up_proj feeds a SQUARING nonlinearity and is
+    # itself the error amplifier. The SwiGLU-derived MLP_ASYMMETRY_FLOORS
+    # explicitly leaves up_proj unprotected ("2-bit OK when gate is protected"),
+    # which is vacuous here. Detect on BOTH signals — the declared activation
+    # and the actual absence of a gate in the weight map — so a model that
+    # declares relu2 while still shipping gate_proj is not mis-flagged.
+    _act = str(
+        _raw_config.get("mlp_hidden_act")
+        or _raw_config.get("text_config", {}).get("mlp_hidden_act")
+        or ""
+    ).lower()
+    _has_gate_proj = any("gate_proj" in n for n, _, _, _ in all_tensors_info)
+    gateless_relu2 = (
+        _act in ("relu2", "squared_relu")
+        and not _has_gate_proj
+        and num_experts > 0
+    )
+    if gateless_relu2:
+        print(
+            f"  Gate-less relu2 experts (act={_act!r}, no gate_proj in weights): "
+            f"up_proj→4-bit floor, down_proj→3-bit floor, conv1d→CRITICAL"
+        )
+
     # Run bit allocation → produces _tensor_bits dict (tensor_name → bits)
     if use_compact:
         # Compact path: classify each tensor once, no per-block arrays.
@@ -907,6 +981,7 @@ def convert_model(
                 tensor_info, profile,
                 num_experts=num_experts, has_shared_mlp=has_shared_mlp,
                 apply_mlp_asymmetry=apply_mlp_asymmetry,
+                gateless_relu2=gateless_relu2,
             )
         else:
             print(f"  Using K-quant allocation (target: {target_bits} avg bits)")
@@ -948,6 +1023,7 @@ def convert_model(
                 all_tensor_names_for_alloc, profile,
                 num_experts=num_experts, has_shared_mlp=has_shared_mlp,
                 apply_mlp_asymmetry=apply_mlp_asymmetry,
+                gateless_relu2=gateless_relu2,
             )
         elif target_bits in (2.0, 3.0, 4.0, 5.0, 6.0, 8.0):
             print(f"  Using K-quant allocation (target: {target_bits} avg bits)")
@@ -1628,7 +1704,7 @@ def convert_model(
             if not hasattr(convert_model, '_n_experts_expected'):
                 convert_model._n_experts_expected = num_experts
             if len(expert_buffer[group_key]) >= convert_model._n_experts_expected:
-                new_name = _EXPERT_NAME_MAP.get(wtype, wtype)
+                new_name = _expert_name_map(gateless_relu2).get(wtype, wtype)
                 sw_key = f"{prefix}.switch_mlp.{new_name}"
                 n_exp = max(expert_buffer[group_key].keys()) + 1
                 v2_tensors[f"{sw_key}.weight"] = np.stack(
@@ -1691,7 +1767,7 @@ def convert_model(
     if expert_buffer:
         print(f"  Stacking {len(expert_buffer)} expert groups into 3D...")
         for (prefix, wtype), experts in expert_buffer.items():
-            new_name = _EXPERT_NAME_MAP.get(wtype, wtype)
+            new_name = _expert_name_map(gateless_relu2).get(wtype, wtype)
             sw_key = f"{prefix}.switch_mlp.{new_name}"
             n_experts = max(experts.keys()) + 1
 
@@ -1756,6 +1832,15 @@ def convert_model(
                     if forced_bits is not None:
                         tensor = _prepare_mlx_passthrough_tensor(tensor_name, tensor)
                         passthrough_bits[tensor_name] = forced_bits
+                    elif (
+                        _keeps_float32_passthrough(tensor_name)
+                        and tensor.dtype == np.float32
+                    ):
+                        # Routing-critical tensor that is ALREADY fp32 at source:
+                        # preserve it verbatim. Deliberately preserve-only, never
+                        # upcast — DeepSeek/GLM/MiMo ship the same tensor in bf16
+                        # and must keep their existing fp16 passthrough bytes.
+                        pass
                     else:
                         if tensor.dtype == np.float32:
                             tensor = tensor.astype(np.float16)
