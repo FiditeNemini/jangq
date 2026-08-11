@@ -78,6 +78,17 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "gemma3":           ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3_text":      ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3n":          ("gemma4",      "gemma4",      "gemma4",   False, "hybrid"),
+    # Muse Glimmer — Gemma-shaped text backbone (mixed sliding/full 3:1,
+    # softcap 20) + a Qwen-VL-style windowed ViT, vision AND video.
+    # Reasoning is routed by RECIPIENT rather than an inline think pair:
+    # "to=self" carries reasoning, "to=user" the answer — hence its own
+    # reasoning parser rather than gemma4's. Tools use the ATEM dialect, which
+    # is XML-SHAPED but is not valid XML (the template says so outright and it
+    # is parsed with regular expressions). think_in_template=False: the
+    # template injects no reasoning prefix, so generation must start in
+    # visible content.
+    "muse_glimmer":      ("muse_glimmer", "muse_glimmer", "atem",   False, "kv"),
+    "muse_glimmer_text": ("muse_glimmer", "muse_glimmer", "atem",   False, "kv"),
     # Bailing v2.5 (Ling) — hybrid MLA + Lightning Linear Attention + MoE + MTP.
     # think_in_template=False because Ling's chat template defaults to
     # `detailed thinking off` and only opens `<think>` when the user supplies
