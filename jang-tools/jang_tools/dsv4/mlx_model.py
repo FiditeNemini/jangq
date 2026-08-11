@@ -35,6 +35,11 @@ try:  # env-gated Metal prefill kernel (VMLX_DSV4_HEADS16_PREFILL, default on)
 except Exception:  # pragma: no cover - optional module; stock path if absent
     dsv4_heads16_prefill_attention = None
 
+try:  # env-gated Metal decode kernel (VMLX_DSV4_INDEXED_DECODE, default off)
+    from .indexed_decode_attention import dsv4_indexed_decode_attention
+except Exception:  # pragma: no cover - optional module; stock path if absent
+    dsv4_indexed_decode_attention = None
+
 
 logger = logging.getLogger(__name__)
 
@@ -2935,24 +2940,48 @@ class DeepseekV4Attention(nn.Module):
                         # Decode fast path: materialize only the selected rows
                         # for the single query. This is bounded by index_topk
                         # and avoids carrying a full pool mask through SDPA.
-                        if topk is not None:
-                            idx = topk[:, None, :, :, None]
-                            expanded = mx.broadcast_to(
-                                pooled[:, None, None, :, :],
-                                (B, 1, L, pooled.shape[1], self.head_dim),
+                        decode_out = None
+                        if (
+                            topk is not None
+                            and dsv4_indexed_decode_attention is not None
+                        ):
+                            # Env-gated fused Metal kernel: reads local +
+                            # selected pool rows directly through the index
+                            # list (no materialized gather) and runs one
+                            # split-K softmax(qK^T)V pass for the single
+                            # query row.
+                            decode_out = dsv4_indexed_decode_attention(
+                                q,
+                                full_kv,
+                                pooled,
+                                topk,
+                                scale=float(self.softmax_scale),
+                                sinks=self.attn_sink,
                             )
-                            pooled_kv = mx.take_along_axis(
-                                expanded,
-                                mx.broadcast_to(
-                                    idx,
-                                    idx.shape[:-1] + (self.head_dim,),
-                                ),
-                                axis=3,
-                            ).reshape(B, 1, -1, self.head_dim)
+                        if decode_out is not None:
+                            tiled_pool_out = decode_out
+                            attn_mask = None
                         else:
-                            pooled_kv = pooled[:, None]
-                        full_kv = mx.concatenate([full_kv, pooled_kv], axis=2)
-                        attn_mask = None
+                            if topk is not None:
+                                idx = topk[:, None, :, :, None]
+                                expanded = mx.broadcast_to(
+                                    pooled[:, None, None, :, :],
+                                    (B, 1, L, pooled.shape[1], self.head_dim),
+                                )
+                                pooled_kv = mx.take_along_axis(
+                                    expanded,
+                                    mx.broadcast_to(
+                                        idx,
+                                        idx.shape[:-1] + (self.head_dim,),
+                                    ),
+                                    axis=3,
+                                ).reshape(B, 1, -1, self.head_dim)
+                            else:
+                                pooled_kv = pooled[:, None]
+                            full_kv = mx.concatenate(
+                                [full_kv, pooled_kv], axis=2
+                            )
+                            attn_mask = None
                     else:
                         # Prefill path: keep the compressed pool flat and
                         # describe visibility with a compact bool mask. The old
