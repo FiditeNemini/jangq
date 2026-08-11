@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -111,7 +112,70 @@ _PROFILES = {
         embed_bits=6,
         lm_head_bits=8,
     ),
+    "JANG_6M": dict(
+        group_size=64,
+        routed_bits={"gate_proj": 6, "up_proj": 6, "down_proj": 6},
+        attention_bits=8,
+        shared_expert_bits=8,
+        dense_ffn_bits=8,
+        embed_bits=6,
+        lm_head_bits=8,
+    ),
 }
+
+
+# ── QAT grid experts (Raptor-1.0-16B) ────────────────────────────────────
+def _to_bf16(x: np.ndarray) -> np.ndarray:
+    """Round fp32 -> bf16 -> fp32. The QAT forward used a bf16 scale; using
+    an fp32 scale here would reproduce a slightly different function."""
+    import torch
+
+    return torch.from_numpy(np.ascontiguousarray(x)).bfloat16().float().numpy()
+
+
+def qat_snap_int4_g128(w: np.ndarray, group_size: int = 128):
+    """Snap onto the QAT grid per CONVERT.md Path A — an APPROXIMATION.
+
+    Symmetric int4, groups of ``group_size`` along the INPUT (last) dim,
+    ``scale = bf16(group_absmax / 7.5)``, ``q = clamp(round(w/scale), -8, 7)``.
+
+    ⚠ Measured against poolside's packed W4A16 codes (2026-07-29, three expert
+    projections across layers 1/20/39): this reproduces ~99.4% of codes, but
+    ~0.6% differ by exactly ±1 because their bf16 scale rounding differs from
+    ours by up to one ULP (max rel 3.8e-3..5.3e-3). It is therefore NOT the
+    certified function. Use ``--qat-packed`` (Path B) for anything that ships
+    under the certified numbers; this path is for analysis only.
+
+    Returns (q_sym int8 in [-8,7], scale fp32-holding-bf16-values).
+    """
+    if w.shape[-1] % group_size:
+        raise ValueError(
+            f"last dim {w.shape[-1]} not divisible by group_size {group_size}")
+    grp = w.reshape(*w.shape[:-1], w.shape[-1] // group_size, group_size)
+    scale = _to_bf16(np.abs(grp).max(-1, keepdims=True) / 7.5)
+    safe = np.where(scale > 0, scale, np.float32(1.0))
+    q = np.clip(np.rint(grp / safe), -8, 7).astype(np.int8)
+    return q.reshape(w.shape), scale.squeeze(-1).astype(np.float32)
+
+
+def pack_affine4(q_affine: np.ndarray) -> np.ndarray:
+    """Pack 4-bit codes (0..15) into uint32, 8 per word, little nibble first
+    — MLX's affine layout, which is also the W4A16 packed layout."""
+    a = q_affine.reshape(*q_affine.shape[:-1], -1, 8).astype(np.uint32)
+    shifts = (np.arange(8, dtype=np.uint32) * np.uint32(4))
+    return (a << shifts).sum(-1).astype(np.uint32)
+
+
+def qat_expert_affine(w: np.ndarray, group_size: int = 128):
+    """Snap to the QAT grid and express it losslessly as a jang affine block.
+
+    MLX dequantizes affine as ``q*scale + bias``; with ``q = q_sym + 8`` and
+    ``bias = -8*scale`` that is exactly ``q_sym * scale`` — the symmetric QAT
+    grid, carried in the affine container the runtime already understands.
+    """
+    q_sym, scale = qat_snap_int4_g128(w, group_size)
+    packed = pack_affine4((q_sym.astype(np.int16) + 8).astype(np.uint8))
+    return packed, scale, (-8.0 * scale)
 
 
 def profile_policy(profile: str) -> LagunaJangPolicy:
@@ -133,18 +197,81 @@ def profile_policy(profile: str) -> LagunaJangPolicy:
     )
 
 
-def build_chat_block(gen_cfg: dict) -> dict:
-    """jang_config['chat'] from the vendor generation_config.json — verbatim
-    passthrough, nothing invented. See main() for the enable_thinking trap
-    (vendor default true via default_chat_template_kwargs; template fallback
-    false)."""
+def _template_default_enable_thinking(template_text: str | None) -> bool:
+    """Read Laguna's literal Jinja fallback without inventing a policy."""
+    compact = "".join((template_text or "").split())
+    true_marker = "enable_thinking=enable_thinking|default(true)"
+    false_marker = "enable_thinking=enable_thinking|default(false)"
+    if true_marker in compact:
+        return True
+    if false_marker in compact:
+        return False
+    return False
+
+
+# Matches only the `enable_thinking = enable_thinking | default(<bool>)`
+# assignment — not the many other `| default(...)` calls in the template.
+_THINKING_DEFAULT_RE = re.compile(
+    r"(enable_thinking\s*=\s*enable_thinking\s*\|\s*default\(\s*)"
+    r"(true|false)"
+    r"(\s*\))"
+)
+
+
+def _set_template_thinking_default(template_text: str, want: bool) -> tuple[str, int]:
+    """Rewrite the template's literal thinking fallback to ``want``.
+
+    Returns (new_text, n_substitutions) so the caller can refuse to ship when
+    the fallback is absent or ambiguous rather than silently doing nothing.
+    """
+    new_text, n = _THINKING_DEFAULT_RE.subn(
+        lambda m: f"{m.group(1)}{'true' if want else 'false'}{m.group(3)}",
+        template_text,
+    )
+    return new_text, n
+
+
+# Sampling values poolside documents on the model card but omits from some
+# generation_config.json files. S-2.1 ships top_k=20; XS-2.1 does NOT, even
+# though its own card states "The same sampling parameters were used for all
+# Laguna XS 2.1 benchmarking: temperature=1.0, top_k=20 and top_p=1" and both
+# usage snippets pass top_k=20. Omission there is a vendor inconsistency, not
+# intent to disable top_k: with top_k unset at temperature 1.0 / top_p 1.0 a
+# runtime samples the full 100352-wide distribution unfiltered, which is not
+# how the model was evaluated (and it is worst on the low-bit profiles).
+# These fill ONLY missing keys — an explicit vendor value always wins.
+_CARD_DOCUMENTED_SAMPLING = {"top_k": 20}
+
+
+def build_chat_block(
+    gen_cfg: dict,
+    *,
+    template_text: str | None = None,
+) -> dict:
+    """jang_config['chat'] from the vendor generation_config.json.
+
+    Vendor values pass through verbatim; the only additions are sampling keys
+    poolside documents on the card but leaves out of generation_config
+    (``_CARD_DOCUMENTED_SAMPLING``), and only where the vendor said nothing.
+
+    An explicit ``default_chat_template_kwargs.enable_thinking`` remains
+    authoritative. If it is absent, mirror the effective template's literal
+    ``default(true|false)`` fallback. Poolside changed S-2.1 from false to true
+    in revision e80da38, so assuming either value independently of the copied
+    template makes ``jang_config`` disagree with the actual prompt.
+    """
     tpl_kwargs = dict(gen_cfg.get("default_chat_template_kwargs") or {})
     sampling_defaults = {
         k: gen_cfg[k]
         for k in ("temperature", "top_p", "top_k", "min_p")
         if k in gen_cfg
     }
-    thinking_on = bool(tpl_kwargs.get("enable_thinking", False))
+    for k, v in _CARD_DOCUMENTED_SAMPLING.items():
+        sampling_defaults.setdefault(k, v)
+    if "enable_thinking" in tpl_kwargs:
+        thinking_on = bool(tpl_kwargs["enable_thinking"])
+    else:
+        thinking_on = _template_default_enable_thinking(template_text)
     return {
         "reasoning": {
             "supported": True,
@@ -237,9 +364,40 @@ def _parse_args(argv=None):
                          "model.layers.{L}.mlp.input_scale)")
     ap.add_argument("--group-size", type=int, default=None,
                     help="override policy group_size")
+    ap.add_argument("--qat-packed", type=Path, default=None,
+                    help="QAT W4A16 artifact dir (e.g. Raptor-1.0-16B-A3B-"
+                         "W4A16). Routed experts are IMPORTED from its packed "
+                         "int4 codes instead of being re-quantized, so the "
+                         "bundle reproduces the certified QAT function "
+                         "bit-exactly (CONVERT.md Path B).")
     ap.add_argument("--shard-bytes", type=int, default=SHARD_BYTES)
     ap.add_argument("--dry-run", action="store_true")
     return ap.parse_args(argv)
+
+
+def _load_raw_pt(src: Path, wm: dict, name: str):
+    """Load a tensor without forcing fp32 — packed codes must stay integral."""
+    import torch  # noqa: F401
+    from safetensors import safe_open
+
+    with safe_open(str(src / wm[name]), framework="pt") as f:
+        return f.get_tensor(name)
+
+
+def load_packed_expert(pdir: Path, pwm: dict, stem: str):
+    """Import one expert projection from the W4A16 artifact as a jang affine
+    block — zero re-quantization (CONVERT.md Path B).
+
+    poolside packs nibbles = q+8, little nibble first, which is byte-for-byte
+    MLX's own affine 4-bit layout, so the packed words are reused verbatim;
+    only the container changes. bias = -8*scale makes MLX's ``q*scale + bias``
+    evaluate the symmetric grid ``q_sym*scale`` exactly.
+    """
+    packed = _load_raw_pt(pdir, pwm, f"{stem}.weight_packed").numpy()
+    if packed.dtype != np.int32:
+        raise SystemExit(f"{stem}.weight_packed dtype {packed.dtype}, expected int32")
+    scale = _load_raw_pt(pdir, pwm, f"{stem}.weight_scale").float().numpy()
+    return packed.view(np.uint32), scale.astype(np.float32)
 
 
 def _load_pt(src: Path, wm: dict, name: str) -> np.ndarray:
@@ -315,6 +473,60 @@ def main(argv=None) -> None:
 
     policy = profile_policy(args.profile)
     gs = args.group_size or policy.group_size
+
+    # ── Path B: certified QAT expert codes ──
+    # Raptor's experts were trained through a symmetric-int4 g128 quantizer
+    # (STE), and every certified number belongs to THAT function. The BF16
+    # merge is the pre-snap master, so re-quantizing it — affine or even a
+    # hand-rolled snap — yields a function nobody measured (a snap from bf16
+    # reproduces ~99.4% of codes; the rest differ by 1 because poolside's
+    # bf16 scale rounding differs by an ULP). Importing the packed codes is
+    # exact by construction.
+    PACKED = args.qat_packed.expanduser() if args.qat_packed else None
+    pwm: dict = {}
+    QAT_GS = 128
+    if PACKED is not None:
+        pidx = PACKED / "model.safetensors.index.json"
+        if not pidx.exists():
+            raise SystemExit(f"missing {pidx}")
+        pwm = json.loads(pidx.read_text())["weight_map"]
+        pmiss = sorted({s for s in pwm.values() if not (PACKED / s).exists()})
+        if pmiss:
+            raise SystemExit(
+                f"QAT artifact incomplete: {len(pmiss)} shards missing; "
+                f"first={pmiss[0]}")
+        man = PACKED / "qat-export-manifest.json"
+        if man.exists():
+            m = json.loads(man.read_text())
+            npack = m.get("expert_tensors_packed")
+            nver = m.get("bit_exact_roundtrip_verified")
+            print(f"  QAT artifact: packed={npack} bit_exact_verified={nver} "
+                  f"group_size={m.get('group_size')}", flush=True)
+            if nver != npack:
+                raise SystemExit(
+                    f"QAT artifact reports {nver}/{npack} tensors verified "
+                    "bit-exact — refusing to import an unverified export")
+            if m.get("group_size") != QAT_GS:
+                raise SystemExit(
+                    f"QAT group_size={m.get('group_size')}, converter assumes "
+                    f"{QAT_GS}")
+        if set(policy.routed_bits.values()) != {4}:
+            raise SystemExit(
+                f"--qat-packed imports 4-bit codes but profile "
+                f"{policy.profile} wants routed bits {policy.routed_bits}")
+        if args.awq is not None:
+            raise SystemExit(
+                "--qat-packed and --awq are mutually exclusive: folding AWQ "
+                "scales would require re-quantizing the experts and discard "
+                "the certified QAT function")
+        # Experts are locked to the QAT grid's 128; non-experts keep the
+        # profile's proven group size. Do NOT force the whole bundle to 128 —
+        # measured 2026-07-29, coarsening the non-expert path to 128 made
+        # greedy decode degenerate into repetition on open-ended prompts,
+        # which poolside's certified W4A16 (BF16 non-experts) does not do.
+        # laguna/runtime.py honours per-module group_size for this.
+        print(f"  group_size: experts {QAT_GS} (QAT grid) / non-experts {gs}",
+              flush=True)
 
     index_path = SRC / "model.safetensors.index.json"
     if not index_path.exists():
@@ -468,18 +680,34 @@ def main(argv=None) -> None:
             emit_quant(f"{pre}.mlp.shared_expert.{proj}", w,
                        policy.shared_expert_bits)
 
-        # routed experts: stack -> prestacked switch_mlp, quantized per policy.
+        # routed experts: stack -> prestacked switch_mlp.
         for proj in _PROJS:
-            rows = moe_inter if proj in ("gate_proj", "up_proj") else H
-            cols = H if proj in ("gate_proj", "up_proj") else moe_inter
-            stack = np.empty((NE, rows, cols), dtype=np.float32)
-            for e in range(NE):
-                stack[e] = _load_pt(SRC, wm, f"{pre}.mlp.experts.{e}.{proj}.weight")
-            if scale is not None and proj in ("gate_proj", "up_proj"):
-                stack *= scale[None, None, :]
-            emit_quant(f"{pre}.mlp.switch_mlp.{proj}", stack,
-                       policy.routed_bits[proj])
-            del stack
+            base = f"{pre}.mlp.switch_mlp.{proj}"
+            if PACKED is not None:
+                # Path B: import the certified QAT codes verbatim.
+                pk, sc = zip(*(
+                    load_packed_expert(
+                        PACKED, pwm, f"{pre}.mlp.experts.{e}.{proj}")
+                    for e in range(NE)))
+                pk = np.stack(pk)
+                sc = np.stack(sc)
+                writer.add(f"{base}.weight", pk)
+                writer.add(f"{base}.scales", sc.astype(np.float16))
+                writer.add(f"{base}.biases", (-8.0 * sc).astype(np.float16))
+                overrides[base] = {"bits": 4, "group_size": QAT_GS,
+                                   "mode": "affine"}
+                del pk, sc
+            else:
+                rows = moe_inter if proj in ("gate_proj", "up_proj") else H
+                cols = H if proj in ("gate_proj", "up_proj") else moe_inter
+                stack = np.empty((NE, rows, cols), dtype=np.float32)
+                for e in range(NE):
+                    stack[e] = _load_pt(
+                        SRC, wm, f"{pre}.mlp.experts.{e}.{proj}.weight")
+                if scale is not None and proj in ("gate_proj", "up_proj"):
+                    stack *= scale[None, None, :]
+                emit_quant(base, stack, policy.routed_bits[proj])
+                del stack
             gc.collect()
             mx.clear_cache()
         print(f"    L{li:2d} moe    {time.time() - tl:.1f}s", flush=True)
@@ -514,9 +742,9 @@ def main(argv=None) -> None:
     # ── vendor generation params: pass through, never invent ──
     # S-2.1 ships temp 1.0 / top_p 1.0 / min_p 0.0 / top_k 20, parsers
     # "poolside_v1", and default_chat_template_kwargs.enable_thinking=true.
-    # The chat template's OWN fallback is enable_thinking=false, so a
-    # consumer that ignores default_chat_template_kwargs silently runs
-    # no-think — stamp the kwargs into jang_config so engines see them.
+    # Current Poolside revision e80da38 also defaults the template itself On;
+    # older revisions defaulted it Off. Derive the fallback from the exact
+    # copied template so jang_config and the prompt cannot disagree.
     gen_cfg: dict = {}
     gen_p = SRC / "generation_config.json"
     if gen_p.exists():
@@ -524,7 +752,16 @@ def main(argv=None) -> None:
     else:
         print("  WARNING: source has no generation_config.json — chat block "
               "will carry no vendor sampling defaults", flush=True)
-    chat_block = build_chat_block(gen_cfg)
+    source_template_path = SRC / "chat_template.jinja"
+    source_template_text = (
+        source_template_path.read_text(encoding="utf-8")
+        if source_template_path.exists()
+        else None
+    )
+    chat_block = build_chat_block(
+        gen_cfg,
+        template_text=source_template_text,
+    )
     # EOS consistency: config.json vs generation_config.json. The template
     # emits 〈|EOS|〉 (id 2) as BOS and stops on [2, 24]; a mismatch here is
     # how bundles end up generating past end-of-turn.
@@ -627,14 +864,93 @@ def main(argv=None) -> None:
         if (SRC / fn).exists():
             shutil.copy2(SRC / fn, OUT / fn)
 
-    # inline chat_template into tokenizer_config when absent there
+    # ── reconcile the template's literal thinking fallback with the vendor's
+    # explicit declaration ──
+    # Two surfaces declare the DEFAULT reasoning mode: the template's own
+    # `enable_thinking | default(...)` fallback (what a plain transformers
+    # caller gets) and generation_config.default_chat_template_kwargs
+    # .enable_thinking (what vLLM and jang_config honour). Raptor-1.0-16B
+    # ships them in direct contradiction — its template descends from
+    # laguna_glm_thinking_v8, which still defaults false, while its
+    # generation_config declares true, as the whole shipped Laguna-2.1
+    # family does. Left alone the same bundle reasons or does not depending
+    # on who loads it, and a reasoning-trained model served reasoning-OFF
+    # measures far below its real capability (the OsaurusAgent-35B
+    # post-mortem). The explicit vendor kwarg is authoritative, so align the
+    # copied template to it. Only ever touches that one default() literal.
+    tpl_out_p = OUT / "chat_template.jinja"
+    declared = (gen_cfg.get("default_chat_template_kwargs") or {}).get(
+        "enable_thinking")
+    if declared is not None and tpl_out_p.exists():
+        tpl_txt = tpl_out_p.read_text(encoding="utf-8")
+        if _template_default_enable_thinking(tpl_txt) != bool(declared):
+            new_txt, n = _set_template_thinking_default(tpl_txt, bool(declared))
+            if n != 1:
+                raise SystemExit(
+                    "chat template disagrees with generation_config "
+                    f"default_chat_template_kwargs.enable_thinking={declared}, "
+                    f"but the `enable_thinking | default(...)` fallback was "
+                    f"matched {n} times — cannot reconcile safely; fix the "
+                    "template by hand before shipping"
+                )
+            tpl_out_p.write_text(new_txt, encoding="utf-8")
+            print(f"  chat_template: aligned literal thinking fallback "
+                  f"default({not bool(declared)}) -> default({bool(declared)}) "
+                  "to match generation_config", flush=True)
+
+    # Inline the REAL chat template into tokenizer_config. poolside ships
+    # tokenizer_config.chat_template = "{% include 'chat_template.jinja' %}"
+    # — a 35-char multi-file include stub, NOT a template. Only the newest
+    # transformers resolve that include against the model dir; every other
+    # consumer (vmlx among them) renders a broken/fallback template where
+    # enable_thinking never reaches the real jinja, which is exactly the
+    # "cannot enable Laguna reasoning" bug (2026-07-22). The shipped
+    # Laguna-M.1 bundle inlines the full template — that is the house
+    # convention. Treat an include-stub (or anything template-free) as
+    # absent and inline the .jinja content.
     tok_cfg_p = OUT / "tokenizer_config.json"
     tpl_p = OUT / "chat_template.jinja"
     if tok_cfg_p.exists() and tpl_p.exists():
         tc = json.loads(tok_cfg_p.read_text())
-        if not tc.get("chat_template"):
+        cur = tc.get("chat_template") or ""
+        if not cur or "{% include" in cur or "{%- include" in cur:
             tc["chat_template"] = tpl_p.read_text(encoding="utf-8")
             tok_cfg_p.write_text(json.dumps(tc, indent=2, ensure_ascii=False))
+            print("  chat_template: inlined full .jinja into tokenizer_config "
+                  f"(was {len(cur)} chars{' include-stub' if cur else ''})",
+                  flush=True)
+
+    # ── sampling-defaults reconciliation + gate ──
+    # Two files declare sampling: jang_config.chat.sampling_defaults (what
+    # vmlx reads first) and the copied generation_config.json (what
+    # transformers / vLLM / every non-JANG consumer reads). They MUST agree,
+    # or the same bundle samples differently depending on who loads it —
+    # exactly how the XS-2.1 lineup shipped without top_k=20 while its README
+    # advertised it. Push card-documented keys into the copy, then hard-gate.
+    gen_out_p = OUT / "generation_config.json"
+    if gen_out_p.exists():
+        gen_out = json.loads(gen_out_p.read_text())
+        added = {}
+        for k, v in chat_block["sampling_defaults"].items():
+            if k not in gen_out:
+                gen_out[k] = v
+                added[k] = v
+        if added:
+            gen_out_p.write_text(json.dumps(gen_out, indent=2) + "\n")
+            print(f"  generation_config: added card-documented {added}",
+                  flush=True)
+        disagree = {
+            k: (v, gen_out.get(k))
+            for k, v in chat_block["sampling_defaults"].items()
+            if gen_out.get(k) != v
+        }
+        if disagree:
+            raise SystemExit(
+                "sampling defaults disagree between jang_config.chat and "
+                f"generation_config.json (key: jang vs gen): {disagree} — "
+                "refusing to ship a bundle that samples differently per "
+                "consumer"
+            )
 
     # ── chat-template round-trip gate ──
     # Structural presence is not enough (feedback_structural_verification_
@@ -647,13 +963,40 @@ def main(argv=None) -> None:
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(str(OUT), trust_remote_code=True)
+    # The EFFECTIVE template (what tok will render) must be the real thing,
+    # not the include stub — and it must actually read enable_thinking.
+    # Environments differ on include resolution; gate on the tokenizer's
+    # attribute so this fails HERE, not in a consumer.
+    eff_tpl = getattr(tok, "chat_template", None) or ""
+    if "{% include" in eff_tpl or "{%- include" in eff_tpl:
+        raise SystemExit(
+            "tokenizer.chat_template is still the include stub — the inline "
+            "step failed; consumers without model-dir include resolution "
+            "will render without the think protocol")
+    if "enable_thinking" not in eff_tpl:
+        raise SystemExit(
+            "effective chat template does not read enable_thinking — "
+            "reasoning cannot be toggled; refusing to ship")
     msgs = [{"role": "user", "content": "ping"}]
     think = tok.apply_chat_template(
         msgs, tokenize=False, add_generation_prompt=True, enable_thinking=True)
     nothink = tok.apply_chat_template(
         msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    default_render = tok.apply_chat_template(
+        msgs, tokenize=False, add_generation_prompt=True)
     for label, rendered, tail in (("think", think, "<assistant><think>"),
-                                  ("no-think", nothink, "<assistant></think>")):
+                                  ("no-think", nothink, "<assistant></think>"),
+                                  (
+                                      "default",
+                                      default_render,
+                                      (
+                                          "<assistant><think>"
+                                          if chat_block["reasoning"][
+                                              "default_enabled"
+                                          ]
+                                          else "<assistant></think>"
+                                      ),
+                                  )):
         if "<user>ping</user>" not in rendered or not rendered.endswith(tail):
             raise SystemExit(
                 f"chat template round-trip FAILED ({label}): got {rendered!r}"
