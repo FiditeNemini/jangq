@@ -169,6 +169,17 @@ TIER_RULES = [
     ("embed_tokens", Tier.IMPORTANT),
     ("wte", Tier.IMPORTANT),
     ("word_embeddings", Tier.IMPORTANT),
+    # Nemotron-H names the input embedding `backbone.embeddings.weight`, which
+    # matched NONE of the patterns above and fell through to the COMPRESS
+    # default (2-bit at JANG_2L on a 0.35 B-param table).
+    #
+    # Deliberately anchored on the `backbone.` prefix rather than a bare
+    # "embeddings": a bare pattern also captures `vision_model.embeddings.*`,
+    # `vision_tower.embeddings.*` and `audio_tower.embeddings.*`, which would
+    # silently re-tier every shipped VL/audio bundle (Gemma 4, Qwen3.6-VL,
+    # Holo3, Zaya1-VL, Nemotron-Omni/Audex) from COMPRESS to IMPORTANT.
+    # Verified by classification diff before narrowing.
+    ("backbone.embeddings", Tier.IMPORTANT),
 
     # ── Vision-Language Connector ────────────────────────────
     ("visual.merger", Tier.IMPORTANT),
@@ -347,6 +358,70 @@ MLP_ASYMMETRY_FLOORS = {
 
 
 _MLP_ASYMMETRY_MIN_EXPERTS = 256
+
+
+# ── Gate-less relu2 expert MLP floors (Nemotron-H / Nemotron 3.5 Lightning) ──
+# These models have NO gate_proj. The expert MLP is:
+#     y = down_proj(relu2(up_proj(x)))
+# so up_proj feeds a SQUARING nonlinearity and is itself the error amplifier —
+# exactly the role gate_proj plays in SwiGLU. MLP_ASYMMETRY_FLOORS encodes the
+# opposite assumption ("up_proj: no floor, 2-bit OK when gate is protected"),
+# which is vacuous here because there is no gate to protect.
+#
+# Unlike MLP_ASYMMETRY_FLOORS these apply regardless of expert count: Nemotron
+# 3.5 Lightning has 128 routed experts, below the 256 threshold, so neither the
+# gate floor nor the down_proj floor would otherwise fire at all.
+#
+# OPT-IN ONLY (``gateless_relu2=True``). Default False means no existing call
+# path or shipped bundle changes bit allocation.
+RELU2_ASYMMETRY_FLOORS = {
+    "up_proj": 4,    # squared -> amplifier, inherits gate_proj's 4-bit floor
+    "down_proj": 3,  # residual projection, same rationale as SwiGLU down_proj
+}
+
+
+def _apply_relu2_asymmetry_floor(
+    name: str,
+    bits: int,
+    gateless_relu2: bool = False,
+) -> int:
+    """Apply gate-less relu2 expert floors. No-op unless *gateless_relu2*.
+
+    Only affects routed expert MLP tensors — shared_expert is already CRITICAL
+    and must not be touched (same carve-out as the SwiGLU path).
+    """
+    if not gateless_relu2:
+        return bits
+    name_lower = name.lower()
+    if "shared_expert" in name_lower:
+        return bits
+    if "experts" not in name_lower:
+        return bits
+    for component, floor in RELU2_ASYMMETRY_FLOORS.items():
+        if component in name_lower:
+            return max(bits, floor)
+    return bits
+
+
+def _apply_gateless_relu2_conv_floor(
+    name: str,
+    bits: int,
+    critical_bits: int,
+    gateless_relu2: bool = False,
+) -> int:
+    """Promote the SSM input conv to CRITICAL for gate-less relu2 hybrids.
+
+    ``conv1d`` is classified COMPRESS by TIER_RULES, which at a 2-bit profile
+    means a 2-bit depthwise conv gating the entire selective-scan input. On
+    Nemotron 3.5 Lightning that is 23 layers x 6144 x 4 = 565 K params, i.e.
+    0.002 % of the model — the promotion is free in size terms and removes a
+    long-context drift risk. Opt-in so existing Mamba bundles are unaffected.
+    """
+    if not gateless_relu2:
+        return bits
+    if "conv1d" in name.lower():
+        return max(bits, critical_bits)
+    return bits
 
 
 def _apply_mlp_asymmetry_floor(
@@ -728,6 +803,7 @@ def allocate_bits_profile(
     num_experts: int = 0,
     has_shared_mlp: bool = False,
     apply_mlp_asymmetry: bool = True,
+    gateless_relu2: bool = False,
 ) -> np.ndarray:
     """
     Tier-based bit allocation — classifies each tensor into a sensitivity
@@ -781,6 +857,10 @@ def allocate_bits_profile(
                 assigned = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
                 if apply_mlp_asymmetry:
                     assigned = _apply_mlp_asymmetry_floor(name, assigned, num_experts)
+                assigned = _apply_relu2_asymmetry_floor(name, assigned, gateless_relu2)
+                assigned = _apply_gateless_relu2_conv_floor(
+                    name, assigned, critical_bits, gateless_relu2
+                )
                 cache[name] = assigned
             prev_name = name
             run_count = 1
@@ -1009,10 +1089,16 @@ def allocate_bits_profile_compact(
     num_experts: int = 0,
     has_shared_mlp: bool = False,
     apply_mlp_asymmetry: bool = True,
+    gateless_relu2: bool = False,
 ) -> dict[str, int]:
     """Per-tensor profile allocation. Returns tensor_name → bits.
 
     Equivalent to allocate_bits_profile() but without per-block arrays.
+
+    gateless_relu2: set True for models whose expert MLP is
+        ``down_proj(relu2(up_proj(x)))`` with no gate_proj (Nemotron-H family).
+        Applies RELU2_ASYMMETRY_FLOORS and promotes conv1d. Default False —
+        no existing caller changes behaviour.
     """
     profile = profile.upper()
     if profile not in JANG_PROFILES:
@@ -1030,6 +1116,10 @@ def allocate_bits_profile_compact(
         bits = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
         if apply_mlp_asymmetry:
             bits = _apply_mlp_asymmetry_floor(name, bits, num_experts)
+        bits = _apply_relu2_asymmetry_floor(name, bits, gateless_relu2)
+        bits = _apply_gateless_relu2_conv_floor(
+            name, bits, critical_bits, gateless_relu2
+        )
         result[name] = bits
     return result
 
