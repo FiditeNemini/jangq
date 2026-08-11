@@ -58,10 +58,15 @@ SRC = Path(sys.argv[1])
 OUT = Path(sys.argv[2])
 BITS = int(sys.argv[3]) if len(sys.argv) > 3 else 4
 GROUP = int(sys.argv[4]) if len(sys.argv) > 4 else 32
+# argv[5]: "affine" (default, back-compat) or "mxfp8"/"mxfp4" for true MX
+# formats. MX modes return (packed_weight, scales) with NO biases — the scales
+# are e8m0 shared exponents, not fp16 affine scales.
+MODE = sys.argv[5] if len(sys.argv) > 5 else "affine"
+IS_MX = MODE.startswith("mxfp")
 
 # Routed-expert key pattern. group(1)=layer_idx, group(2)=expert_idx, group(3)=proj
 EXPERT_KEY_RE = re.compile(
-    r"^language_model\.backbone\.layers\.(\d+)\.mixer\.experts\.(\d+)\.(up_proj|down_proj)\.weight$"
+    r"^(?:language_model\.)?backbone\.layers\.(\d+)\.mixer\.experts\.(\d+)\.(up_proj|down_proj)\.weight$"
 )
 PROJ_TO_FC = {"up_proj": "fc1", "down_proj": "fc2"}
 
@@ -70,13 +75,18 @@ try:
 
     with open(SRC / "config.json") as f:
         full_config = json.load(f)
-    llm_config = full_config.get("llm_config", {})
-    if not llm_config:
-        raise SystemExit(f"{SRC}/config.json has no llm_config — wrong source?")
+    # Nemotron-Omni nests the LM under llm_config; Nemotron 3.5 Lightning is flat.
+    llm_config = full_config.get("llm_config") or full_config.get("text_config") or full_config
+    if "num_hidden_layers" not in llm_config:
+        raise SystemExit(f"{SRC}/config.json has no LM config — wrong source?")
+    IS_WRAPPED = bool(full_config.get("llm_config"))
 
     n_layers = llm_config.get("num_hidden_layers", 52)
     n_experts = llm_config.get("n_routed_experts", 128)
     pattern = llm_config.get("hybrid_override_pattern", "")
+    if not pattern and llm_config.get("layers_block_type"):
+        _M = {"mamba": "M", "attention": "*", "moe": "E", "mlp": "-"}
+        pattern = "".join(_M[t] for t in llm_config["layers_block_type"])
 
     def get_method(tensor_name: str) -> str:
         n = tensor_name
@@ -84,7 +94,10 @@ try:
                 or n.startswith("mlp1.") or n.startswith("sound_projection.")):
             return "drop"
         if n.startswith("language_model.mtp.") or n.startswith("mtp."):
-            return "drop"
+            # Nemotron-Omni ships no usable MTP; Nemotron 3.5 Lightning ships a
+            # real 1.335 B head worth retaining (see docs/internal/
+            # nemotron35-lightning-30b/05-MTP-D2-D3-AND-CACHING.md).
+            return "drop" if IS_WRAPPED else "affine"
         if EXPERT_KEY_RE.match(n):
             return "expert"  # buffered for stacked quantization
         if n.endswith(".norm.weight") or "norm_f.weight" in n or "mixer.norm.weight" in n:
@@ -98,6 +111,23 @@ try:
         if n.endswith(".bias"):
             return "passthrough"
         return "affine"
+
+    def _quant(w):
+        """Quantize under MODE. Returns (qw, qs, qb|None)."""
+        if IS_MX:
+            qw, qs = mx.quantize(w, group_size=GROUP, bits=BITS, mode=MODE)
+            return qw, qs, None
+        qw, qs, qb = mx.quantize(w, group_size=GROUP, bits=BITS)
+        return qw, qs, qb
+
+    def _emit(base, qw, qs, qb):
+        add_tensor(f"{base}.weight", np.array(qw))
+        # MX scales are uint8 e8m0 exponents — casting them to fp16 would
+        # corrupt the format, so preserve the dtype the kernel expects.
+        add_tensor(f"{base}.scales",
+                   np.array(qs) if IS_MX else np.array(qs).astype(np.float16))
+        if qb is not None:
+            add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))
 
     def dst_name(src: str) -> str:
         if src.startswith("language_model."):
@@ -193,7 +223,7 @@ try:
             base = dst_n[:-len(".weight")] if dst_n.endswith(".weight") else dst_n
             return (f"{base}.weight" in done_keys
                     and f"{base}.scales" in done_keys
-                    and f"{base}.biases" in done_keys)
+                    and (IS_MX or f"{base}.biases" in done_keys))
         return False
 
     def is_group_done(layer: int, proj: str) -> bool:
@@ -201,7 +231,7 @@ try:
         base = f"backbone.layers.{layer}.mixer.switch_mlp.{fc}"
         return (f"{base}.weight" in done_keys
                 and f"{base}.scales" in done_keys
-                and f"{base}.biases" in done_keys)
+                and (IS_MX or f"{base}.biases" in done_keys))
 
     progress.phase(2, 3, "convert simple")
     print("\n  Converting simple tensors...", flush=True)
@@ -230,15 +260,23 @@ try:
             tensor = tensor.astype(np.float32)
 
         if method == "passthrough" or tensor.ndim < 2:
-            add_tensor(dst_n, tensor.astype(np.float16))
+            # `e_score_correction_bias` is the DeepSeek-V3 noaux_tc routing bias
+            # and is the ONLY fp32 tensor family in the Nemotron 3.5 Lightning
+            # checkpoint (24 of 6513) — NVIDIA raised precision there and
+            # nowhere else. fp16 has a 10-bit mantissa and min normal ~6e-5;
+            # with 128 experts separated by small learned offsets that changes
+            # expert selection. Observed live: an fp16-biased MXFP8 bundle
+            # declined a tool call that the fp32 JANG bundles answered.
+            if dst_n.endswith("e_score_correction_bias") and tensor.dtype == np.float32:
+                add_tensor(dst_n, tensor)
+            else:
+                add_tensor(dst_n, tensor.astype(np.float16))
             total_passthrough += 1
         elif method == "affine":
             w = mx.array(tensor.astype(np.float16))
-            qw, qs, qb = mx.quantize(w, group_size=GROUP, bits=BITS)
+            qw, qs, qb = _quant(w)
             base = dst_n[:-len(".weight")] if dst_n.endswith(".weight") else dst_n
-            add_tensor(f"{base}.weight", np.array(qw))
-            add_tensor(f"{base}.scales", np.array(qs).astype(np.float16))
-            add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))
+            _emit(base, qw, qs, qb)
             total_affine_simple += 1
             del w, qw, qs, qb
 
@@ -263,7 +301,8 @@ try:
         stacked = []
         for e in range(n_experts):
             shape, sf_path = experts_meta[e]
-            src_name = f"language_model.backbone.layers.{layer}.mixer.experts.{e}.{proj}.weight"
+            _pfx = "language_model." if IS_WRAPPED else ""
+            src_name = f"{_pfx}backbone.layers.{layer}.mixer.experts.{e}.{proj}.weight"
             with safe_open(str(sf_path), framework="numpy") as f:
                 try:
                     t = f.get_tensor(src_name)
@@ -281,12 +320,10 @@ try:
         # packed weights + (n_experts, out, in/group_size) scales/biases.
         w = mx.array(stacked_np)
         del stacked_np
-        qw, qs, qb = mx.quantize(w, group_size=GROUP, bits=BITS)
+        qw, qs, qb = _quant(w)
         fc = PROJ_TO_FC[proj]
         base = f"backbone.layers.{layer}.mixer.switch_mlp.{fc}"
-        add_tensor(f"{base}.weight", np.array(qw))
-        add_tensor(f"{base}.scales", np.array(qs).astype(np.float16))
-        add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))
+        _emit(base, qw, qs, qb)
         total_affine_grouped += 1
         del w, qw, qs, qb
         gc.collect()
@@ -312,6 +349,10 @@ try:
     out_config = dict(llm_config)
     out_config["model_type"] = "nemotron_h"
     out_config["quantization"] = {"group_size": GROUP, "bits": BITS}
+    if IS_MX:
+        # Declare the MX mode so the runtime dispatches to the right kernel and
+        # the bundle is not mistaken for affine (mlxstudio#130-class metadata bug).
+        out_config["quantization"]["mode"] = MODE
     out_config["_jang_source"] = full_config.get("model_type", "NemotronH_Nano_Omni_Reasoning_V3")
     out_config["_jang_modality"] = "text"
 
