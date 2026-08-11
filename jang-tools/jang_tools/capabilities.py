@@ -43,6 +43,11 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "minimax_m2":       ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax_m2_5":     ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax":          ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
+    # MiniMax-M3 — its own reasoning AND tool dialect, not M2.7's. Stamping the
+    # M2.7 row here would route M3 bundles through the wrong pair of parsers.
+    # think_in_template=False: generation must start in visible content.
+    "minimax_m3":       ("minimax_m3",  "minimax_m3",  "minimax_m3", False, "kv"),
+    "minimax_m3_vl":    ("minimax_m3",  "minimax_m3",  "minimax_m3", False, "kv"),
     # MiMo V2.5 — hybrid full-attention + SWA KV. Cache topology details
     # live in the MiMo converter/runtime metadata; the shared capability stamp
     # keeps generic JANG restamping on the XML reasoning/tool parser path.
@@ -62,6 +67,9 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "glm4_moe":         ("glm4_moe",    "deepseek_r1", "glm47",    False, "kv"),
     # Nemotron (hybrid SSM)
     "nemotron_h":       ("nemotron_h",  "deepseek_r1", "nemotron", True,  "hybrid"),
+    # openPangu v2 — deepseek_r1 reasoning with its OWN tool dialect, and
+    # think_in_template=True (the template opens the reasoning rail itself).
+    "openpangu_v2":     ("openpangu_v2", "deepseek_r1", "openpangu", True, "kv"),
     "nemotron_h_v2":    ("nemotron_h",  "deepseek_r1", "nemotron", True,  "hybrid"),
     # Mistral 4 (MLA)
     "mistral3":         ("mistral4",    "mistral",     "mistral",  False, "mla"),
