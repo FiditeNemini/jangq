@@ -78,6 +78,19 @@ def _arch_report(rid: str, api: HfApi) -> None:
         print(f"  (file listing unavailable: {type(e).__name__})")
 
 
+def _repo_bytes(rid: str, api: HfApi) -> int:
+    try:
+        info = api.model_info(rid, files_metadata=True)
+        return sum(s.size or 0 for s in info.siblings)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _free_bytes(path: str = "/Users/eric") -> int:
+    import shutil
+    return shutil.disk_usage(path).free
+
+
 def main() -> int:
     api = HfApi()
     hits = []
@@ -100,8 +113,31 @@ def main() -> int:
         print("QWEN38: NOT RELEASED — no official Qwen/*3.8* repo on the Hub yet")
         return 1
 
-    print(f"QWEN38: RELEASED — {len(hits)} repo(s): {', '.join(hits)}")
+    # Feasibility gate. Exit 0 (act) ONLY if something could actually be
+    # downloaded and converted here. Qwen3.8-2.4T-A95B is 2.5-4.9 TB against
+    # ~430 GB free, and even a 2-bit bundle of 2.4T params is ~600 GB — firing
+    # the pipeline on it just burns hours of bandwidth before failing on disk.
+    free = _free_bytes()
+    # Need room for the source plus roughly a half-size bundle beside it.
+    budget = free * 0.6
+    feasible, too_big = [], []
     for rid in hits:
+        n = _repo_bytes(rid, api)
+        (feasible if 0 < n <= budget else too_big).append((rid, n))
+
+    if not feasible:
+        print(f"QWEN38: released but NOTHING CONVERTIBLE HERE "
+              f"({free/1e9:.0f} GB free)")
+        for rid, n in too_big:
+            print(f"  SKIP {rid}: {n/1e9:.0f} GB source — does not fit")
+        print("  No 27B-scale Qwen3.8 yet. Taking no action.")
+        return 1
+
+    print(f"QWEN38: RELEASED AND CONVERTIBLE — {len(feasible)} repo(s): "
+          f"{', '.join(r for r, _ in feasible)}")
+    for rid, n in too_big:
+        print(f"  (skipping {rid}: {n/1e9:.0f} GB, too large for this machine)")
+    for rid, _ in feasible:
         print(f"\n=== {rid} ===")
         try:
             _arch_report(rid, api)
