@@ -21,6 +21,7 @@ stamped artifacts (idempotent).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,97 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
 }
 
 
+def _template_preopens_think(model_dir: Path) -> bool:
+    """True when the chat template leaves ``<think>`` OPEN in every generation prompt.
+
+    `think_in_template` in FAMILY_MAP is a per-family default, but some bundles
+    ship a template that decides for itself. LFM2.5-2.6B pre-opens the tag
+    unconditionally, so the runtime must NOT emit its own opener or the reply
+    starts with a doubled tag and the reasoning parser mis-splits the response.
+
+    Only an UNCONDITIONAL, still-open tag counts. Three shapes deliberately do
+    not:
+
+    * `assistant\n` with no tag at all — the ordinary case.
+    * `{% if enable_thinking %}<think>{% endif %}` (bailing / qwen3 style) — the
+      caller chooses per request, so the family default has to stand.
+    * `<think></think>` (zaya style) — a CLOSED prefill. The template is
+      suppressing reasoning, which is the opposite of pre-opening it, and
+      treating it as a pre-open would strip the model's real answer.
+
+    Static analysis only: the template is not rendered, because rendering needs
+    a tokenizer and a full message list, and this runs at stamp time.
+    """
+    template = _read_chat_template(model_dir)
+    if not template:
+        return False
+    body = _generation_prompt_region(template)
+    if body is None:
+        return False
+    literal = _unconditional_literals(body)
+    return literal.rstrip().endswith("<think>")
+
+
+def _read_chat_template(model_dir: Path) -> str:
+    """Template text from chat_template.jinja, else tokenizer_config.json."""
+    jinja = model_dir / "chat_template.jinja"
+    try:
+        if jinja.is_file():
+            return jinja.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    try:
+        config = json.loads(
+            (model_dir / "tokenizer_config.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return ""
+    value = config.get("chat_template")
+    # Some tokenizers ship a list of named templates.
+    if isinstance(value, list):
+        for entry in value:
+            if isinstance(entry, dict) and entry.get("name") in (None, "default"):
+                return str(entry.get("template") or "")
+        return ""
+    return str(value or "")
+
+
+def _generation_prompt_region(template: str) -> str | None:
+    """The slice guarded by ``if add_generation_prompt``, or None.
+
+    A template with no such guard cannot pre-open anything: the tag would then
+    also land on stored assistant turns, which no template does.
+    """
+    marker = "add_generation_prompt"
+    start = template.find(marker)
+    if start < 0:
+        return None
+    return template[start:]
+
+
+def _unconditional_literals(body: str) -> str:
+    """Concatenated literal text that renders REGARDLESS of any inner condition.
+
+    Nested ``{% if %}…{% endif %}`` blocks are dropped whole before the quoted
+    literals are collected, which is what separates the unconditional LFM2.5
+    shape from the per-request qwen3 one.
+    """
+    # `if\s` rather than `if\b`: a literal BACKSPACE byte once landed here in
+    # place of the word boundary, and a pattern that can never match strips
+    # nothing — the conditional qwen3 shape then read as an unconditional
+    # pre-open. It was invisible in grep and sed output.
+    without_conditionals = re.sub(
+        r"\{%-?\s*if\s.*?\{%-?\s*endif\s*-?%\}",
+        "",
+        body,
+        flags=re.S,
+    )
+    pieces = re.findall(r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'', without_conditionals)
+    joined = "".join(double or single for double, single in pieces)
+    # Jinja literals carry escaped newlines; unescape so a trailing tag is found.
+    return joined.replace("\\n", "\n").replace("\\t", "\t")
+
+
 def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]]:
     """Find the source-arch string from any known location.
 
@@ -266,6 +358,14 @@ def build_capabilities(
     if matched is None:
         return None
     family, reasoning, tool, think_in_template, cache_type = FAMILY_MAP[matched]
+    # The FAMILY_MAP value is the per-family DEFAULT. A bundle whose own chat
+    # template pre-opens `<think>` unconditionally overrides it, because the
+    # runtime must not then emit a second opener — LFM2.5-2.6B ships exactly
+    # that shape while the `lfm2` row says False. Only ever an upgrade to True:
+    # a family marked True with a template that says nothing keeps its default,
+    # since the tag may be injected by the runtime rather than the template.
+    if not think_in_template and model_path is not None:
+        think_in_template = _template_preopens_think(model_path)
     modality = _resolve_modality(jang, config, model_path)
     modalities = _resolve_modalities(jang, config)
     # supports_thinking advertises whether the model architecturally produces
