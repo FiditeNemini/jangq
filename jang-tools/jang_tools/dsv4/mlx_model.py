@@ -1293,26 +1293,47 @@ class DeepseekV4Cache:
                 slot["last_pool"] = None
 
     @staticmethod
-    def _copy_delta_tree(value):
-        """Detach a small cache-record tree from the live mutable cache."""
+    def _copy_delta_tree(value, _collector=None):
+        """Detach a small cache-record tree from the live mutable cache.
+
+        ``value + mx.zeros_like(value)`` already graph-detaches each leaf: the
+        term references the pre-mutation source array, not an alias, so the
+        snapshot is well defined even before it is materialized. The eval only
+        has to pin that snapshot before the next decode step overwrites rolling
+        state. When ``_collector`` is supplied the caller batches that pinning:
+        each detached leaf is appended for a single ``async_eval`` at the block
+        boundary instead of one blocking ``mx.eval`` per leaf. At ~7 leaves x
+        ~40 composite layers a forced-anchor boundary otherwise serializes a
+        few hundred GPU round-trips onto the decode thread — the DSV4
+        long-output per-256-token stall. Ordering safety is unchanged: the copy
+        ops are submitted at the boundary, before the next decode's in-place
+        writes, so same-stream ordering still reads pre-mutation values.
+        """
         if value is None:
             return None
         if hasattr(value, "shape") and hasattr(value, "dtype"):
             copied = value + mx.zeros_like(value)
-            mx.eval(copied)
+            if _collector is None:
+                mx.eval(copied)
+            else:
+                _collector.append(copied)
             return copied
         if isinstance(value, tuple):
-            return tuple(DeepseekV4Cache._copy_delta_tree(item) for item in value)
+            return tuple(
+                DeepseekV4Cache._copy_delta_tree(item, _collector) for item in value
+            )
         if isinstance(value, list):
-            return [DeepseekV4Cache._copy_delta_tree(item) for item in value]
+            return [
+                DeepseekV4Cache._copy_delta_tree(item, _collector) for item in value
+            ]
         if isinstance(value, dict):
             return {
-                key: DeepseekV4Cache._copy_delta_tree(item)
+                key: DeepseekV4Cache._copy_delta_tree(item, _collector)
                 for key, item in value.items()
             }
         return value
 
-    def _export_pool_delta(self, state, start_row, end_row):
+    def _export_pool_delta(self, state, start_row, end_row, _collector=None):
         """Export BF16 pool rows for one immutable token block."""
         from .cache_delta import DSV4_POOL_DELTA_SCHEMA
 
@@ -1328,7 +1349,7 @@ class DeepseekV4Cache:
                     "DSV4 pool delta is outside retained rows: "
                     f"start={start_row} end={end_row} rows={rows}"
                 )
-            value = self._copy_delta_tree(pooled[:, start_row:end_row, :])
+            value = self._copy_delta_tree(pooled[:, start_row:end_row, :], _collector)
         return {
             "schema": DSV4_POOL_DELTA_SCHEMA,
             "storage": "bf16",
@@ -1378,12 +1399,18 @@ class DeepseekV4Cache:
         block_size: int = 256,
         anchor_interval_blocks: int = 8,
         force_anchor: bool = False,
+        _eval_collector=None,
     ):
         """Export one immutable native block record without flattening pools.
 
         Pool rows are emitted for every block.  Local rotating state and the
         incomplete compressor/indexer buffers are emitted only at periodic
         anchors or an explicitly requested request boundary.
+
+        ``_eval_collector`` (optional): when the caller exports many layers at
+        one block boundary it passes a shared list so every detached snapshot
+        leaf is batched into a single ``async_eval`` instead of one blocking
+        ``mx.eval`` per leaf. See ``_copy_delta_tree``.
         """
         from .cache_delta import DSV4_BLOCK_DELTA_SCHEMA
 
@@ -1405,11 +1432,11 @@ class DeepseekV4Cache:
         start_row = start // ratio
         end_row = end // ratio
         compressor_delta = self._export_pool_delta(
-            self.compressor_state, start_row, end_row
+            self.compressor_state, start_row, end_row, _eval_collector
         )
         if ratio == 4:
             indexer_delta = self._export_pool_delta(
-                self.indexer_state, start_row, end_row
+                self.indexer_state, start_row, end_row, _eval_collector
             )
         else:
             from .cache_delta import DSV4_POOL_DELTA_SCHEMA
@@ -1452,19 +1479,21 @@ class DeepseekV4Cache:
                 "tokens": end,
                 "periodic": bool(end % anchor_interval == 0),
                 "terminal": bool(force_anchor),
-                "local_state": self._copy_delta_tree(local_state),
-                "meta_state": self._copy_delta_tree(local_meta_state),
+                "local_state": self._copy_delta_tree(local_state, _eval_collector),
+                "meta_state": self._copy_delta_tree(
+                    local_meta_state, _eval_collector
+                ),
                 "compressor_buffer_kv": self._copy_delta_tree(
-                    self.compressor_state.get("buffer_kv")
+                    self.compressor_state.get("buffer_kv"), _eval_collector
                 ),
                 "compressor_buffer_gate": self._copy_delta_tree(
-                    self.compressor_state.get("buffer_gate")
+                    self.compressor_state.get("buffer_gate"), _eval_collector
                 ),
                 "indexer_buffer_kv": self._copy_delta_tree(
-                    self.indexer_state.get("buffer_kv")
+                    self.indexer_state.get("buffer_kv"), _eval_collector
                 ),
                 "indexer_buffer_gate": self._copy_delta_tree(
-                    self.indexer_state.get("buffer_gate")
+                    self.indexer_state.get("buffer_gate"), _eval_collector
                 ),
             }
         return {
@@ -2174,9 +2203,7 @@ class Indexer(nn.Module):
                 offset=offset,
                 ratio=self.compress_ratio,
             )
-        scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(mx.float32)
-        scores = mx.maximum(scores, 0) * self.scale
-        scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
+        scores = _dsv4_indexer_scores(q, pooled, weights, float(self.scale))
         return _dsv4_causal_index_topk(
             scores,
             top_k=self.index_topk,
@@ -2389,6 +2416,37 @@ def _dsv4_pool_tile_rows(q: mx.array, value_dim: int) -> int:
     return max(1, rows)
 
 
+def _dsv4_indexer_scores(
+    q: mx.array,
+    pool_tile: mx.array,
+    head_weights: mx.array,
+    scale: float,
+) -> mx.array:
+    """Head-reduced indexer scores [B, L, C] for one pool tile.
+
+    out[b, l, c] = sum_h relu(scale * dot(q[b, h, l, :], pool[b, c, :]))
+                   * head_weights[b, l, h]
+
+    Tries the fused Metal kernel first (env-gated, self-tested, returns None
+    when it declines); otherwise runs the stock op chain, which materializes a
+    [B, H, L, C] fp32 intermediate.
+    """
+    try:
+        from .indexer_scores_kernel import fused_indexer_scores as _fused
+
+        fused = _fused(q, pool_tile, head_weights, float(scale))
+        if fused is not None:
+            return fused
+    except Exception:
+        pass
+    q32 = q.astype(mx.float32)
+    tile32 = pool_tile.astype(mx.float32)
+    weights = head_weights.swapaxes(-1, -2)[..., None].astype(mx.float32)
+    scores = q32 @ tile32[:, None].swapaxes(-1, -2)
+    scores = mx.maximum(scores, 0) * float(scale)
+    return (scores * weights).sum(axis=1)
+
+
 def _dsv4_tiled_index_topk(
     q: mx.array,
     head_weights: mx.array,
@@ -2418,10 +2476,7 @@ def _dsv4_tiled_index_topk(
             # token) once pools promoted to q8. async_eval materializes the
             # accumulator so prior tile buffers free, but never blocks.
             mx.async_eval(best_scores, best_indices)
-        tile32 = tile.astype(mx.float32)
-        scores = q32 @ tile32[:, None].swapaxes(-1, -2)
-        scores = mx.maximum(scores, 0) * float(scale)
-        scores = (scores * weights).sum(axis=1)
+        scores = _dsv4_indexer_scores(q, tile, head_weights, float(scale))
         visible = _dsv4_index_visibility(
             int(scores.shape[0]),
             int(scores.shape[1]),
@@ -3157,7 +3212,15 @@ class Gate(nn.Module):
     def __call__(self, x, input_ids=None):
         # Reference PR #1192: gate logits matmul in fp32 explicitly to avoid
         # bf16 accumulation error across 256 experts × hidden=4096.
-        gates = x.astype(mx.float32) @ self.weight.T.astype(mx.float32)
+        # The transposed fp32 copy is cached: rebuilding it lazily per call
+        # materializes ~4MB × n_layers of cast traffic on every decode token.
+        w_t = getattr(self, "_gate_w_t_f32", None)
+        if w_t is None or getattr(self, "_gate_w_src", None) is not self.weight:
+            w_t = self.weight.T.astype(mx.float32)
+            mx.eval(w_t)
+            self._gate_w_t_f32 = w_t
+            self._gate_w_src = self.weight
+        gates = x.astype(mx.float32) @ w_t
         if self.hash:
             # Hash: deterministic per-token lookup (ignoring gates beyond
             # scoring for weights). Use original scores as weights.
@@ -3785,6 +3848,11 @@ class Model(nn.Module):
 
     def __call__(self, input_ids, cache=None, mask=None):
         h = self.model(input_ids, cache=cache, mask=mask)
+        if h.shape[1] > 1:
+            # Every consumer samples the final position only; projecting a
+            # full prefill chunk through the 129k vocab head is ~2 TFLOP of
+            # discarded logits per 2048-token chunk.
+            h = h[:, -1:, :]
         # CRITICAL: reference does lm_head matmul in FP32
         # (inference/model.py ParallelHead.get_logits: `F.linear(x[:, -1].float(), self.weight)`
         # with self.weight stored as fp32). Accumulating 4096-dim contraction
