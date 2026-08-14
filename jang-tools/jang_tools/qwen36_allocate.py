@@ -133,11 +133,15 @@ def main(argv) -> int:
             m["bits"] = 16          # fp16 passthrough (e.g. in_features 4304)
             m["reason"] = "in_features not divisible by an MLX group size"
         elif g == "attn":
-            m["bits"] = FORCED["attn_min_bits"]; m["reason"] = "coherence anchor (forced)"
+            m["bits"] = max(FORCED["attn_min_bits"], base_bits)
+            m["reason"] = "coherence anchor (forced)"
         elif g == "vision":
-            m["bits"] = FORCED["vision_min_bits"]; m["reason"] = "vision floor (collapse precedent)"
+            # floor, never a ceiling: on 6-bit+ profiles vision keeps base width
+            m["bits"] = max(FORCED["vision_min_bits"], base_bits)
+            m["reason"] = "vision floor (collapse precedent)"
         elif g == "embed":
-            m["bits"] = FORCED["embed_min_bits"]; m["reason"] = "embed/head floor"
+            m["bits"] = max(FORCED["embed_min_bits"], base_bits)
+            m["reason"] = "embed/head floor"
         else:
             m["bits"] = base_bits; m["reason"] = "base"
 
@@ -152,20 +156,31 @@ def main(argv) -> int:
 
     base_size = total_gib()
     # promote highest-score MLP/GDN modules while budget allows
+    ALLOWED = [2, 3, 4, 5, 6, 8]
+
+    def next_width(b):
+        ups = [w for w in ALLOWED if w > b]
+        return ups[0] if ups else None
+
     promoted = 0
     for m in order:
         if m["group"] not in ("mlp", "gdn") or m["bits"] != base_bits:
             continue
-        cost = m["numel"] * 1.0 / 8 / 2**30      # +1 bit
+        up1 = next_width(base_bits)
+        if up1 is None:
+            break                     # base is already 8 — nothing to promote to
+        cost = m["numel"] * (up1 - base_bits) / 8 / 2**30
         if total_gib() + cost > target_gib:
             continue
-        m["bits"] = base_bits + 1
-        m["reason"] = f"promoted +1 (rank {m['rank']}/{len(order)})"
+        m["bits"] = up1
+        m["reason"] = f"promoted {base_bits}->{up1} (rank {m['rank']}/{len(order)})"
         promoted += 1
-        # a second promotion for the very top of the ranking
-        if m["pct"] < 0.10 and total_gib() + cost <= target_gib:
-            m["bits"] = base_bits + 2
-            m["reason"] = f"promoted +2 (top decile, rank {m['rank']})"
+        up2 = next_width(up1)
+        if up2 is not None and m["pct"] < 0.10:
+            cost2 = m["numel"] * (up2 - up1) / 8 / 2**30
+            if total_gib() + cost2 <= target_gib:
+                m["bits"] = up2
+                m["reason"] = f"promoted {base_bits}->{up2} (top decile, rank {m['rank']})"
 
     final = total_gib()
     import collections

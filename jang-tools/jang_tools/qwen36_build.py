@@ -38,6 +38,10 @@ def main(argv) -> int:
         print(__doc__)
         return 1
     src, bitmap_p, out = Path(argv[1]), Path(argv[2]), Path(argv[3])
+    mode = "affine"
+    for i, a in enumerate(argv):
+        if a == "--mode":
+            mode = argv[i + 1]
     plan = json.loads(bitmap_p.read_text())
     gs = plan["group_size"]
     bits_by_path = {m["path"]: m["bits"] for m in plan["modules"]}
@@ -60,7 +64,9 @@ def main(argv) -> int:
             # token embedding the same floor as the untied lm_head rather than
             # leaving it at source precision or guessing low.
             if isinstance(module, nn.Embedding):
-                spec = {"group_size": gs, "bits": 4}
+                # mxfp8 only supports bits=8; affine keeps the 4-bit floor
+                eb = 8 if mode == "mxfp8" else 4
+                spec = {"group_size": gs, "bits": eb, "mode": mode}
                 applied[path] = spec
                 return spec
             skipped.append(path)
@@ -73,14 +79,14 @@ def main(argv) -> int:
             if in_f % gs != 0:
                 skipped.append(path)
                 return False
-        spec = {"group_size": gs, "bits": int(b)}
+        spec = {"group_size": gs, "bits": int(b), "mode": mode}
         applied[path] = spec
         return spec
 
     print("  quantizing with measured bit map ...", flush=True)
     t0 = time.time()
     nn.quantize(model, group_size=gs, bits=plan["base_bits"],
-                mode="affine", class_predicate=predicate)
+                mode=mode, class_predicate=predicate)
     mx.eval(model.parameters())
     print(f"  quantized {len(applied)} modules, {len(skipped)} left at source "
           f"precision ({time.time()-t0:.1f}s)", flush=True)
@@ -93,9 +99,9 @@ def main(argv) -> int:
 
     # config with per-module overrides, in the exact shape mlx_vlm reads back
     cfg = json.loads((src / "config.json").read_text())
-    q = {"group_size": gs, "bits": plan["base_bits"], "mode": "affine"}
+    q = {"group_size": gs, "bits": plan["base_bits"], "mode": mode}
     for path, spec in applied.items():
-        q[path] = dict(spec, mode="affine")
+        q[path] = dict(spec)
     cfg["quantization"] = q
     cfg["quantization_config"] = q
 
