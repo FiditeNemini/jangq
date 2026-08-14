@@ -125,7 +125,15 @@ def stamp(b: Path) -> dict:
         "num_hidden_layers": 1,
         "dedicated_embeddings": False,
         "upstream_method": "qwen3_next_mtp",
+        # Upstream vLLM setting — 2 drafts/step. That is D3 in our notation and
+        # is measured HARMFUL on Apple silicon (Nemotron: D3 = 0.48x, accept
+        # 54%). Do not copy it. The recommendation below is ours.
         "upstream_num_speculative_tokens": 2,
+        "recommended_depth": "D2",
+        "recommended_num_drafts": 1,
+        "depth_note": ("D2 (1 draft) max on Macs. The head is depth-1-trained; "
+                       "recursion (D3+) is out-of-distribution and measured a "
+                       "net loss. Greedy D2 must be token-identical to D1."),
     }
 
     caps = jang.get("capabilities") or cfg.get("capabilities") or {}
