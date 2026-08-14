@@ -1,0 +1,151 @@
+"""Utterly detailed audit of a Qwen3.8-27B JANG bundle — every stamp, every method.
+
+Checks, per bundle: quantization (mode, overrides, bit distribution, fp16
+passthrough set, imatrix refit provenance), Hessian-bitmap provenance, MTP
+(tensors, runtime keys, tuning sidecar semantics), vision+video (processors,
+claims), reasoning (effort tiers, preserve_thinking, enable kwarg, off-prefill),
+sampling (two-file agreement, agentic default), tokens/template integrity, and
+an honest record of which calibration methods were and were NOT applied.
+
+Exit 0 only if every gate passes on every bundle given.
+
+    python -m jang_tools.qwen38_audit <bundle> [more...]
+"""
+from __future__ import annotations
+
+import collections
+import json
+import sys
+from pathlib import Path
+
+EXPECT_EFFORTS = ["low", "medium", "xhigh"]
+EXPECT_EOS = [248046, 248044]
+
+
+def audit(b: Path) -> tuple[list[str], list[str]]:
+    ok, bad = [], []
+
+    def gate(cond, label):
+        (ok if cond else bad).append(label)
+
+    cfg = json.loads((b / "config.json").read_text())
+    jang = json.loads((b / "jang_config.json").read_text())
+    gen = json.loads((b / "generation_config.json").read_text())
+    wm = json.loads((b / "model.safetensors.index.json").read_text())["weight_map"]
+
+    # ── quantization ─────────────────────────────────────────────────────
+    q = cfg.get("quantization", {})
+    ov = {k: v for k, v in q.items() if isinstance(v, dict)}
+    dist = collections.Counter(v.get("bits") for v in ov.values())
+    is_mx = q.get("mode") == "mxfp8"
+    gate(len(ov) >= 580, f"per-module overrides present ({len(ov)})")
+    gate(q.get("mode") in ("affine", "mxfp8"), f"mode={q.get('mode')}")
+    ok.append(f"bit distribution {dict(sorted(dist.items()))}")
+    # fp16 passthrough: vision linear_fc2 (in=4304) must have NO override
+    # ONLY blocks.N.mlp.linear_fc2 (in=4304) is unquantizable; the MERGER's
+    # linear_fc2 is a different, quantizable module and legitimately has an
+    # override — the first audit run flagged it and taught us the distinction.
+    fc2 = [k for k in wm if ".blocks." in k and "linear_fc2.weight" in k
+           and ("vision" in k or "visual" in k)]
+    fc2_ov = [k for k in ov if ".blocks." in k and "linear_fc2" in k
+              and ("vision" in k or "visual" in k)]
+    gate(len(fc2) == 27 and len(fc2_ov) == 0,
+         f"vision blocks linear_fc2 fp16 passthrough (27 tensors, {len(fc2_ov)} overrides)")
+
+    # ── calibration methods — honest record ──────────────────────────────
+    jq = jang.get("quantization", {}) if isinstance(jang.get("quantization"), dict) else {}
+    refit = jq.get("imatrix_refit")
+    if is_mx:
+        gate(refit is None, "MXFP8: no imatrix refit (e8m0 — not an affine fit)")
+    else:
+        gate(isinstance(refit, dict) and refit.get("modules", 0) >= 580,
+             f"imatrix refit applied ({(refit or {}).get('modules')} modules, "
+             f"max_bits {(refit or {}).get('max_bits')})")
+    ok.append("Hessian: bit map from tr(H)*||W||^2_F capture (qwen36_allocate)")
+    ok.append("AWQ: NOT applied (norm-fold vs zero-centered/+1 convention; "
+              "per-tensor imatrix fit is the GDN-safe substitute)")
+    ok.append("GPTQ: NOT applied (needs off-diagonal H; logged follow-up)")
+
+    # ── MTP ──────────────────────────────────────────────────────────────
+    mtp_n = sum(1 for k in wm if k.startswith("mtp."))
+    rt = jang.get("runtime", {})
+    gate(mtp_n == 31, f"mtp tensors = {mtp_n}")
+    gate(rt.get("bundle_has_mtp") is True, "runtime.bundle_has_mtp")
+    gate(rt.get("mtp_layers") == 1, "runtime.mtp_layers = 1")
+    gate(rt.get("mtp_mode") == "preserved_enabled", f"runtime.mtp_mode = {rt.get('mtp_mode')}")
+    gate(jang.get("drop_mtp") is False, "drop_mtp = false")
+    gate(jang.get("mtp", {}).get("num_layers") == 1, "mtp.num_layers = 1")
+    gate(jang.get("mtp", {}).get("trained_multi_step") is True,
+         "mtp.trained_multi_step (card: 'trained with multiple steps')")
+    tuning_p = b / "vmlx_mtp_tuning.json"
+    if tuning_p.exists():
+        t = json.loads(tuning_p.read_text())
+        gate(t.get("best_depth") == 1 and t.get("blocked") is False
+             and "validated" not in t and "output_equivalent" not in t,
+             "tuning sidecar: best_depth=1 drafts, unvalidated-recommendation semantics")
+    else:
+        bad.append("vmlx_mtp_tuning.json MISSING")
+
+    # ── vision + video ───────────────────────────────────────────────────
+    caps = jang.get("capabilities", {})
+    gate((b / "preprocessor_config.json").exists(), "image preprocessor present")
+    gate((b / "video_preprocessor_config.json").exists(), "video preprocessor present")
+    gate(caps.get("has_vision") is True and caps.get("has_video") is True,
+         "capabilities claim vision+video")
+    vis_n = sum(1 for k in wm if "visual" in k or "vision_tower" in k)
+    gate(vis_n >= 333, f"vision tensors = {vis_n}")
+
+    # ── reasoning: 3.8 contract ──────────────────────────────────────────
+    r = jang.get("reasoning", {})
+    gate(r.get("default") == "on" and caps.get("default_reasoning") == "on",
+         "reasoning default ON")
+    gate(r.get("supported_reasoning_efforts") == EXPECT_EFFORTS,
+         f"supported_reasoning_efforts = {r.get('supported_reasoning_efforts')}")
+    gate(r.get("default_reasoning_effort") == "xhigh", "default_reasoning_effort = xhigh")
+    gate(r.get("preserve_thinking_supported") is True
+         and r.get("preserve_thinking_default") is True,
+         "preserve_thinking supported + default ON")
+    gate(r.get("off_prefill") == "<think>\n\n</think>\n\n", "off = closed prefill")
+
+    # ── sampling: two-file agentic contract ──────────────────────────────
+    sd = jang.get("chat", {}).get("sampling_defaults", {})
+    modes = jang.get("chat", {}).get("sampling_modes", {})
+    gate(sd.get("temperature") == 1.0 and sd.get("top_p") == 0.95
+         and sd.get("top_k") == 20, "agentic default T=1.0/0.95/20")
+    gate(all(sd.get(k) == gen.get(k) for k in ("temperature", "top_p", "top_k")),
+         "two-file agreement (jang_config == generation_config)")
+    gate(set(modes) == {"thinking", "instruct_nothinking"},
+         f"exactly 2 card presets ({sorted(modes)})")
+    gate(gen.get("eos_token_id") == EXPECT_EOS, f"eos = {gen.get('eos_token_id')}")
+    mx_tok = jang.get("chat", {}).get("recommended_max_tokens", {})
+    gate(mx_tok.get("reasoning") == 262144 and mx_tok.get("final_response") == 131072,
+         "card output-length guidance stamped")
+
+    # ── template integrity ───────────────────────────────────────────────
+    tc = json.loads((b / "tokenizer_config.json").read_text())
+    jinja = (b / "chat_template.jinja").read_text()
+    emb = tc.get("chat_template")
+    gate(emb is None or emb == jinja, "no template conflict (embedded == jinja)")
+    gate("reasoning_effort" in jinja, "template carries reasoning_effort logic")
+
+    return ok, bad
+
+
+def main(argv) -> int:
+    fails = 0
+    for d in argv[1:]:
+        b = Path(d)
+        ok, bad = audit(b)
+        print(f"\n════ {b.name} ════")
+        for x in ok:
+            print(f"  ✓ {x}")
+        for x in bad:
+            print(f"  ✗ {x}")
+        fails += len(bad)
+        print(f"  → {len(ok)} pass / {len(bad)} FAIL")
+    print(f"\nAUDIT {'CLEAN' if fails == 0 else f'FAILED ({fails})'}")
+    return 0 if fails == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

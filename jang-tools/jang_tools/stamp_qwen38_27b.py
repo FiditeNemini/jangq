@@ -1,0 +1,247 @@
+"""Stamp the Qwen3.6-27B bundle contract (vision + video + MTP + reasoning).
+
+Everything here is taken from the model card and `generation_config.json` of
+`Qwen/Qwen3.8-27B`, verified against the downloaded source on 2026-08-14.
+
+SAMPLING — the card documents **three** modes, not one. We stamp all three and
+make the thinking/general one the default, because that is what upstream's
+`generation_config.json` carries:
+
+    thinking / general   temp 1.0  top_p 0.95  top_k 20  min_p 0  presence 0.0
+    thinking / coding    temp 0.6  top_p 0.95  top_k 20  min_p 0  presence 0.0
+    instruct (no-think)  temp 0.7  top_p 0.80  top_k 20  min_p 0  presence 1.5
+
+repetition_penalty is 1.0 in all three. Shipping only one number would lose the
+coding preset, which is the one that matters most for agentic use — the same
+class of loss as the Laguna XS `top_k=20` incident
+(`feedback_sampling_defaults_two_file_contract`).
+
+REASONING — thinking is **ON by default**. Verified empirically: the generation
+prompt with no kwarg is byte-identical to `enable_thinking=True` and ends
+`<|im_start|>assistant\\n<think>\\n`; `enable_thinking=False` instead prefills a
+*closed* block `<think>\\n\\n</think>\\n\\n`. So reasoning-off is a prefill, not
+an omission. Reasoning parser upstream is `qwen3`.
+
+TOOLS — `qwen3_coder`. mlx_lm already infers this correctly from the template
+(it contains the `<tool_call>\\n<function=` literal), so unlike the LFM2.5 line
+no detection hint is needed. We still stamp it explicitly.
+
+MODALITY — vision **and video**: the source ships both
+`preprocessor_config.json` and `video_preprocessor_config.json`, and carries 333
+`model.visual.*` tensors. No audio.
+
+MTP — 15 real `mtp.*` tensors (`mtp.fc` + one transformer block), shared
+embeddings (`mtp_use_dedicated_embeddings: False`). Upstream drives it as
+`qwen3_next_mtp` with 2 speculative tokens. `runtime_available` stays False
+until an MLX runtime actually decodes with it.
+
+    python -m jang_tools.stamp_qwen38_27b <bundle_dir> [more...]
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+# Qwen3.8's card documents exactly TWO presets (unlike 3.6's three — the
+# coding preset does not exist on the 3.8 card; do not carry it over):
+#   Thinking:  temp 1.0  top_p 0.95  top_k 20  min_p 0  presence 0.0
+#   Instruct:  temp 0.7  top_p 0.80  top_k 20  min_p 0  presence 1.5
+SAMPLING_MODES = {
+    "thinking": {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
+                 "min_p": 0.0, "presence_penalty": 0.0,
+                 "repetition_penalty": 1.0},
+    "instruct_nothinking": {"temperature": 0.7, "top_p": 0.80, "top_k": 20,
+                            "min_p": 0.0, "presence_penalty": 1.5,
+                            "repetition_penalty": 1.0},
+}
+DEFAULT_MODE = "thinking"
+
+EOS_IDS = [248046, 248044]
+BOS_ID = 248044
+PAD_ID = 248044
+SOURCE_TAG = "vendor_card+generation_config_2026-08-14"
+
+
+def stamp(b: Path) -> dict:
+    cfg_p, jang_p, gen_p = (b / "config.json", b / "jang_config.json",
+                            b / "generation_config.json")
+    cfg = json.loads(cfg_p.read_text())
+    jang = json.loads(jang_p.read_text()) if jang_p.exists() else {}
+    gen = json.loads(gen_p.read_text()) if gen_p.exists() else {}
+
+    d = SAMPLING_MODES[DEFAULT_MODE]
+
+    # ── two-file sampling contract ────────────────────────────────────────
+    gen.update({
+        "do_sample": True,
+        "temperature": d["temperature"], "top_p": d["top_p"], "top_k": d["top_k"],
+        "repetition_penalty": d["repetition_penalty"],
+        "eos_token_id": EOS_IDS, "bos_token_id": BOS_ID, "pad_token_id": PAD_ID,
+    })
+    chat = jang.get("chat") or {}
+    chat["sampling_defaults"] = dict(SAMPLING_MODES[DEFAULT_MODE],
+                                     source=SOURCE_TAG, mode=DEFAULT_MODE)
+    chat["sampling_modes"] = SAMPLING_MODES
+    chat["stop_token_ids"] = EOS_IDS
+    # Card "Best Practices": within 1M ctx allocate up to 262144 reasoning
+    # tokens and 131072 final-response tokens for agentic work.
+    chat["recommended_max_tokens"] = {"reasoning": 262144, "final_response": 131072}
+    chat["context_length"] = {"native": 262144, "extensible": 1000000}
+    jang["chat"] = chat
+
+    # ── reasoning ─────────────────────────────────────────────────────────
+    jang["reasoning"] = {
+        "supported": True,
+        "parser": "qwen3",
+        "default": "on",
+        "think_in_template": True,
+        "enable_kwarg": "enable_thinking",
+        "off_is_prefilled_closed_block": True,
+        "off_prefill": "<think>\n\n</think>\n\n",
+        # SETTLED KEY NAMES (2026-08-14, agreed with the vmlx-side agent):
+        # `supported_reasoning_efforts` mirrors the engine's own identifier so
+        # wiring is a straight read — the panel must constrain to THESE values
+        # (no `high`, no `max`; the template raises on anything else).
+        "supported_reasoning_efforts": ["low", "medium", "xhigh"],
+        "default_reasoning_effort": "xhigh",
+        # transport: the chat template consumes `reasoning_effort` as a
+        # template kwarg; API layers surface it as a top-level field and map
+        # it into chat_template_kwargs.
+        "reasoning_effort_transport": "chat_template_kwarg",
+        "preserve_thinking_supported": True,
+        "preserve_thinking_default": True,
+        "preserve_thinking_transport": "chat_template_kwarg",
+        "note": ("Thinking is ON by default; disabling prefills a CLOSED think "
+                 "block. NEW in 3.8: reasoning_effort tiers xhigh (default) / "
+                 "medium / low — template raises on any other value. "
+                 "preserve_thinking is ON BY DEFAULT (verified empirically: "
+                 "no-kwarg render keeps history <think> blocks) — the OPPOSITE "
+                 "of 3.6-style truncation; stable history improves prefix/KV "
+                 "cache reuse and agent decision consistency."),
+    }
+
+    jang["tools"] = {"supported": True, "parser": "qwen3_coder",
+                     "dialect": "xml_function",
+                     "mlx_lm_autodetected": True}
+
+    # ── modality: weight-gated ────────────────────────────────────────────
+    jang["vision"] = {
+        "supported": True,
+        "video_supported": (b / "video_preprocessor_config.json").exists(),
+        "tower": "qwen3_5 ViT (27 layers, hidden 1152)",
+        "processor": "preprocessor_config.json",
+        "video_processor": "video_preprocessor_config.json",
+    }
+
+    idx = b / "model.safetensors.index.json"
+    mtp_n = 0
+    if idx.exists():
+        wm = json.loads(idx.read_text()).get("weight_map", {})
+        mtp_n = sum(1 for k in wm if k.startswith("mtp."))
+    # ── MTP: stamp the keys the RUNTIMES actually read ────────────────────
+    # Verified against both runtimes (2026-08-13):
+    #   vmlx  : native_mtp.py reads jang_config.runtime.mtp_layers,
+    #           jang_config.mtp.num_layers, jang_config.drop_mtp, and the
+    #           vmlx_mtp_tuning.json sidecar (depth = NUMBER OF DRAFTS,
+    #           default 3, clamp 1..3).
+    #   swift : JangLoader reads jang_config.runtime.{bundle_has_mtp,
+    #           mtp_layers, mtp_mode}; NativeMTPTuning reads the same flat
+    #           snake_case sidecar and refuses best_depth unless
+    #           validated+output_equivalent+measured tok/s are present.
+    # NOTATION: draft count is the only unambiguous unit. vmlx "depth" and
+    # vLLM num_speculative_tokens both count DRAFTS; the kit docs' D<n>
+    # counts tokens/cycle (kit D2 == 1 draft == vmlx depth 1).
+    jang["drop_mtp"] = False
+    runtime = jang.get("runtime") or {}
+    runtime.update({
+        "bundle_has_mtp": mtp_n > 0,
+        "mtp_layers": 1 if mtp_n else 0,
+        "mtp_mode": "preserved_enabled" if mtp_n else "none",
+        "mtp_num_speculative_tokens": 2,   # upstream serving config (drafts)
+        "mtp_status": ("MTP head preserved for native speculative decode; "
+                       "recommended 1 draft/step on Apple silicon (unmeasured "
+                       "on this artifact — run a depth sweep to validate)."),
+    })
+    jang["runtime"] = runtime
+    jang["mtp"] = {
+        "num_layers": 1 if mtp_n else 0,   # the key vmlx native_mtp.py reads
+        "artifact_available": mtp_n > 0,
+        "tensor_count": mtp_n,
+        "runtime_available": False,
+        "dedicated_embeddings": False,
+        "upstream_method": "qwen3_next_mtp",
+        "upstream_num_speculative_tokens": 2,   # DRAFTS (== kit D3)
+        "trained_multi_step": True,   # card: "MTP: trained with multiple steps"
+        "recommended_num_drafts": 1,            # == kit D2 == vmlx depth 1
+        "notation": ("Draft count is the unambiguous unit. vmlx native-MTP "
+                     "'depth' and vLLM num_speculative_tokens both count "
+                     "DRAFTS; kit docs' D<n> counts tokens/cycle "
+                     "(kit D2 == 1 draft == vmlx depth 1)."),
+    }
+
+    # vmlx_mtp_tuning.json — the file BOTH runtimes consult for launch depth.
+    # Without it vmlx defaults to 3 drafts. Top-level best_depth is vmlx's
+    # ungated third candidate; Swift decodes the same flat file but will not
+    # use best_depth until validated/output_equivalent + tok/s are measured
+    # in (correct: this stamp is a recommendation, not a measurement).
+    if mtp_n:
+        tuning_p = b / "vmlx_mtp_tuning.json"
+        if not tuning_p.exists():   # never clobber a real measured sweep
+            q = cfg.get("quantization", {})
+            tuning_p.write_text(json.dumps({
+                "best_depth": 1,
+                "blocked": False,
+                "model_types": ["qwen3_5"],
+                "artifact": b.name,
+                "quantization_mode": q.get("mode", "affine"),
+                "quantization_bits": q.get("bits"),
+                "note": ("Conservative UNMEASURED default: 1 draft/step. "
+                         "NOTE: the 3.8 card states MTP was trained with "
+                         "MULTIPLE steps, so 2-3 drafts may hold accept rate "
+                         "on this model — a depth sweep is worth running. "
+                         "Write validated, output_equivalent, baseline_tok_s, "
+                         "best_tok_s, speedup_vs_baseline to let Swift honor "
+                         "best_depth."),
+                "reason": "stamped by stamp_qwen38_27b; recommendation, not measurement",
+            }, indent=2) + "\n")
+
+    caps = jang.get("capabilities") or cfg.get("capabilities") or {}
+    caps.update({
+        "has_vision": True,
+        "has_video": bool(jang["vision"]["video_supported"]),
+        "has_audio": False,
+        "modality": "video" if jang["vision"]["video_supported"] else "vision",
+        "modalities": {"text": True, "vision": True,
+                       "video": bool(jang["vision"]["video_supported"]),
+                       "audio": False},
+        "supports_tools": True, "tool_parser": "qwen3_coder",
+        "supports_thinking": True, "default_reasoning": "on",
+        "think_in_template": True, "reasoning_parser": "qwen3",
+        "family": "qwen3_5", "cache_type": "hybrid",
+    })
+    jang["capabilities"] = caps
+    cfg["capabilities"] = caps
+
+    gen_p.write_text(json.dumps(gen, indent=2) + "\n")
+    jang_p.write_text(json.dumps(jang, indent=2) + "\n")
+    cfg_p.write_text(json.dumps(cfg, indent=2) + "\n")
+    return {"bundle": b.name, "mtp": mtp_n,
+            "video": jang["vision"]["video_supported"]}
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__)
+        return 1
+    d = SAMPLING_MODES[DEFAULT_MODE]
+    for x in argv[1:]:
+        r = stamp(Path(x).expanduser())
+        print(f"  stamped {r['bundle']:34s} T={d['temperature']} top_p={d['top_p']} "
+              f"top_k={d['top_k']} eos={EOS_IDS} reasoning=on vision=True "
+              f"video={r['video']} mtp={r['mtp']} (+3 sampling modes)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
