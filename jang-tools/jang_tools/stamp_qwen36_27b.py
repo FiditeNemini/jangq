@@ -118,23 +118,68 @@ def stamp(b: Path) -> dict:
     if idx.exists():
         wm = json.loads(idx.read_text()).get("weight_map", {})
         mtp_n = sum(1 for k in wm if k.startswith("mtp."))
+    # ── MTP: stamp the keys the RUNTIMES actually read ────────────────────
+    # Verified against both runtimes (2026-08-13):
+    #   vmlx  : native_mtp.py reads jang_config.runtime.mtp_layers,
+    #           jang_config.mtp.num_layers, jang_config.drop_mtp, and the
+    #           vmlx_mtp_tuning.json sidecar (depth = NUMBER OF DRAFTS,
+    #           default 3, clamp 1..3).
+    #   swift : JangLoader reads jang_config.runtime.{bundle_has_mtp,
+    #           mtp_layers, mtp_mode}; NativeMTPTuning reads the same flat
+    #           snake_case sidecar and refuses best_depth unless
+    #           validated+output_equivalent+measured tok/s are present.
+    # NOTATION: draft count is the only unambiguous unit. vmlx "depth" and
+    # vLLM num_speculative_tokens both count DRAFTS; the kit docs' D<n>
+    # counts tokens/cycle (kit D2 == 1 draft == vmlx depth 1).
+    jang["drop_mtp"] = False
+    runtime = jang.get("runtime") or {}
+    runtime.update({
+        "bundle_has_mtp": mtp_n > 0,
+        "mtp_layers": 1 if mtp_n else 0,
+        "mtp_mode": "preserved_enabled" if mtp_n else "none",
+        "mtp_num_speculative_tokens": 2,   # upstream serving config (drafts)
+        "mtp_status": ("MTP head preserved for native speculative decode; "
+                       "recommended 1 draft/step on Apple silicon (unmeasured "
+                       "on this artifact — run a depth sweep to validate)."),
+    })
+    jang["runtime"] = runtime
     jang["mtp"] = {
+        "num_layers": 1 if mtp_n else 0,   # the key vmlx native_mtp.py reads
         "artifact_available": mtp_n > 0,
         "tensor_count": mtp_n,
         "runtime_available": False,
-        "num_hidden_layers": 1,
         "dedicated_embeddings": False,
         "upstream_method": "qwen3_next_mtp",
-        # Upstream vLLM setting — 2 drafts/step. That is D3 in our notation and
-        # is measured HARMFUL on Apple silicon (Nemotron: D3 = 0.48x, accept
-        # 54%). Do not copy it. The recommendation below is ours.
-        "upstream_num_speculative_tokens": 2,
-        "recommended_depth": "D2",
-        "recommended_num_drafts": 1,
-        "depth_note": ("D2 (1 draft) max on Macs. The head is depth-1-trained; "
-                       "recursion (D3+) is out-of-distribution and measured a "
-                       "net loss. Greedy D2 must be token-identical to D1."),
+        "upstream_num_speculative_tokens": 2,   # DRAFTS (== kit D3)
+        "recommended_num_drafts": 1,            # == kit D2 == vmlx depth 1
+        "notation": ("Draft count is the unambiguous unit. vmlx native-MTP "
+                     "'depth' and vLLM num_speculative_tokens both count "
+                     "DRAFTS; kit docs' D<n> counts tokens/cycle "
+                     "(kit D2 == 1 draft == vmlx depth 1)."),
     }
+
+    # vmlx_mtp_tuning.json — the file BOTH runtimes consult for launch depth.
+    # Without it vmlx defaults to 3 drafts. Top-level best_depth is vmlx's
+    # ungated third candidate; Swift decodes the same flat file but will not
+    # use best_depth until validated/output_equivalent + tok/s are measured
+    # in (correct: this stamp is a recommendation, not a measurement).
+    if mtp_n:
+        tuning_p = b / "vmlx_mtp_tuning.json"
+        if not tuning_p.exists():   # never clobber a real measured sweep
+            q = cfg.get("quantization", {})
+            tuning_p.write_text(json.dumps({
+                "best_depth": 1,
+                "blocked": False,
+                "model_types": ["qwen3_5"],
+                "artifact": b.name,
+                "quantization_mode": q.get("mode", "affine"),
+                "quantization_bits": q.get("bits"),
+                "note": ("Conservative UNMEASURED default: 1 draft/step. "
+                         "Run a depth sweep and write validated, "
+                         "output_equivalent, baseline_tok_s, best_tok_s, "
+                         "speedup_vs_baseline to let Swift honor best_depth."),
+                "reason": "stamped by stamp_qwen36_27b; recommendation, not measurement",
+            }, indent=2) + "\n")
 
     caps = jang.get("capabilities") or cfg.get("capabilities") or {}
     caps.update({
